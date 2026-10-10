@@ -135,7 +135,8 @@ MULTI_STEP_SYSTEM_PROMPT_TEMPLATE = PromptDefinition(
 OPENING_TASK_TEMPLATE = PromptDefinition(
     "OPENING_TASK_TEMPLATE", "Opens the call and identifies who answered.", "phone agent",
     "builder/workflow.py — opening",
-    "Your first words in this call, whatever the customer said, and only once: {introduction}\nThe person to ask for is {address}. Use these words when you address them.\n"
+    "Your first words in this call, whatever the customer said, and only once: {introduction}\n"
+    "If you already gave the introduction in this call, do not repeat it: answer briefly and ask the question again.\nThe person to ask for is {address}. Use these words when you address them.\n"
     "Ask: {question}\n"
     "If they only greet you or check the line (for example \"Hello?\"), that is not an answer: reply briefly and ask the question again.\n"
     "If unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
@@ -181,35 +182,36 @@ IDENTITY_TASK_TEMPLATE = PromptDefinition(
 NEGOTIATION_TASK_TEMPLATE = PromptDefinition(
     "NEGOTIATION_TASK_TEMPLATE", "Discusses the account and obtains a date and an amount per product.", "phone agent",
     "builder/workflow.py — negotiate",
-    "Today is {{today_text}}. Account facts, computed by the bank system:\n{{products_facts}}\n"
-    "Use only these facts; never compute a date or an amount yourself. Never read an internal id or the raw "
-    "account result aloud; name each product as the account facts say, never by a list number.\n"
+    "Calendar: {{calendar_text}}\nAccount facts: {{products_facts}}\n"
     "Last offer verdict: {{offer_verdict}}. Last offer check: {{offer_message}}\n"
     "Offers accepted so far: {{offers_summary}}\n"
-    "The bank system checks every date and amount the customer names. Verdict neither ok nor none: say the last "
-    "offer check message first. Verdict none: propose or ask, but never say whether a date or an amount is allowed. "
-    "Never state a limit yourself; say one only when the last offer check names it. Never mention internal step, "
+    "Use only these dates and amounts; never work out a date or an amount yourself. Name each product as the "
+    "account facts do, never by a list number. Never read an internal id aloud. Never mention internal step, "
     "tool or variable names, and never write code.\n"
+    "The bank system checks every date and amount the customer names and has already said the last offer check to "
+    "the customer: do not repeat it; answer the customer. When it names a date or an amount, offer exactly that. "
+    "Verdict none: propose or ask, but never say whether a date or an amount is allowed. Never state a limit "
+    "yourself; say one only when the last offer check names it.\n"
     "A checked offer is not recorded: never say a payment or promise was recorded here.\n"
-    "Get a concrete date and amount. When the last offer check names a date or an amount, offer exactly that. "
-    "If the customer names only a date, the amount you last proposed applies. Not paying on one date is not a "
-    "refusal: ask for another date.\nRules:\n{rules}",
+    "Get a concrete date and amount. If the customer names only a date, the amount you last proposed applies. "
+    "Not paying on one date is not a refusal: ask for another date.\nRules:\n{rules}",
     ("{rules}",),
 )
 OFFER_VERDICT_MESSAGES = PromptDefinition(
-    "OFFER_VERDICT_MESSAGES", "One sentence per offer-check verdict, read by the agent in the negotiate step.",
-    "phone agent (via offer_message)", "builder/offer_check.py — check_offer code step",
-    "ok: The offer for the [product] is valid and noted.\n"
-    "more: Now ask about the next product.\n"
-    "missing: The date was not clear. Ask the customer for the exact date.\n"
-    "amount_missing: The amount was not clear. Propose the amount again yourself: the full amount due, or the minimum if you offered it.\n"
-    "product_unknown: It is not clear which product the offer is for. Ask which product they mean.\n"
-    "date_too_early: That date is before the earliest allowed date. Offer [date] instead.\n"
-    "date_too_late: That date is after the latest date that can be recorded for this product. Offer [date], the latest possible date.\n"
-    "date_not_business_day: That date is not a business day. Offer [date], the next possible business day.\n"
+    "OFFER_VERDICT_MESSAGES", "One customer-facing sentence per offer-check verdict, spoken word for word after the check.",
+    "customer (fixed spoken line via offer_message)", "builder/offer_check.py — check_offer; builder/workflow.py — offer_say",
+    # F-053: spoken word for word to the customer by a fixed line after the check.
+    "ok: Thank you, that works for the [product].\n"
+    "more: Now let us look at the [next]. The amount due is [next_amount]. Could you pay [next_amount]?\n"
+    "missing: Sorry, I did not catch the date. On which day would you like to pay?\n"
+    "amount_missing: Could you pay [amount]?\n"
+    "product_unknown: Which of your products is this payment for?\n"
+    "date_too_early: I can only record a date from [date]. Would [date] work for you?\n"
+    "date_too_late: The latest date I can record for the [product] is [date]. Would [date] work for you?\n"
+    "date_not_business_day: That day is not a business day. The next possible day is [date]. Would that work for you?\n"
     "date_ambiguous: Do you mean [date]?\n"
-    "amount_too_low: That amount is below the minimum for this product. Offer [amount] instead.\n"
-    "amount_too_high: That amount is more than the amount due. Offer [amount].",
+    "amount_too_low: The lowest amount I can record for the [product] is [amount]. Could you pay [amount]?\n"
+    "amount_too_high: The amount due on the [product] is [amount]. Could you pay [amount]?",
 )
 CONFIRM_TASK_TEMPLATE = PromptDefinition(
     "CONFIRM_TASK_TEMPLATE", "Reads back and records a confirmed arrangement.", "phone agent",
@@ -224,6 +226,11 @@ ACCOUNT_WAIT_LINE = PromptDefinition(
     "ACCOUNT_WAIT_LINE", "Line said after identity passed, before the account lookup, when the spec gives none (F-043, F-050).",
     "phone agent (in the identity step prompt)", "builder/workflow.py — identity step, {wait_line}",
     "Thank you. One moment while I check your account.",
+)
+REVISE_ASK_LINE = PromptDefinition(
+    "REVISE_ASK_LINE", "Fixed line when the customer wants to change the read-back (F-053).",
+    "phone agent (fixed spoken line)", "builder/workflow.py — revise_ask",
+    "Of course. Which date or amount would you like instead?",
 )
 CLOSING_FALLBACK_SAY = PromptDefinition(
     "CLOSING_FALLBACK_SAY", "Spoken goodbye when the matched outcome row has an empty closing sentence.", "phone agent (fixed spoken line)",
@@ -244,6 +251,49 @@ SPECIAL_SAY_FALLBACK = PromptDefinition(
     "Spoken instead of a special path's line when the spec's line is an instruction to the agent (F-047).",
     "phone agent (fixed spoken line)", "builder/workflow.py — special path say fallback",
     "Thank you for letting me know.",
+)
+CALLBACK_COLLECT_RULE = PromptDefinition(
+    "CALLBACK_COLLECT_RULE",
+    "Added to the third-party step when the program books callbacks itself (F-055 review finding 3).",
+    "phone agent", "builder/callback.py — third_party and third_party_ask task",
+    "To arrange a callback, get the day and the time of day when the customer can be reached, in the person's "
+    "own words; if they give only one of them, ask for the other. Never say a callback is booked or arranged: "
+    "the program books it and the closing tells them.",
+)
+CALLBACK_DAY_DESCRIPTION = PromptDefinition(
+    "CALLBACK_DAY_DESCRIPTION",
+    "Extraction field in the third-party step: the person's words for the callback day (F-055).",
+    "phone agent (extraction)", "builder/callback.py — third_party extraction callback_day_text",
+    "Copy the words for the day when the customer can be called back from the person's last message, unchanged "
+    "(for example \"tomorrow\", \"Friday\", \"the 15th\"). Do not resolve relative dates with the system clock. "
+    "Empty if they name no day.",
+)
+CALLBACK_TIME_DESCRIPTION = PromptDefinition(
+    "CALLBACK_TIME_DESCRIPTION",
+    "Extraction field in the third-party step: the person's words for the callback time (F-055).",
+    "phone agent (extraction)", "builder/callback.py — third_party extraction callback_time_text",
+    "Copy the words for the time of day when the customer can be called back from the person's last message, "
+    "unchanged, with any morning/afternoon/evening or am/pm words (for example \"around eleven in the morning\", "
+    "\"3pm\", \"14:30\"). Empty if they name no time.",
+)
+CALLBACK_OUTSIDE_SAY = PromptDefinition(
+    "CALLBACK_OUTSIDE_SAY",
+    "Spoken when the callback time the person gave is outside the callback window (F-055); code fills {window}.",
+    "phone agent (fixed spoken line)", "builder/callback.py — third_party_ask entry line",
+    "I am sorry, we cannot call back then. We can call back {window}. What time would suit?",
+    ("{window}",),
+)
+CALLBACK_UNCLEAR_SAY = PromptDefinition(
+    "CALLBACK_UNCLEAR_SAY",
+    "Spoken when the callback day or time could not be understood (F-055).",
+    "phone agent (fixed spoken line)", "builder/callback.py — third_party_ask entry line",
+    "Sorry, could you tell me the day and the time when we can call back?",
+)
+CALLBACK_TIME_ASK_SAY = PromptDefinition(
+    "CALLBACK_TIME_ASK_SAY",
+    "Spoken when the person named a callback day but no time; the day is kept for the next turn (F-055).",
+    "phone agent (fixed spoken line)", "builder/callback.py — third_party_ask entry line",
+    "Thank you. At what time of day can we call back?",
 )
 SPECIAL_ASK_PHRASED_TEMPLATE = PromptDefinition(
     "SPECIAL_ASK_PHRASED_TEMPLATE",
@@ -369,9 +419,20 @@ EXTRACT_OPENING_IDENTITY_TASK = PromptDefinition(
     "If the documents do not name this case, its source is \"derived: <why this row>\" instead of an excerpt.)\n"
     " },\n"
     ' "third_party": {"rules": [RULE], "intents": [{"value": "snake_case code", "meaning": "...", '
-    '"route": "stay | end", "outcome": "...", "reason": "...", "source": "..."}]}\n'
+    '"route": "stay | end", "outcome": "...", "reason": "...", "source": "..."}], '
+    '"callback_window": {"days_ahead": integer, "day_unit": "business | calendar", "earliest_time": "HH:MM", '
+    '"latest_time": "HH:MM", "after_now": true | false, "max_outside_asks": integer, '
+    '"outside_close_value": "intent value with route end", "source": "excerpt"}}\n'
     "   (what the person who is not the customer may want. route end: the call closes with that outcome and reason, "
-    "with no tool. A callback that is booked with a tool keeps route stay: the program closes it from the tool result.)\n"
+    "with no tool. A callback that is booked with a tool keeps route stay: the program closes it from the tool result.\n"
+    "   callback_window: when a callback may be booked, copied from the documents; omit it when they set no limit. "
+    "days_ahead: how many days after today are allowed (0 = today only; \"today or the next business day\" = 1 with "
+    "day_unit business). earliest_time/latest_time: the allowed time of day, both included, 24-hour. after_now: true "
+    "when the time must be later than the call's current time. max_outside_asks: how many times the agent asks for "
+    "another time after an offer outside the window (0 if the documents do not say). outside_close_value: the intent "
+    "value (route end) to close with when the next offer is still outside or no clear time is given; required "
+    "with a window (if the documents name no row for it, the closest no-callback value). "
+    "The program resolves and checks the person's day and time in code; the model never types the date.)\n"
     ' "identity": {\n'
     '  "rules": [RULE] (limits, refusal handling, what never to do before all questions pass),\n'
     '  "questions": [{"field": "value of the identity tool\'s question selector enum", "ask": RULE, '
@@ -605,11 +666,18 @@ PROMPTS = (
     OFFER_VERDICT_MESSAGES,
     CONFIRM_TASK_TEMPLATE,
     ACCOUNT_WAIT_LINE,
+    REVISE_ASK_LINE,
     CLOSING_FALLBACK_SAY,
     SPECIAL_PATH_TASK_TEMPLATE,
     SPECIAL_ASK_TASK_TEMPLATE,
     SPECIAL_SAY_FALLBACK,
     SPECIAL_ASK_PHRASED_TEMPLATE,
+    CALLBACK_COLLECT_RULE,
+    CALLBACK_DAY_DESCRIPTION,
+    CALLBACK_TIME_DESCRIPTION,
+    CALLBACK_OUTSIDE_SAY,
+    CALLBACK_UNCLEAR_SAY,
+    CALLBACK_TIME_ASK_SAY,
     CONVERSATION_NO_TOOL_RULE,
     CONVERSATION_TOOL_RULE_TEMPLATE,
     EXTRACTION_SYSTEM_PROMPT,

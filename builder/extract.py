@@ -496,6 +496,7 @@ def _check_opening_identity(data: dict[str, Any], check: _Checker) -> None:
     else:
         check.rules(third.get("rules"), "third_party.rules")
         _routed(third.get("intents"), THIRD_PARTY_ROUTES, "third_party.intents", check, pairs=True)
+        _check_callback_window(third.get("callback_window"), check)
     identity = data.get("identity")
     if not isinstance(identity, dict):
         check.error("identity", "must be an object")
@@ -517,6 +518,43 @@ def _check_opening_identity(data: dict[str, Any], check: _Checker) -> None:
         for key in ("failed_answer_instruction", "exhausted_say"):
             check.rule(identity.get(key), f"identity.{key}")
     check.rules(data.get("global_rules"), "global_rules")
+
+
+def _clock_in_brief(value: str, check: _Checker) -> bool:
+    """A 24-hour HH:MM value is evidenced as written (H:MM, HH:MM, H.MM) or, on the hour,
+    as a 12-hour time with am/pm ("7 pm", "7pm", "7 p.m.")."""
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
+    if not match:
+        return False
+    hour, minute = int(match.group(1)), match.group(2)
+    if any(check.in_brief(text) for text in (f"{hour}:{minute}", f"{hour:02d}:{minute}", f"{hour}.{minute}")):
+        return True
+    if minute != "00":
+        return False
+    suffix = "p" if hour >= 12 else "a"
+    pattern = rf"(?<![0-9:.]){hour % 12 or 12}\s*{suffix}\.?\s?m\b"
+    if re.search(pattern, check.brief, re.IGNORECASE):
+        return True
+    # A bare 24-hour number in a range or with an hour unit ("10 to 19", "10-19h", "19 hrs").
+    bare = rf"(?<![0-9:.]){hour}(?![0-9:]|\.\d)"
+    range_or_unit = (rf"{bare}\s*(?:h\b|hrs?\b|hours?\b|-|–|to\b|until\b)"
+                     rf"|(?:-|–|\bto|\buntil|\bfrom)\s*{bare}"
+                     rf"|\bbetween\s+{bare}\s+and\b|\bbetween\s+\d{{1,2}}\s+and\s+{bare}")
+    return re.search(range_or_unit, check.brief, re.IGNORECASE) is not None
+
+
+def _check_callback_window(window: Any, check: _Checker) -> None:
+    """Optional callback window (F-055): shape here; the dry render validates the values."""
+    if window in (None, {}):
+        return
+    path = "third_party.callback_window"
+    if not isinstance(window, dict):
+        check.error(path, "must be an object or omitted")
+        return
+    for key in ("earliest_time", "latest_time"):
+        value = window.get(key)
+        if isinstance(value, str) and not _clock_in_brief(value, check):
+            check.error(f"{path}.{key}", f"{value!r} does not appear in the documents (as HH:MM or an hour with am/pm)")
 
 
 def _check_flow(data: dict[str, Any], check: _Checker) -> None:
@@ -652,6 +690,9 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "intent_values": _values(third_in["intents"]),
         "close_values": _values(third_in["intents"], "end"),
     }
+    window = third_in.get("callback_window")
+    if isinstance(window, dict) and window:
+        third_party["callback_window"] = {key: value for key, value in window.items() if key != "source"}
     identity = {key: value for key, value in first["identity"].items()}
     account_in = flow["account"]
     account = {

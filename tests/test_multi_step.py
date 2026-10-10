@@ -218,13 +218,13 @@ class OfferCheckTests(unittest.TestCase):
     def test_brief_a_late_deadline_on_holiday_week_and_setup_facts(self):
         variables = self.run_offer(0, [CARD, LOAN], "2026-10-14T11:00", "2026-10-16", 95, number=1)
         facts = variables["products_facts"]
-        self.assertIn("Product 1: type credit_card", facts)
-        self.assertIn("latest date Monday 2026-11-02", facts)
-        self.assertIn("latest date Friday 2026-10-23", facts)
+        self.assertIn("Product 1, credit card ending 0377 (days late 4): ", facts)  # T-009c: no raw prefix
+        self.assertIn("deadline Monday, 2 November", facts)
+        self.assertIn("deadline Friday, 23 October", facts)
         self.assertIn("minimum amount 28.50", facts)
-        self.assertIn("minimum amount 150.00", facts)
+        self.assertIn("minimum amount 150;", facts)
         self.assertNotIn("p-card", facts)
-        self.assertEqual("Wednesday 2026-10-14", variables["today_text"])
+        self.assertEqual("Wednesday, 14 October", variables["today_text"])
 
     def test_brief_b_products_and_progress(self):
         now = "2026-10-14T11:00"
@@ -297,7 +297,7 @@ class OfferCheckTests(unittest.TestCase):
 
         ambiguous = self.run_offer(2, [{"product_id": "n-1", "past_due": 100, "days_late": 3}], "2030-12-30T09:00", "next Wednesday", 60)
         self.assertEqual("date_ambiguous", ambiguous["offer_verdict"])
-        self.assertEqual("Do you mean Wednesday 1 January?", ambiguous["offer_message"])
+        self.assertEqual("Do you mean Wednesday, 1 January 2031?", ambiguous["offer_message"])
         self.assertEqual({}, json.loads(ambiguous["offers_accepted"]))
         self.assertVerdict(
             self.run_offer(0, [CARD], "2026-10-14T11:00", "next week", 95), "missing"
@@ -489,7 +489,8 @@ class OfferCheckTests(unittest.TestCase):
         nodes = build_spec_workflow(load_spec(FIXTURES[0]), kit_tools())["nodes"]
         self.assertEqual("offer_setup", nodes["account"]["passthrough_default_transition"])
         self.assertEqual(["negotiate"], edges(nodes["offer_setup"]))
-        self.assertEqual(["confirm_record", "closing", "negotiate"], edges(nodes["check_offer"]))
+        self.assertEqual(["confirm_record", "closing", "offer_say"], edges(nodes["check_offer"]))
+        self.assertEqual(edges(nodes["negotiate"]), edges(nodes["offer_say"]))  # a waiting copy of negotiate
         first = nodes["negotiate"]["transitions"][0]
         self.assertEqual("check_offer", first["target_node"])
         rendered = json.dumps(first)
@@ -862,7 +863,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
     def test_negotiation_prompt_and_extraction_enforce_honesty_and_refusal_meaning(self):
         workflow = self.render()
         task = workflow["nodes"]["negotiate"]["task_message"]
-        self.assertIn("say the last offer check message", task)
+        self.assertIn("has already said the last offer check to the customer: do not repeat it", task)
         self.assertIn("never say a payment or promise was recorded", task)
         self.assertIn("Never read an internal id", task)
         self.assertIn("Not paying on one date is not a refusal", task)
@@ -1068,7 +1069,10 @@ class MultiStepWorkflowTests(unittest.TestCase):
             nodes = workflow["nodes"]
             introduction = spec.agent.introduction.text
             with self.subTest(fixture=FIXTURES[index].name):
-                self.assertTrue(nodes["opening"]["on_enter_first_entry_only"])
+                # Speaks on every entry (F-053 fix); the prompt keeps the introduction to one time.
+                self.assertNotIn("on_enter_first_entry_only", nodes["opening"])
+                self.assertIn("If you already gave the introduction in this call, do not repeat it",
+                              nodes["opening"]["task_message"])
                 self.assertIn(introduction, nodes["opening"]["task_message"])
                 # Asking again happens in its own step, which never repeats the introduction
                 # and still speaks on entry (default llm entry, not silent).
@@ -1205,7 +1209,8 @@ class MultiStepWorkflowTests(unittest.TestCase):
             self.assertEqual(source, variables["special_result_product_dispute_from"])
             self.assertEqual(["special_product_dispute"], edges(entry))
         done = nodes["special_product_dispute_done"]
-        self.assertEqual(["negotiate", "confirm_record"], edges(done))
+        # negotiate and its two waiting copies (F-053 fix) are all possible sources.
+        self.assertEqual(["negotiate", "offer_say", "revise_ask", "confirm_record"], edges(done))
         self.assertEqual("always", done["transitions"][-1]["condition"]["operator"])
         back = json.dumps(done["transitions"][0])
         self.assertIn('"variable": "special_result_product_dispute_from", "operator": "equals", "operand": "negotiate"', back)
@@ -1418,7 +1423,9 @@ class MultiStepWorkflowTests(unittest.TestCase):
         nodes = self.render()["nodes"]
         self.assertEqual(1, nodes["account"]["pre_actions"][0]["config"]["maxRetries"])
         self.assertEqual("closing", nodes["account"]["transitions"][0]["target_node"])
-        self.assertEqual("negotiate", nodes["confirm_record"]["transitions"][0]["target_node"])
+        # F-053: a revision goes through a fixed question, then negotiate waits for the answer.
+        self.assertEqual("revise_ask", nodes["confirm_record"]["transitions"][0]["target_node"])
+        self.assertEqual(edges(nodes["negotiate"]), edges(nodes["revise_ask"]))  # a waiting copy of negotiate
         for key, node in nodes.items():
             if node["node_type"] == "conversation":
                 self.assertEqual("close_turn_limit", node["max_turn_transition"], key)

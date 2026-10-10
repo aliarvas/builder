@@ -118,10 +118,11 @@ Global rules:
 - Purpose: Opens the call and identifies who answered.
 - Receiver: phone agent
 - Used at: builder/workflow.py — opening
-- Approximate tokens: ~83 static + `{introduction}` characters ÷ 4 + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~111 static + `{introduction}` characters ÷ 4 + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Your first words in this call, whatever the customer said, and only once: {introduction}
+If you already gave the introduction in this call, do not repeat it: answer briefly and ask the question again.
 The person to ask for is {address}. Use these words when you address them.
 Ask: {question}
 If they only greet you or check the line (for example "Hello?"), that is not an answer: reply briefly and ask the question again.
@@ -198,40 +199,40 @@ Rules:
 - Purpose: Discusses the account and obtains a date and an amount per product.
 - Receiver: phone agent
 - Used at: builder/workflow.py — negotiate
-- Approximate tokens: ~276 static + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~268 static + `{rules}` characters ÷ 4 at runtime
 
 ```text
-Today is {{today_text}}. Account facts, computed by the bank system:
-{{products_facts}}
-Use only these facts; never compute a date or an amount yourself. Never read an internal id or the raw account result aloud; name each product as the account facts say, never by a list number.
+Calendar: {{calendar_text}}
+Account facts: {{products_facts}}
 Last offer verdict: {{offer_verdict}}. Last offer check: {{offer_message}}
 Offers accepted so far: {{offers_summary}}
-The bank system checks every date and amount the customer names. Verdict neither ok nor none: say the last offer check message first. Verdict none: propose or ask, but never say whether a date or an amount is allowed. Never state a limit yourself; say one only when the last offer check names it. Never mention internal step, tool or variable names, and never write code.
+Use only these dates and amounts; never work out a date or an amount yourself. Name each product as the account facts do, never by a list number. Never read an internal id aloud. Never mention internal step, tool or variable names, and never write code.
+The bank system checks every date and amount the customer names and has already said the last offer check to the customer: do not repeat it; answer the customer. When it names a date or an amount, offer exactly that. Verdict none: propose or ask, but never say whether a date or an amount is allowed. Never state a limit yourself; say one only when the last offer check names it.
 A checked offer is not recorded: never say a payment or promise was recorded here.
-Get a concrete date and amount. When the last offer check names a date or an amount, offer exactly that. If the customer names only a date, the amount you last proposed applies. Not paying on one date is not a refusal: ask for another date.
+Get a concrete date and amount. If the customer names only a date, the amount you last proposed applies. Not paying on one date is not a refusal: ask for another date.
 Rules:
 {rules}
 ```
 
 ## OFFER_VERDICT_MESSAGES
 
-- Purpose: One sentence per offer-check verdict, read by the agent in the negotiate step.
-- Receiver: phone agent (via offer_message)
-- Used at: builder/offer_check.py — check_offer code step
-- Approximate tokens: ~226 (characters ÷ 4)
+- Purpose: One customer-facing sentence per offer-check verdict, spoken word for word after the check.
+- Receiver: customer (fixed spoken line via offer_message)
+- Used at: builder/offer_check.py — check_offer; builder/workflow.py — offer_say
+- Approximate tokens: ~210 (characters ÷ 4)
 
 ```text
-ok: The offer for the [product] is valid and noted.
-more: Now ask about the next product.
-missing: The date was not clear. Ask the customer for the exact date.
-amount_missing: The amount was not clear. Propose the amount again yourself: the full amount due, or the minimum if you offered it.
-product_unknown: It is not clear which product the offer is for. Ask which product they mean.
-date_too_early: That date is before the earliest allowed date. Offer [date] instead.
-date_too_late: That date is after the latest date that can be recorded for this product. Offer [date], the latest possible date.
-date_not_business_day: That date is not a business day. Offer [date], the next possible business day.
+ok: Thank you, that works for the [product].
+more: Now let us look at the [next]. The amount due is [next_amount]. Could you pay [next_amount]?
+missing: Sorry, I did not catch the date. On which day would you like to pay?
+amount_missing: Could you pay [amount]?
+product_unknown: Which of your products is this payment for?
+date_too_early: I can only record a date from [date]. Would [date] work for you?
+date_too_late: The latest date I can record for the [product] is [date]. Would [date] work for you?
+date_not_business_day: That day is not a business day. The next possible day is [date]. Would that work for you?
 date_ambiguous: Do you mean [date]?
-amount_too_low: That amount is below the minimum for this product. Offer [amount] instead.
-amount_too_high: That amount is more than the amount due. Offer [amount].
+amount_too_low: The lowest amount I can record for the [product] is [amount]. Could you pay [amount]?
+amount_too_high: The amount due on the [product] is [amount]. Could you pay [amount]?
 ```
 
 ## CONFIRM_TASK_TEMPLATE
@@ -257,6 +258,17 @@ Rules:
 
 ```text
 Thank you. One moment while I check your account.
+```
+
+## REVISE_ASK_LINE
+
+- Purpose: Fixed line when the customer wants to change the read-back (F-053).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/workflow.py — revise_ask
+- Approximate tokens: ~14 (characters ÷ 4)
+
+```text
+Of course. Which date or amount would you like instead?
 ```
 
 ## CLOSING_FALLBACK_SAY
@@ -316,6 +328,72 @@ Thank you for letting me know.
 ```text
 Ask the customer this as one short question, in your own words: {ask}
 Wait for the answer. Do not call any tool and do not promise anything.
+```
+
+## CALLBACK_COLLECT_RULE
+
+- Purpose: Added to the third-party step when the program books callbacks itself (F-055 review finding 3).
+- Receiver: phone agent
+- Used at: builder/callback.py — third_party and third_party_ask task
+- Approximate tokens: ~65 (characters ÷ 4)
+
+```text
+To arrange a callback, get the day and the time of day when the customer can be reached, in the person's own words; if they give only one of them, ask for the other. Never say a callback is booked or arranged: the program books it and the closing tells them.
+```
+
+## CALLBACK_DAY_DESCRIPTION
+
+- Purpose: Extraction field in the third-party step: the person's words for the callback day (F-055).
+- Receiver: phone agent (extraction)
+- Used at: builder/callback.py — third_party extraction callback_day_text
+- Approximate tokens: ~59 (characters ÷ 4)
+
+```text
+Copy the words for the day when the customer can be called back from the person's last message, unchanged (for example "tomorrow", "Friday", "the 15th"). Do not resolve relative dates with the system clock. Empty if they name no day.
+```
+
+## CALLBACK_TIME_DESCRIPTION
+
+- Purpose: Extraction field in the third-party step: the person's words for the callback time (F-055).
+- Receiver: phone agent (extraction)
+- Used at: builder/callback.py — third_party extraction callback_time_text
+- Approximate tokens: ~64 (characters ÷ 4)
+
+```text
+Copy the words for the time of day when the customer can be called back from the person's last message, unchanged, with any morning/afternoon/evening or am/pm words (for example "around eleven in the morning", "3pm", "14:30"). Empty if they name no time.
+```
+
+## CALLBACK_OUTSIDE_SAY
+
+- Purpose: Spoken when the callback time the person gave is outside the callback window (F-055); code fills {window}.
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/callback.py — third_party_ask entry line
+- Approximate tokens: ~20 static + `{window}` characters ÷ 4 at runtime
+
+```text
+I am sorry, we cannot call back then. We can call back {window}. What time would suit?
+```
+
+## CALLBACK_UNCLEAR_SAY
+
+- Purpose: Spoken when the callback day or time could not be understood (F-055).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/callback.py — third_party_ask entry line
+- Approximate tokens: ~17 (characters ÷ 4)
+
+```text
+Sorry, could you tell me the day and the time when we can call back?
+```
+
+## CALLBACK_TIME_ASK_SAY
+
+- Purpose: Spoken when the person named a callback day but no time; the day is kept for the next turn (F-055).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/callback.py — third_party_ask entry line
+- Approximate tokens: ~12 (characters ÷ 4)
+
+```text
+Thank you. At what time of day can we call back?
 ```
 
 ## CONVERSATION_NO_TOOL_RULE
@@ -400,7 +478,7 @@ Leave enforced_by out for anything the agent must say, ask, propose or decide, a
 - Purpose: Extracts the agent identity, opening, third-party handling, identity check and global rules.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'opening_identity'
-- Approximate tokens: ~977 (characters ÷ 4)
+- Approximate tokens: ~1252 (characters ÷ 4)
 
 ```text
 Extract the sections agent, opening, third_party, identity and global_rules. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
@@ -417,8 +495,9 @@ Return this JSON shape:
   "answers": [{"value": "snake_case code", "meaning": "...", "route": "verify | other_person | ask_again | end", "outcome": "...", "reason": "...", "source": "..."}]
    (every kind of answer to the confirmation question. route verify: the customer confirmed, go to the identity check. other_person: someone else answered. ask_again: unclear, ask again. end: the call closes right away; outcome and reason are the closing-table values for it, reason "" when the table has none. Exactly one value with route ask_again. Do not add a value for a bare greeting; the program adds it. Always include one value with route end for a person who refuses to talk or to confirm who they are; close it with the row the documents give for refusing before verification, or, if they name none, the closest row. If the documents do not name this case, its source is "derived: <why this row>" instead of an excerpt.)
  },
- "third_party": {"rules": [RULE], "intents": [{"value": "snake_case code", "meaning": "...", "route": "stay | end", "outcome": "...", "reason": "...", "source": "..."}]}
-   (what the person who is not the customer may want. route end: the call closes with that outcome and reason, with no tool. A callback that is booked with a tool keeps route stay: the program closes it from the tool result.)
+ "third_party": {"rules": [RULE], "intents": [{"value": "snake_case code", "meaning": "...", "route": "stay | end", "outcome": "...", "reason": "...", "source": "..."}], "callback_window": {"days_ahead": integer, "day_unit": "business | calendar", "earliest_time": "HH:MM", "latest_time": "HH:MM", "after_now": true | false, "max_outside_asks": integer, "outside_close_value": "intent value with route end", "source": "excerpt"}}
+   (what the person who is not the customer may want. route end: the call closes with that outcome and reason, with no tool. A callback that is booked with a tool keeps route stay: the program closes it from the tool result.
+   callback_window: when a callback may be booked, copied from the documents; omit it when they set no limit. days_ahead: how many days after today are allowed (0 = today only; "today or the next business day" = 1 with day_unit business). earliest_time/latest_time: the allowed time of day, both included, 24-hour. after_now: true when the time must be later than the call's current time. max_outside_asks: how many times the agent asks for another time after an offer outside the window (0 if the documents do not say). outside_close_value: the intent value (route end) to close with when the next offer is still outside or no clear time is given; required with a window (if the documents name no row for it, the closest no-callback value). The program resolves and checks the person's day and time in code; the model never types the date.)
  "identity": {
   "rules": [RULE] (limits, refusal handling, what never to do before all questions pass),
   "questions": [{"field": "value of the identity tool's question selector enum", "ask": RULE, "answer_format": RULE (how to convert the spoken answer into the tool format)}] (in the order asked),

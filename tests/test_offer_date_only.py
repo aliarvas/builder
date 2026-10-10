@@ -97,7 +97,7 @@ class DateOnlyTests(unittest.TestCase):
     def test_other_amount_without_a_number_is_missing(self):
         result = Call().turn(offer_date="2026-10-16", **{OFFER_AMOUNT_KIND: "other"})
         self.assertEqual("amount_missing", result["offer_verdict"])
-        self.assertIn("Propose the amount again yourself", result["offer_message"])
+        self.assertEqual("Could you pay 95?", result["offer_message"])  # the agent proposes the amount again
 
     def test_a_late_date_alone_is_checked_not_invented(self):
         result = Call().turn(offer_date="2026-11-03")  # after the early-band deadline
@@ -166,7 +166,7 @@ class FollowUpTests(unittest.TestCase):
     def test_yes_without_a_proposed_date_asks_for_the_date(self):
         result = Call().turn(**{OFFER_ACCEPTS: "yes"})
         self.assertEqual("missing", result["offer_verdict"])
-        self.assertEqual("The date was not clear. Ask the customer for the exact date.", result["offer_message"])
+        self.assertEqual("Sorry, I did not catch the date. On which day would you like to pay?", result["offer_message"])
         self.assertNotIn("amount", result["offer_message"])
 
     def test_ok_message_names_the_product(self):

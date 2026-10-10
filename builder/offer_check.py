@@ -33,6 +33,18 @@ OFFERS_ACCEPTED_COUNT = "offers_accepted_count"
 OFFERS_NOTED = "offers_noted"
 
 
+# Characters a runtime variable adds to a prompt (F-053 fix, review finding 3; T-009c): a fixed
+# share plus a share per product. The shares are the longest texts the code writes (see
+# tests/test_offer_speech.py RuntimeTextShareTests); the product count is unknown at build
+# time, so the estimate is sized for ESTIMATED_PRODUCTS, the most products in a kit case.
+RUNTIME_TEXT_CHARACTERS = {
+    "{{calendar_text}}": (340, 0), "{{products_facts}}": (0, 140),
+    "{{offers_summary}}": (0, 80), "{{offer_message}}": (150, 0),
+}
+ESTIMATED_PRODUCTS = 3
+
+
+
 def _py_literal(value: Any) -> str:
     """A Python expression that rebuilds ``value`` from JSON without any brace characters."""
     text = json.dumps(json.dumps(value, sort_keys=True))
@@ -355,11 +367,16 @@ def earliest_counted():
     return add_days(today(), OFFER['earliest'])
 
 
-def limits(product):
-    start = today()
+def earliest_day():
     earliest = earliest_counted()
     if OFFER['promise_date_must_be_business_day']:
         earliest = shift_to_business(earliest, 1)
+    return earliest
+
+
+def limits(product):
+    start = today()
+    earliest = earliest_day()
     latest = None
     rule = first_rule(product, OFFER['latest'])
     if rule is not None:
@@ -415,17 +432,80 @@ def product_name(index, product, count):
     return 'the product'
 
 
+def latest_deadline():
+    # The latest deadline over all products; None when a product has no deadline (T-009c).
+    try:
+        days = [limits(product)[1] for product in load_products()]
+    except Exception:
+        return None
+    return max(days) if days and None not in days else None
+
+
+def say_spoken_days(days):
+    # "Monday 19, Tuesday 20 and Wednesday 21 October": one month name per run of days.
+    groups = []
+    for day in days:
+        if groups and (groups[-1][0].month, groups[-1][0].year) == (day.month, day.year):
+            groups[-1].append(day)
+        else:
+            groups.append([day])
+    words = []
+    for group in groups:
+        month = MONTHS[group[0].month - 1] + (' ' + str(group[0].year) if group[0].year != today().year else '')
+        words.append(', '.join(WEEKDAYS[d.weekday()] + ' ' + str(d.day) for d in group) + ' ' + month)
+    text = ', '.join(words)
+    head, _, tail = text.rpartition(', ')
+    return (head + ' and ' + tail) if head else (text or 'none')
+
+
+def calendar_text():
+    # F-054: the dates the agent may name, computed here so the model does no calendar arithmetic.
+    # T-009c: only days the code could accept are listed (from the earliest date to the latest
+    # product deadline); the week-end lines stay whenever such a day is listed.
+    start = today()
+    earliest = earliest_day()
+    cutoff = latest_deadline()
+    monday = start - datetime.timedelta(days=start.weekday())
+    weeks = [[monday + datetime.timedelta(days=7 * week + d) for d in range(7)] for week in (0, 1)]
+    weeks = [[day for day in days if day >= start and is_business(day)] for days in weeks]
+    shown = lambda days: [day for day in days if day >= earliest and (cutoff is None or day <= cutoff)]
+    parts = ['Today is ' + say_spoken_day(start) + '.']
+    if earliest > start:
+        parts.append('Earliest date: ' + say_spoken_day(earliest) + '.')
+    for label, days in (('this week', weeks[0]), ('next week', weeks[1])):
+        if shown(days) or label == 'this week':
+            parts.append('Business days ' + label + ': ' + say_spoken_days(shown(days)) + '.')
+    ends = [label + ' ' + say_spoken_day(days[-1]) for label, days in (('this week', weeks[0]), ('next week', weeks[1]))
+            if shown(days[-1:])]
+    if ends:
+        parts.append('Last business day: ' + '; '.join(ends) + '.')
+    if cutoff is not None and any(shown(days) != days for days in weeks):
+        parts.append('No day after ' + say_spoken_day(cutoff) + ' can be recorded.')
+    return ' '.join(parts)
+
+
+def said_fields():
+    # Fields the spoken facts already carry: the id, the name and the amount limits.
+    fields = {CONFIG['product_id_field'], CONFIG['kind_field'], CONFIG['label_field']}
+    for key in ('min_amount', 'max_amount'):
+        fields.update(rule.get('field') for rule in OFFER[key])
+    return fields
+
+
 def product_facts(index, product):
+    # T-009c: spoken facts only. A field the name or the limits already say is left out; any
+    # other plain field stays in words ("days late 4", a flag as "secured yes"), so no policy fact is lost.
     earliest, latest, low, high = limits(product)
-    shown = ', '.join(
-        str(key) + ' ' + str(value) for key, value in product.items()
-        if key != CONFIG['product_id_field'] and not isinstance(value, (dict, list))
+    said = said_fields()
+    extra = ', '.join(
+        str(key).replace('_', ' ') + ' ' + (('yes' if value else 'no') if isinstance(value, bool) else str(value))
+        for key, value in product.items()
+        if key not in said and value is not None and value != '' and not isinstance(value, (dict, list))
     )
     return (
-        'Product ' + str(index) + ': ' + shown + '. Earliest date ' + say_day(earliest)
-        + '; latest date ' + say_day(latest) + '; minimum amount ' + say_amount(low)
-        + '; maximum amount ' + say_amount(high) + '. Name it to the customer as: '
-        + product_name(index, product, len(load_products())) + '.'
+        'Product ' + str(index) + ', ' + product_name(index, product, len(load_products()))
+        + (' (' + extra + ')' if extra else '') + ': deadline ' + say_spoken_day(latest)
+        + '; minimum amount ' + say_spoken_amount(low) + '; full amount ' + say_spoken_amount(high) + '.'
     )
 
 
@@ -486,10 +566,12 @@ def summary(accepted):
 SETUP_BODY = """try:
     lines = [product_facts(index, product) for index, product in enumerate(load_products(), start=1)]
     vars['products_facts'] = ' '.join(lines) or 'No products were returned.'
-    vars['today_text'] = say_day(today())
+    vars['today_text'] = say_spoken_day(today())
+    vars['calendar_text'] = calendar_text()
 except Exception:
     vars['products_facts'] = 'No product facts are available.'
     vars['today_text'] = 'unknown'
+    vars['calendar_text'] = 'No calendar is available; ask the customer for an exact date.'
 vars[CONFIG['accepted']] = json.dumps(dict())
 vars[CONFIG['accepted_count']] = 0
 vars[CONFIG['noted']] = json.dumps([])
@@ -513,6 +595,7 @@ suggest_amount = None
 number = None
 progress = 'rejected'
 product = None
+exhausted = False
 try:
     products = load_products()
     raw_number = vars.get(CONFIG['product_var'])
@@ -548,6 +631,8 @@ try:
             amount = low
         if amount is None or amount <= 0:
             verdict = 'amount_missing'
+            # Propose the amount again: the floor if it was proposed, otherwise the full amount.
+            suggest_amount = low if amount_kind == 'minimum' else high
         elif day < earliest:
             # Before the counted earliest date: too early. On or after it, the date was only
             # moved because it is not a business day (for example today is a holiday).
@@ -609,6 +694,7 @@ try:
         vars['offer_last_signatures_by_product'] = json.dumps(last_signatures)
         vars['offer_rejections'] = rejections
         if rejections >= rejected_offer_limit(product):
+            exhausted = True
             noted = noted_numbers()
             if number not in noted:
                 noted.append(number)
@@ -623,13 +709,35 @@ except Exception:
     verdict = 'missing'
     progress = 'rejected'
 message = CONFIG['messages'].get(verdict, CONFIG['messages'].get('missing', ''))
-shown_day = say_confirmation_day(suggest_day) if verdict == 'date_ambiguous' else say_day(suggest_day)
-message = message.replace('[date]', shown_day).replace('[amount]', say_amount(suggest_amount))
+# F-053: the message is spoken to the customer word for word, so every value is spoken form.
+message = message.replace('[date]', say_spoken_day(suggest_day)).replace('[amount]', say_spoken_amount(suggest_amount))
 products_now = load_products()
-named = product_name(number, products_now[number - 1], len(products_now)) if number and 1 <= number <= len(products_now) else 'product'
-message = message.replace('[product]', named)
+
+
+def the_name(index):
+    if not index or not (1 <= index <= len(products_now)):
+        return 'the product'
+    name = product_name(index, products_now[index - 1], len(products_now))
+    return name if name.startswith('the ') else 'the ' + name
+
+
+message = message.replace('the [product]', the_name(number))
+if progress == 'more' and exhausted:
+    # T-009c: the limit closed this product; its suggestion is not offered again.
+    message = ''
+    suggest_day = suggest_amount = None
 if progress == 'more':
-    message = message + ' ' + CONFIG['messages'].get('more', '')
+    # The line below always proposes the next product's full amount, so the state agrees (T-009c fix).
+    vars[CONFIG['proposed_kind_var']] = 'full'
+    handled = handled_numbers(accepted_offers())
+    upcoming = next((index for index in range(1, len(products_now) + 1) if index not in handled), None)
+    if not upcoming and not message:
+        message = CONFIG['messages'].get('product_unknown', '')
+    if upcoming:
+        next_amount = limits(products_now[upcoming - 1])[3]
+        message = (message + ' ' + CONFIG['messages'].get('more', '')).strip()
+        message = message.replace('the [next]', the_name(upcoming)).replace(
+            '[next_amount]', say_spoken_amount(next_amount))
 vars['offer_verdict'] = verdict
 vars['offer_message'] = message
 vars['offer_suggested_date'] = suggest_day.isoformat() if suggest_day else ''

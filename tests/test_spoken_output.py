@@ -102,8 +102,8 @@ class ReadBackTests(unittest.TestCase):
     def test_facts_tell_the_agent_how_to_name_each_product(self):
         variables = read_back(FIXTURE_A, [CARD, LOAN], [])
         facts = variables["products_facts"]
-        self.assertIn("Name it to the customer as: credit card ending 0377.", facts)
-        self.assertIn("Name it to the customer as: personal loan.", facts)
+        self.assertIn("Product 1, credit card ending 0377 (", facts)
+        self.assertIn("Product 2, personal loan (", facts)
         self.assertEqual(2, facts.count("Product "))
         self.assertNotIn("p-card", facts)
 

@@ -30,6 +30,20 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-055: Callback date filled by the model with the wrong year
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-02 chat on version 13
+- **Run:** customer `c_cd152782-bd5`, scratchpad `pub02v13.json`
+- **Symptom:** The husband said Maria can be reached "tomorrow morning around eleven". The agent called `schedule_callback` with `date = 2025-05-15`, `time = 11:00` (expected `2026-10-15 11:00`), then closed `not_reached/callback`. Disclosure rules were kept. Ledger: fail on the callback date only.
+- **Root cause:** `schedule_callback.date` is a model-filled field. The model resolved "tomorrow" without knowing the call's date (same family as F-026 for promises).
+- **Category:** date-logic
+- **Fix / lesson:** Resolve callback dates in code: extract the customer's phrase (date and time), resolve it against `now` with the same resolver as offers, and check it against the brief's callback window, which comes from spec data. A `pre_process_code` hook writes the resolved date into the request, or the step passes a checked value. The model never types the date.
+- **Status:** fixed offline (F-055 + review fixes 1–3): `third_party` has no tool; extraction copies the person's day and time words, a `callback_check` code step resolves them against `now` and the spec calendar, checks the spec's callback window (re-asks bounded, then the spec's close value), keeps the day across turns in a code-owned variable, and a silent api step books with the checked values. Unclear or ambiguous times are asked again, never guessed. Reviewed (`reviews/F-055-review.md`, re-review 3: no open finding). Retest pending (PUB-02, day and time in separate messages too).
+- **Retest:** -
+
+PUB-09 (restructuring request) **passed the ledger** on version 13: the global special path fired after verification, `transfer_to_agent(restructuring)` and `close_call = transferred/restructuring`.
+
 ### F-054: The model computes proposal dates itself and gets the weekday wrong
 
 - **Date:** 2026-10-11
@@ -39,7 +53,7 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** Brief rules for persuasion name dates relative to the calendar ("last business day of this week"). The prompt gives the rule but not the dates, so the model does calendar arithmetic, which ARCHITECTURE says it must not do.
 - **Category:** date-logic
 - **Fix / lesson:** Give the negotiate step a computed, spoken calendar: today, the business days of this and next week up to the deadline (weekday + spoken date), the deadline, and the per-product amounts. The prompt says to use only these dates. Generic, from spec calendar data and `now`.
-- **Status:** open
+- **Status:** fixed offline (F-053/054 fix): the negotiate step receives a code-made spoken calendar (`calendar_text`) and product facts; the prompt says to use only those dates. Reviewed (`reviews/F-053-054-review.md`, re-review: merge). Retest pending (PUB-07).
 - **Retest:** -
 
 ### F-053: After the offer check, the agent printed "_call:check_offer{...}" instead of the check result
@@ -51,7 +65,7 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** On re-entry the dialogue model sees the code step's function call in its history and imitates it as text, instead of voicing `offer_message`.
 - **Category:** honesty / policy
 - **Fix / lesson:** Do not leave the check result to the model. When the verdict is not `ok`, speak `offer_message` deterministically (a code step with a `tts` line, the form that works live, then back to `negotiate` waiting for the customer). When the verdict is `ok` and more is needed, the same. Keep the model's free text for the customer's answers only.
-- **Status:** open
+- **Status:** fixed offline (F-053/054 fix): a non-ok or ok+more verdict goes to `offer_say`, a twin of `negotiate` whose entry is the fixed `offer_message` line; `revise_ask` is the same pattern; `negotiate` speaks on every other re-entry, so side-question returns repeat the pending question (no dead air). Reviewed (re-review: merge). Retest pending (PUB-07).
 - **Retest:** -
 
 **PUB-07 passed the ledger on version 13** (holiday 26 Oct → promise 27 Oct, 540, one `create_promise`, one `close_call` = `promise`). The judge would likely fail it on F-053 and F-054.

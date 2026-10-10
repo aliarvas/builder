@@ -11,6 +11,7 @@ from typing import Any
 
 from .prompts import (
     ACCOUNT_WAIT_LINE,
+    REVISE_ASK_LINE,
     SPECIAL_ASK_PHRASED_TEMPLATE,
     SPECIAL_SAY_FALLBACK,
     CLOSING_FALLBACK_SAY,
@@ -33,14 +34,20 @@ from .prompts import (
 from .offer_check import (
     OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED_COUNT,
     OFFER_AMOUNT_KIND, OFFER_PROPOSED_KIND, AMOUNT_KINDS, AMOUNT_KIND_NONE, OFFER_ACCEPTS, ACCEPTS_YES, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
-    promise_values_hook, special_noted_code,
+    promise_values_hook, special_noted_code, ESTIMATED_PRODUCTS, RUNTIME_TEXT_CHARACTERS,
 )
 from .spec import ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
 from .spoken import agent_directed, spoken_words
+from .callback import (
+    BOOK_FAILURE_COUNT, THIRD_PARTY_ASK, add_collect_rule, callback_entry_transition, callback_extraction_fields,
+    callback_nodes, third_party_ask_node,
+)
 from .tools_from_openapi import CALL_VARIABLES
 
 
 IDENTITY_CHECK = "identity_check"
+OFFER_SAY = "offer_say"
+REVISE_ASK = "revise_ask"
 FIXED_TOOL_NAMES = frozenset(
     {"verify_identity", "get_account", "create_promise", "add_note", "schedule_callback", "transfer_to_agent", "close_call"}
 )
@@ -323,7 +330,10 @@ SPECIAL_RESULT_PREFIX = "special_result_"
 
 # Steps that stand for one spec step name. ``opening_reask`` asks the opening question
 # again, so whatever is available in ``opening`` is available there too.
-STEP_ALIASES = {"opening": ("opening", "opening_reask")}
+STEP_ALIASES = {
+    "opening": ("opening", "opening_reask"), "negotiate": ("negotiate", "offer_say", "revise_ask"),
+    "third_party": ("third_party", THIRD_PARTY_ASK),
+}
 
 
 def source_steps(path: SpecialPath) -> tuple[str, ...]:
@@ -696,6 +706,7 @@ def close_rules(spec: PhoneAgentSpec) -> list[tuple[str, list[dict[str, Any]]]]:
         ("callback_failed", [
             *(item for variable in callback_results for item in _is_false(variable)),
             _condition("schedule_callback_failure_count", "greater_than", 0),
+            _condition(BOOK_FAILURE_COUNT, "greater_than", 0),
         ]),
         *(
             ("third_party:" + value, [_condition(third["intent_variable"], "equals", value)])
@@ -973,7 +984,7 @@ def _render_spec_workflow(
     used = {
         "opening", "opening_reask", "opening_unclear", "third_party", IDENTITY_CHECK, "identity", "account", "negotiate",
         "confirm_record", "confirmation_progress", "closing", "closing_say", "close_attempt",
-        "offer_setup", "check_offer",
+        "offer_setup", "check_offer", OFFER_SAY, REVISE_ASK,
         "close_record", "end_call",
     }
     close_nodes: dict[str, str] = {}
@@ -1042,8 +1053,8 @@ def _render_spec_workflow(
             **_conversation("opening", render_prompt(
                 OPENING_TASK_TEMPLATE, introduction=spec.agent.introduction.text, **opening_values
             ), [], opening_transitions),
-            # The introduction is spoken once; asking again happens in opening_reask.
-            "on_enter_first_entry_only": True,
+            # Speaks on every entry (F-053 fix): a side question answered by a global path returns
+            # here and must hear the question again; the prompt says not to repeat the introduction.
         },
         "opening_reask": _conversation("opening_reask", render_prompt(
             OPENING_REASK_TASK_TEMPLATE, **opening_values
@@ -1113,9 +1124,9 @@ def _render_spec_workflow(
             _transition("closing", "Too many rejected offers", [
                 _condition(OFFER_PROGRESS, "equals", "limit")
             ]),
-            {"target_node": "negotiate", "description": "Discuss the check result", "condition": {"operator": "always"}},
+            {"target_node": OFFER_SAY, "description": "Say the check result", "condition": {"operator": "always"}},
         ]),
-        "negotiate": _conversation("negotiate", render_prompt(
+        "negotiate": {**_conversation("negotiate", render_prompt(
             NEGOTIATION_TASK_TEMPLATE,
             rules=_rule_lines(plan.rules("negotiate")),
         ), [], [
@@ -1148,10 +1159,11 @@ def _render_spec_workflow(
                 for value in negotiation["close_values"]
             ),
         ]),
+            },
         "confirm_record": _conversation("confirm_record", render_prompt(
             CONFIRM_TASK_TEMPLATE, rules=_rule_lines(plan.rules("confirm_record"))
         ), [promise_tool], [
-            _transition("negotiate", "Customer revised or rejected the read-back", [
+            _transition(REVISE_ASK, "Customer revised or rejected the read-back", [
                 _condition(confirmation["intent_variable"], "equals", value)
                 for value in confirmation["revise_values"]
             ]),
@@ -1242,6 +1254,16 @@ def _render_spec_workflow(
         "description": "The third party's current intent", "enum_values": [*third["intent_values"], FRAMEWORK_NONE_VALUE],
         "min_confidence": 0.8,
     }]
+    # F-055: the callback day and time are resolved and checked in code (builder/callback.py);
+    # the model only copies the person's words and never types the date.
+    callback = callback_nodes(spec, by_name["schedule_callback"], _code_node, "closing", warnings)
+    if callback is not None:
+        nodes.update(callback)
+        nodes["third_party"]["tools"] = []
+        add_collect_rule(nodes["third_party"])
+        nodes["third_party"]["extraction_schema"].extend(callback_extraction_fields())
+        nodes["third_party"]["transitions"].append(callback_entry_transition())
+        nodes[THIRD_PARTY_ASK] = third_party_ask_node(nodes["third_party"])
     nodes["negotiate"]["extraction_schema"] = [{
         "name": OFFER_DATE, "type": "string",
         "description": "Copy the payment date phrase from the customer's last message unchanged. If the customer accepts a date the agent just proposed without naming it (for example \"yes, that works\"), copy the date as the agent said it. Do not resolve relative dates with the system clock. Empty if none.",
@@ -1288,6 +1310,16 @@ def _render_spec_workflow(
         "description": "Whether the customer confirms or revises the read-back",
         "enum_values": [*confirmation["intent_values"], FRAMEWORK_NONE_VALUE], "min_confidence": 0.8,
     }]
+
+    # F-053 (fix): the check result and the revise question are spoken by fixed lines on two
+    # copies of negotiate (same prompt, routes and extraction). Each waits for the customer, and
+    # a side question that returns to it (__previous__) hears its line again: the pending
+    # question. negotiate itself speaks on every entry, so returns to it are never silent.
+    for clone_key, line in ((OFFER_SAY, "{{offer_message}}"), (REVISE_ASK, REVISE_ASK_LINE.text)):
+        clone = copy.deepcopy(nodes["negotiate"])
+        clone["name"] = clone_key
+        clone["on_enter"] = {"type": "tts", "text": line}
+        nodes[clone_key] = clone
 
     for node in [*nodes.values(), *global_nodes.values()]:
         _apply_conversation_tool_rules(node)
@@ -1339,7 +1371,7 @@ RULE_STEPS = {
 # Nodes rendered from a plan step's rules (opening_reask repeats the opening rules).
 STEP_NODES = {
     "opening": ("opening", "opening_reask"), "third_party": ("third_party",), "identity": ("identity",),
-    "negotiate": ("negotiate",), "confirm_record": ("confirm_record",),
+    "negotiate": ("negotiate", "offer_say", "revise_ask"), "confirm_record": ("confirm_record",),
 }
 _FILLER = re.compile(r"\b(?:the|a|an|that)\b")
 
@@ -1583,13 +1615,21 @@ def build_spec_workflow(
     return workflow
 
 
-def workflow_prompt_estimates(workflow: dict[str, Any]) -> dict[str, int]:
-    """Return conservative character/4 estimates for each conversation node."""
+# Shares and product count: offer_check.RUNTIME_TEXT_CHARACTERS (the code that writes the texts).
+def runtime_text_characters(task_message: str, products: int = ESTIMATED_PRODUCTS) -> int:
+    """Characters the runtime variables in ``task_message`` add beyond their placeholder names."""
+    return sum(fixed + per_product * products - len(name)
+               for name, (fixed, per_product) in RUNTIME_TEXT_CHARACTERS.items() if name in task_message)
+
+
+def workflow_prompt_estimates(workflow: dict[str, Any], products: int = ESTIMATED_PRODUCTS) -> dict[str, int]:
+    """Return conservative character/4 estimates for each conversation node, runtime text included."""
     system = str(workflow.get("system_prompt", ""))
     return {
         key: math.ceil((
             len(system)
             + len(str(node.get("task_message", "")))
+            + runtime_text_characters(str(node.get("task_message", "")), products)
             + sum(len(str(tool.get("function", {}).get("description", ""))) for tool in node.get("tools", []))
         ) / 4)
         for key, node in {**workflow.get("nodes", {}), **workflow.get("global_nodes", {})}.items()
