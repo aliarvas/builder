@@ -435,7 +435,8 @@
         "source": "Rule 47"
       },
       "on": [
-        "opening:declined"
+        "opening:declined",
+        "hangup_unverified"
       ]
     }
   ],

@@ -24,7 +24,7 @@ from .prompts import (
 )
 from .offer_check import (
     OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED_COUNT,
-    check_offer_code, offer_setup_code, promise_values_hook,
+    check_offer_code, offer_setup_code, promise_values_hook, special_noted_code,
 )
 from .spec import PhoneAgentSpec, Rule, SpecError, SpecialPath, required_close_states
 from .tools_from_openapi import CALL_VARIABLES
@@ -151,7 +151,49 @@ def _tool_index(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     result = {_tool_name(tool): copy.deepcopy(tool) for tool in tools}
     missing = FIXED_TOOL_NAMES - result.keys()
     if missing:
-        raise SpecError("OpenAPI is missing fixed tools: " + ", ".join(sorted(missing)))
+        raise SpecError(
+            "the tool file does not define the bank tools this builder needs: "
+            + ", ".join(sorted(missing))
+            + ". Tools found: " + (", ".join(sorted(name for name in result if name)) or "none")
+            + ". Each tool name is taken from the last part of its OpenAPI path."
+        )
+    return result
+
+
+def group_transitions_by_target(transitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Write each target once: OR the conditions of transitions that share a target.
+
+    Freya merges same-target transitions at load time, and an unconditional one makes the
+    merged transition unconditional. Merging here keeps the rendered order explicit. A
+    target reached both unconditionally (or by intent) and by another transition is a
+    builder bug and raises.
+    """
+    order: list[str] = []
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for transition in transitions:
+        target = transition["target_node"]
+        if target not in groups:
+            groups[target] = []
+            order.append(target)
+        groups[target].append(transition)
+    result = []
+    for target in order:
+        items = groups[target]
+        if len(items) == 1:
+            result.append(items[0])
+            continue
+        if any(item.get("is_tool_call") or item["condition"].get("logic") != "or" for item in items):
+            raise ValueError(
+                f"internal: target {target!r} has an unconditional or intent transition and another one"
+            )
+        descriptions = list(dict.fromkeys(item["description"] for item in items))
+        result.append({
+            "target_node": target,
+            "description": "; ".join(descriptions),
+            "condition": {"logic": "or", "conditions": [
+                condition for item in items for condition in item["condition"]["conditions"]
+            ]},
+        })
     return result
 
 
@@ -261,8 +303,8 @@ SPECIAL_RESULT_PREFIX = "special_result_"
 def _special_nodes(
     spec: PhoneAgentSpec, path: SpecialPath, key: str, by_name: dict[str, dict[str, Any]],
     close_via: Any,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return (global node, extra regular nodes) for one special path.
+) -> tuple[dict[str, tuple[dict[str, Any], tuple[str, ...]]], dict[str, Any]]:
+    """Return ({global key: (node, steps it may fire in)}, extra regular nodes) for one path.
 
     The path never asks the model whether it is finished: it speaks a fixed line, the
     engine (or, if a value is needed from the conversation, the model) runs the tool,
@@ -315,6 +357,8 @@ def _special_nodes(
         ), [scoped], ok_transitions())
 
     extra: dict[str, Any] = {}
+    if tool is not None and _model_fields(tool) and path.ask is None:
+        return _model_tool_special(spec, path, key, tool, result_variable, success, failure)
     if path.ask is None:
         node = action(key)
     else:
@@ -333,7 +377,87 @@ def _special_nodes(
         }]
     node["description"] = path.when.text
     node["condition"] = {"operator": "matches_intent", "description": path.when.text}
-    return node, extra
+    return {key: (node, path.available_in)}, extra
+
+
+def _done_transitions(source_variable: str, sources: tuple[str, ...]) -> list[dict[str, Any]]:
+    """Return to the source step, or go to the read-back when every product is handled.
+
+    No target appears twice (see group_transitions_by_target).
+    """
+    ready = _condition(OFFER_PROGRESS, "equals", "ready")
+    not_ready = _condition(OFFER_PROGRESS, "not_equals", "ready")
+    if "confirm_record" in sources:
+        return [
+            *(
+                {
+                    "target_node": source, "description": "Return to the step the request came from",
+                    "condition": {"logic": "or", "conditions": [{"logic": "and", "conditions": [
+                        _condition(source_variable, "equals", source), not_ready,
+                    ]}]},
+                }
+                for source in sources if source != "confirm_record"
+            ),
+            {"target_node": "confirm_record", "description": "Read back the offers", "condition": {"operator": "always"}},
+        ]
+    return [
+        _transition("confirm_record", "Every product now has an offer or a note", [ready]),
+        *(
+            _transition(source, "Return to the step the request came from", [
+                _condition(source_variable, "equals", source)
+            ])
+            for source in sources[:-1]
+        ),
+        {"target_node": sources[-1], "description": "Return", "condition": {"operator": "always"}},
+    ]
+
+
+def _model_tool_special(
+    spec: PhoneAgentSpec, path: SpecialPath, key: str, tool: dict[str, Any],
+    result_variable: str, success: str, failure: str,
+) -> tuple[dict[str, tuple[dict[str, Any], tuple[str, ...]]], dict[str, Any]]:
+    """A special path whose tool needs a value from the conversation (e.g. which product).
+
+    One small global code step per source step clears the previous result and remembers
+    where to return, so a second use of the path never exits on a stale result and the
+    return target is explicit. The conversation step then exits on the tool result.
+    """
+    source_variable = result_variable + "_from"
+    done_key = key + "_done"
+    returns = path.then == "return"
+    globals_: dict[str, tuple[dict[str, Any], tuple[str, ...]]] = {}
+    for source in path.available_in:
+        entry_key = f"{key}_at_{source}"
+        entry = _code_node(entry_key, (
+            f"vars[{result_variable!r}] = ''\n"
+            f"vars[{source_variable!r}] = {source!r}\n"
+        ), [{"target_node": key, "description": "Handle the special request", "condition": {"operator": "always"}}])
+        entry["description"] = path.when.text
+        entry["condition"] = {"operator": "matches_intent", "description": path.when.text}
+        globals_[entry_key] = (entry, (source,))
+
+    scoped = _response_mapping(tool, {"data.ok": result_variable})
+    after_success = done_key if returns else success
+    after_failure = done_key if returns else failure
+    extra: dict[str, Any] = {key: _conversation(key, render_prompt(
+        SPECIAL_PATH_TASK_TEMPLATE, when=path.when.text, say=path.say.text
+    ), [scoped], [
+        _transition(after_success, "Special-path tool succeeded", [
+            _condition(result_variable, "equals", value) for value in ("true", "True")
+        ]),
+        _transition(after_failure, "Special-path tool failed", [
+            _condition(result_variable, "equals", value) for value in ("false", "False")
+        ]),
+    ])}
+    if returns:
+        number_field = spec.confirmation.data["product_number_field"]
+        body = scoped["function"]["parameters"]["properties"]["body"].get("properties", {})
+        extra[done_key] = _code_node(done_key, special_noted_code(
+            spec, result_variable, path.tool, number_field in body
+        ), [
+            *_done_transitions(source_variable, path.available_in),
+        ])
+    return globals_, extra
 
 
 def special_result_variable(path: SpecialPath) -> str:
@@ -464,8 +588,8 @@ def close_table(spec: PhoneAgentSpec) -> list[tuple[str, str, str, str, bool]]:
     return rows
 
 
-def _closing_code(spec: PhoneAgentSpec) -> str:
-    """Pick outcome, reason and the closing sentence from call state; never raises."""
+def _outcome_choice_code(spec: PhoneAgentSpec) -> str:
+    """Shared snippet: the outcome table and ``choose(candidates)``; never raises."""
     rows = ",\n".join(
         "    (" + ", ".join(_py_str(value) for value in row[:4]) + f", {row[4]!r})"
         for row in close_table(spec)
@@ -473,30 +597,121 @@ def _closing_code(spec: PhoneAgentSpec) -> str:
     return f"""TABLE = [
 {rows},
 ]
-chosen = TABLE[-1]
-try:
-    state = str(vars.get('close_state') or '')
+
+
+def choose(candidates):
+    chosen = TABLE[-1]
     try:
-        recorded = int(vars.get('promise_recorded_count') or 0)
-    except Exception:
-        recorded = 0
-    for row in TABLE:
-        if row[0] == state:
-            chosen = row
-            break
-    if recorded > 0 and not chosen[4]:
-        for row in TABLE:
-            if row[0] == 'promise_recorded':
-                chosen = row
+        found = None
+        for candidate in candidates:
+            for row in TABLE:
+                if row[0] == candidate:
+                    found = row
+                    break
+            if found is not None:
                 break
-except Exception:
-    pass
+        if found is not None:
+            chosen = found
+        try:
+            recorded = int(vars.get('promise_recorded_count') or 0)
+        except Exception:
+            recorded = 0
+        if recorded > 0 and not chosen[4]:
+            for row in TABLE:
+                if row[0] == 'promise_recorded':
+                    chosen = row
+                    break
+    except Exception:
+        pass
+    return chosen
+"""
+
+
+def _closing_code(spec: PhoneAgentSpec) -> str:
+    """Pick outcome, reason and the closing sentence from call state; never raises."""
+    return _outcome_choice_code(spec) + f"""
+chosen = choose([str(vars.get('close_state') or '')])
 vars['close_resolved_state'] = chosen[0]
 vars['close_outcome'] = chosen[1]
 if chosen[2]:
     vars['close_reason'] = chosen[2]
 vars['closing_sentence'] = chosen[3] or {_py_str(CLOSING_FALLBACK_SAY.text)}
 """
+
+
+def _hangup_hook_code(spec: PhoneAgentSpec, url: str) -> str:
+    """Pre-hook of the end-of-call close. Fail-closed: the tool's URL is empty, and only the
+    send branch writes the real ``url`` (as its last step). Skip if the closing chain
+    already ran, else fill outcome and reason from call state. Never raises."""
+    closing = spec.closing.data
+    return _outcome_choice_code(spec) + f"""
+try:
+    ok_value = str(vars.get('close_call_ok') or '').lower()
+    try:
+        attempts = int(vars.get('close_attempts') or 0)
+    except Exception:
+        attempts = 0
+    if ok_value == 'true' or attempts > 0:
+        # The closing chain already sent close_call: never send a second one.
+        config['url'] = ''
+        config['body'] = dict()
+        vars['hangup_close'] = 'skipped'
+    else:
+        verified = str(vars.get('identity_verified') or '').lower() == 'true'
+        candidates = [str(vars.get('close_state') or '')]
+        if not verified:
+            candidates.append('hangup_unverified')
+        candidates.append('hangup')
+        chosen = choose(candidates)
+        body = config.get('body')
+        if isinstance(body, dict):
+            body[{closing["outcome_field"]!r}] = chosen[1]
+            if chosen[2]:
+                body[{closing["reason_field"]!r}] = chosen[2]
+            else:
+                body.pop({closing["reason_field"]!r}, None)
+            vars['hangup_close'] = 'sent:' + chosen[0]
+            config['url'] = {_py_str(url)}
+        else:
+            vars['hangup_close'] = 'skipped:no_body'
+except Exception:
+    pass
+"""
+
+
+def _hangup_close_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
+    """Top-level end-of-call lifecycle tool that records an outcome if the call ended early.
+
+    Every field resolves without the model (literal or call-variable defaults); the
+    pre-hook computes the real outcome or neutralizes the request.
+    """
+    closing = spec.closing.data
+    default = close_table(spec)[-1]
+    result = copy.deepcopy(tool)
+    result["function"]["name"] = "close_call_on_hangup"
+    body = result["function"]["parameters"]["properties"]["body"]
+    properties = body.setdefault("properties", {})
+    kept = {}
+    for name, prop in properties.items():
+        if name == closing["outcome_field"]:
+            kept[name] = {**prop, "default": default[1]}
+        elif name == closing["reason_field"]:
+            if default[2]:
+                kept[name] = {**prop, "default": default[2]}
+        elif not _model_filled(prop):
+            kept[name] = prop
+    body["properties"] = kept
+    body.pop("required", None)
+    # Fail-closed (review T-005c #1): no URL unless the pre-hook decides to send.
+    url_property = result["function"]["parameters"]["properties"]["url"]
+    real_url = str(url_property.get("default") or "")
+    if not real_url or "{{" in real_url:
+        raise SpecError("close_call has no fixed URL for the end-of-call close")
+    url_property["default"] = ""
+    result["config"] = {**result.get("config", {}), "alwaysRunsAt": ["end_of_call"], "maxRetries": 0}
+    result["pre_process_code"] = _hangup_hook_code(spec, real_url)
+    result.pop("response_mapping", None)
+    return result
 
 
 def _close_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
@@ -510,21 +725,32 @@ def _close_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> dict[str, Any]:
-    """Render the T-004 deterministic skeleton from a validated spec and OpenAPI tools."""
+def _check_identity_fields(
+    spec: PhoneAgentSpec, tool: dict[str, Any], warnings: list[str] | None
+) -> None:
+    """Check the spec's identity questions against the tool's selector enum, whatever it is named."""
+    properties = tool["function"]["parameters"]["properties"]["body"].get("properties", {})
+    wanted = {question.field for question in spec.identity_questions}
+    enums = {name: set(map(str, prop["enum"])) for name, prop in properties.items() if prop.get("enum")}
+    if any(wanted <= values for values in enums.values()):
+        return
+    message = (
+        "identity question fields " + ", ".join(sorted(wanted))
+        + " are not all in one enum of the identity tool; not validated"
+    )
+    if warnings is not None:
+        warnings.append(message)
+
+
+def build_spec_workflow(
+    spec: PhoneAgentSpec, tools: list[dict[str, Any]], warnings: list[str] | None = None
+) -> dict[str, Any]:
+    """Render the deterministic skeleton from a validated spec and OpenAPI tools.
+
+    Non-fatal problems are appended to ``warnings`` (written to the trace by build.py).
+    """
     by_name = _tool_index(tools)
-    identity_body = by_name["verify_identity"]["function"]["parameters"]["properties"]["body"]
-    field_schema = identity_body.get("properties", {}).get("field", {})
-    allowed_identity_fields = field_schema.get("enum", [])
-    unknown_identity_fields = [
-        question.field for question in spec.identity_questions
-        if question.field not in allowed_identity_fields
-    ]
-    if unknown_identity_fields:
-        raise SpecError(
-            "identity question fields are not in the OpenAPI enum: "
-            + ", ".join(unknown_identity_fields)
-        )
+    _check_identity_fields(spec, by_name["verify_identity"], warnings)
     close_body = by_name["close_call"]["function"]["parameters"]["properties"]["body"].get("properties", {})
     for field in (spec.closing.data["outcome_field"], spec.closing.data["reason_field"]):
         if field not in close_body:
@@ -786,9 +1012,14 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
     }
 
     global_nodes: dict[str, Any] = {}
+    global_sources: dict[str, tuple[str, ...]] = {}
     for path, key in special_keys:
-        node, extra = _special_nodes(spec, path, key, by_name, close_via)
-        global_nodes[key] = node
+        made, extra = _special_nodes(spec, path, key, by_name, close_via)
+        for global_key, (node, sources) in made.items():
+            if global_key in nodes or global_key in global_nodes:
+                raise SpecError(f"special path step name collision: {global_key!r}")
+            global_nodes[global_key] = node
+            global_sources[global_key] = sources
         nodes.update(extra)
 
     for state, key in close_nodes.items():
@@ -834,10 +1065,13 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         "enum_values": confirmation["intent_values"], "min_confidence": 0.8,
     }]
 
-    for path, key in special_keys:
-        allowed = set(path.available_in)
-        global_nodes[key]["excluded_nodes"] = sorted(
-            [name for name in nodes if name not in allowed] + list(global_nodes)
+    for node in [*nodes.values(), *global_nodes.values()]:
+        if node.get("transitions"):
+            node["transitions"] = group_transitions_by_target(node["transitions"])
+
+    for global_key, sources in global_sources.items():
+        global_nodes[global_key]["excluded_nodes"] = sorted(
+            [name for name in nodes if name not in sources] + list(global_nodes)
         )
 
     return {
@@ -850,6 +1084,8 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         ),
         "nodes": nodes,
         "global_nodes": global_nodes,
+        # F-012: records an outcome when the call ends before the closing chain ran.
+        "tools": [_hangup_close_tool(spec, by_name["close_call"])],
         "test_variables": {
             "customer_id": "placeholder_customer", "first_name": "Test", "last_name": "Customer",
             "title": "Mx", "now": "2000-01-03T12:00",

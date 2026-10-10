@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import json
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from unittest.mock import patch
 
 from builder import build
 from builder.spec import (
-    CLOSE_STATE_NAMES, OFFER_ADJUST, OFFER_UNITS, OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
+    CLOSE_STATE_NAMES, HANGUP_CLOSE_STATES, OFFER_ADJUST, OFFER_UNITS, OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
 )
 from builder.tools_from_openapi import CALL_VARIABLES, tools_from_openapi
 from builder.workflow import build_spec_workflow, close_table, workflow_prompt_estimates
@@ -180,12 +181,12 @@ class OfferCheckTests(unittest.TestCase):
         now = "2026-10-14T11:00"
         unknown = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95)
         self.assertVerdict(unknown, "product_unknown")
-        first = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95, number=1, state={"agreed_item_count": 2})
+        first = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95, number=1)
         self.assertVerdict(first, "ok")
         self.assertEqual("more", first["offer_progress"])
         self.assertEqual(1, first["offers_accepted_count"])
         second = self.run_offer(1, [CARD, LOAN], now, "2026-10-20", 150, number=2, state={
-            "agreed_item_count": 2, "offers_accepted": first["offers_accepted"],
+            "offers_accepted": first["offers_accepted"],
         })
         self.assertEqual("ready", second["offer_progress"])
         self.assertEqual(2, second["offers_accepted_count"])
@@ -195,6 +196,36 @@ class OfferCheckTests(unittest.TestCase):
         )
         accepted = json.loads(second["offers_accepted"])
         self.assertEqual({"product_id": "p-loan", "date": "2026-10-20", "amount": 150.0}, accepted["2"])
+
+    def test_ready_needs_every_product_handled_not_an_extracted_count(self):
+        now = "2026-10-14T11:00"
+        # The extractor said 1, but the customer has two products: not ready after one.
+        first = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95, number=1, state={"agreed_item_count": 1})
+        self.assertEqual("more", first["offer_progress"])
+        # Product 2 was noted (for example disputed): product 1's offer makes it ready.
+        noted = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95, number=1, state={"offers_noted": "[2]"})
+        self.assertEqual("ready", noted["offer_progress"])
+
+    def test_amount_text_with_separators(self):
+        now = "2026-10-14T11:00"
+        big = dict(CARD, past_due=2000.0, minimum_payment=50.0)
+        cases = {"1,200": 1200.0, "1.200,50": 1200.5, "1,200.50": 1200.5, "12,50": 12.5, "1.200.000": 1200000.0,
+                 "95": 95.0, "$1,500": 1500.0}
+        for text, value in cases.items():
+            with self.subTest(text=text):
+                variables = self.run_offer(0, [big], now, "2026-10-16", text)
+                accepted = json.loads(variables["offers_accepted"]).get("1", {})
+                if value <= 2000.0 and value >= 50.0:
+                    self.assertEqual(value, accepted.get("amount"), variables["offer_message"])
+                else:
+                    self.assertNotEqual("ok", variables["offer_verdict"])
+
+    def test_today_not_a_business_day_is_not_called_too_early(self):
+        # 2026-10-26 is a Brief A holiday (Monday): an offer for today is moved, not "too early".
+        variables = self.run_offer(0, [CARD], "2026-10-26T10:00", "2026-10-26", 95)
+        self.assertVerdict(variables, "date_not_business_day", "2026-10-27")
+        variables = self.run_offer(0, [CARD], "2026-10-26T10:00", "2026-10-23", 95)
+        self.assertVerdict(variables, "date_too_early", "2026-10-27")
 
     def test_rejections_count_distinct_offers_up_to_the_spec_limit(self):
         now = "2026-10-14T11:00"
@@ -368,7 +399,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 if key.startswith("close_") and node["node_type"] == "code" and key != "close_attempt"
             }
             states = set(required_close_states(spec)) - {"default"}
-            states |= set(OPTIONAL_CLOSE_STATES)
+            states |= set(OPTIONAL_CLOSE_STATES) - set(HANGUP_CLOSE_STATES)
             states |= {"special:" + path.id for path in spec.special_paths if path.then == "close"}
             self.assertEqual(states, {json.loads(value) for value in markers})
             table = {row[0]: row for row in close_table(spec)}
@@ -453,8 +484,10 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertNotIn("outcome", body.get("required", []))
         self.assertIn("post_process_code", tool)
         self.assertEqual([{"path": "data.ok", "variable": "close_call_ok"}], record["response_mapping"])
-        self.assertEqual(["end_call", "end_call", "close_attempt"], edges(record))
-        self.assertIn('"operand": 1', json.dumps(record["transitions"][1]))
+        self.assertEqual(["end_call", "close_attempt"], edges(record))
+        success_or_given_up = json.dumps(record["transitions"][0])
+        self.assertIn('"variable": "close_call_ok"', success_or_given_up)
+        self.assertIn('"variable": "close_attempts", "operator": "greater_than", "operand": 1', success_or_given_up)
         attempt = {"close_call_ok": "False"}
         exec(code_of(nodes["close_attempt"]), {"vars": attempt})
         exec(code_of(nodes["close_attempt"]), {"vars": attempt})
@@ -530,7 +563,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertIn('"operator": "less_than", "operand": 1', rendered)
 
     def test_product_hook_maps_any_index_from_three_supported_variable_shapes(self):
-        tool = self.render(1)["global_nodes"]["special_product_dispute"]["tools"][0]
+        tool = self.render(1)["nodes"]["special_product_dispute"]["tools"][0]
         code = tool["pre_process_code"]
         compile(code, "<product-hook>", "exec")
         self.assertNotIn("{{", code)
@@ -626,28 +659,42 @@ class MultiStepWorkflowTests(unittest.TestCase):
         )
 
     def test_special_paths_are_global_nodes_with_scoped_exclusions(self):
+        def exits(item):
+            return [transition["target_node"] for transition in item["transitions"]]
+
         for index in range(len(FIXTURES)):
             spec = load_spec(FIXTURES[index])
             workflow = self.render(index)
             nodes, globals_ = workflow["nodes"], workflow["global_nodes"]
             self.assertFalse([key for key in nodes if "_from_" in key])
-            self.assertEqual(len(spec.special_paths), len(globals_))
             close_chain = {"closing", "closing_say", "close_attempt", "close_record", "end_call"}
             for path in spec.special_paths:
                 key = "special_" + path.id
-                node = globals_[key]
+                per_source = key not in globals_
+                entries = (
+                    {f"{key}_at_{source}": {source} for source in path.available_in}
+                    if per_source else {key: set(path.available_in)}
+                )
                 with self.subTest(fixture=FIXTURES[index].name, path=path.id):
-                    self.assertEqual(key, node["name"])
-                    self.assertEqual("matches_intent", node["condition"]["operator"])
-                    fires_in = {name for name in nodes if name not in node["excluded_nodes"]}
-                    self.assertEqual(set(path.available_in), fires_in)
-                    self.assertTrue(close_chain <= set(node["excluded_nodes"]))
-                    self.assertTrue(set(globals_) <= set(node["excluded_nodes"]))
-                    if "identity" not in path.available_in:
-                        self.assertIn("identity", node["excluded_nodes"])
-                        self.assertIn("opening", node["excluded_nodes"])
-                    def exits(item):
-                        return [transition["target_node"] for transition in item["transitions"]]
+                    for entry_key, sources in entries.items():
+                        node = globals_[entry_key]
+                        self.assertEqual(entry_key, node["name"])
+                        self.assertEqual("matches_intent", node["condition"]["operator"])
+                        fires_in = {name for name in nodes if name not in node["excluded_nodes"]}
+                        self.assertEqual(sources, fires_in)
+                        self.assertTrue(close_chain <= set(node["excluded_nodes"]))
+                        self.assertTrue(set(globals_) <= set(node["excluded_nodes"]))
+                        if "identity" not in path.available_in:
+                            self.assertIn("identity", node["excluded_nodes"])
+                            self.assertIn("opening", node["excluded_nodes"])
+                    if per_source:
+                        # Model-filled tool: explicit return targets, no __previous__.
+                        targets = exits(nodes[key]) + exits(nodes.get(key + "_done", {"transitions": []}))
+                        self.assertNotIn("__previous__", targets)
+                        if path.then == "return":
+                            self.assertTrue(set(path.available_in) <= set(targets))
+                        continue
+                    node = globals_[key]
                     targets = exits(node) + (exits(nodes[key + "_go"]) if path.ask else [])
                     if path.then == "return":
                         self.assertEqual({"__previous__"}, set(targets))
@@ -655,6 +702,167 @@ class MultiStepWorkflowTests(unittest.TestCase):
                         self.assertIn("close_special_" + path.id, targets)
                         if path.ask:
                             self.assertIn("__previous__", edges(node))
+
+    def test_model_tool_special_path_clears_stale_result_and_returns_to_its_source(self):
+        workflow = self.render(1)
+        nodes, globals_ = workflow["nodes"], workflow["global_nodes"]
+        for source in ("negotiate", "confirm_record"):
+            entry = globals_["special_product_dispute_at_" + source]
+            variables = {"special_result_product_dispute": "True"}
+            exec(code_of(entry), {"vars": variables})
+            self.assertEqual("", variables["special_result_product_dispute"])
+            self.assertEqual(source, variables["special_result_product_dispute_from"])
+            self.assertEqual(["special_product_dispute"], edges(entry))
+        done = nodes["special_product_dispute_done"]
+        self.assertEqual(["negotiate", "confirm_record"], edges(done))
+        self.assertEqual("always", done["transitions"][-1]["condition"]["operator"])
+        back = json.dumps(done["transitions"][0])
+        self.assertIn('"variable": "special_result_product_dispute_from", "operator": "equals", "operand": "negotiate"', back)
+        self.assertIn('"variable": "offer_progress", "operator": "not_equals", "operand": "ready"', back)
+
+    def test_done_step_without_confirm_source_keeps_ready_shortcut(self):
+        from builder.workflow import _done_transitions
+        transitions = _done_transitions("from_var", ("negotiate", "identity"))
+        self.assertEqual(["confirm_record", "negotiate", "identity"], [item["target_node"] for item in transitions])
+        self.assertEqual("always", transitions[-1]["condition"]["operator"])
+
+    def test_no_step_names_a_target_twice(self):
+        for index in range(len(FIXTURES)):
+            workflow = self.render(index)
+            for key, node in {**workflow["nodes"], **workflow["global_nodes"]}.items():
+                targets = [item["target_node"] for item in node.get("transitions", [])]
+                with self.subTest(fixture=FIXTURES[index].name, step=key):
+                    self.assertEqual(len(targets), len(set(targets)), targets)
+
+    def test_grouping_merges_conditions_and_rejects_mixed_unconditional(self):
+        from builder.workflow import group_transitions_by_target
+        a = {"target_node": "x", "description": "a", "condition": {"logic": "or", "conditions": [{"variable": "v", "operator": "equals", "operand": 1}]}}
+        b = {"target_node": "y", "description": "b", "condition": {"logic": "or", "conditions": [{"variable": "w", "operator": "equals", "operand": 2}]}}
+        c = {"target_node": "x", "description": "c", "condition": {"logic": "or", "conditions": [{"variable": "u", "operator": "is_set"}]}}
+        merged = group_transitions_by_target([a, b, c])
+        self.assertEqual(["x", "y"], [item["target_node"] for item in merged])
+        self.assertEqual(2, len(merged[0]["condition"]["conditions"]))
+        always = {"target_node": "x", "description": "d", "condition": {"operator": "always"}}
+        with self.assertRaisesRegex(ValueError, "internal: target 'x'"):
+            group_transitions_by_target([a, b, always])
+
+    def hangup_tool(self, index=0):
+        tools = self.render(index)["tools"]
+        self.assertEqual(1, len(tools))
+        return tools[0]
+
+    def test_hangup_close_is_an_end_of_call_tool_that_needs_no_model(self):
+        for index in range(len(FIXTURES)):
+            tool = self.hangup_tool(index)
+            with self.subTest(fixture=FIXTURES[index].name):
+                self.assertEqual(["end_of_call"], tool["config"]["alwaysRunsAt"])
+                self.assertEqual(0, tool["config"]["maxRetries"])
+                self.assertEqual("close_call_on_hangup", tool["function"]["name"])
+                body = tool["function"]["parameters"]["properties"]["body"]
+                self.assertNotIn("required", body)
+                for name, prop in body["properties"].items():
+                    default = prop.get("default")
+                    self.assertIsNotNone(default, name)
+                    placeholder = re.fullmatch(r"\{\{(\w+)\}\}", str(default))
+                    if placeholder:
+                        self.assertIn(placeholder.group(1), CALL_VARIABLES, name)
+                code = tool["pre_process_code"]
+                compile(code, "<hangup>", "exec")
+                self.assertNotIn("{{", code)
+                self.assertNotIn("}}", code)
+
+    def run_hangup(self, variables, index=0, hook=True):
+        tool = self.hangup_tool(index)
+        properties = tool["function"]["parameters"]["properties"]
+        body = {name: prop["default"] for name, prop in properties["body"]["properties"].items()}
+        config = {"url": properties["url"]["default"], "body": body}
+        if hook:
+            exec(tool["pre_process_code"], {"vars": variables, "config": config})
+        return config
+
+    def test_hangup_close_is_fail_closed(self):
+        tool = self.hangup_tool()
+        self.assertEqual("", tool["function"]["parameters"]["properties"]["url"]["default"])
+        real = self.render()["nodes"]["close_record"]["pre_actions"][0]["function"]["parameters"]["properties"]["url"]["default"]
+        self.assertTrue(real.endswith("/close_call"))
+        self.assertIn(repr(real)[1:-1], tool["pre_process_code"])
+        # If the hook never runs, nothing can be sent.
+        self.assertEqual("", self.run_hangup({}, hook=False)["url"])
+        # The send branch writes the real URL; a hook error before that leaves it empty.
+        self.assertEqual(real, self.run_hangup({})["url"])
+        config = {"url": "", "body": None}
+        exec(tool["pre_process_code"], {"vars": {}, "config": config})
+        self.assertEqual("", config["url"])
+
+    def test_hangup_close_never_double_records(self):
+        for variables in ({"close_call_ok": "True"}, {"close_call_ok": "false", "close_attempts": 2}, {"close_attempts": 1}):
+            config = self.run_hangup(dict(variables))
+            self.assertEqual("", config["url"])
+            self.assertEqual({}, config["body"])
+
+    def test_hangup_close_outcome_from_call_state(self):
+        cases = [
+            ({}, ("not_verified", "declined")),                                    # hung up before verification
+            ({"identity_verified": "True"}, ("no_promise", "refused")),           # verified, no promise: default row
+            ({"identity_verified": "true", "promise_recorded_count": 1}, ("promise", None)),
+            ({"identity_verified": "true", "close_state": "special:human"}, ("transferred", "human")),
+            ({"close_state": "identity_failed"}, ("not_verified", "failed")),
+        ]
+        for variables, (outcome, reason) in cases:
+            with self.subTest(variables=variables):
+                config = self.run_hangup(dict(variables))
+                self.assertTrue(config["url"].endswith("/close_call"))
+                self.assertEqual(outcome, config["body"]["outcome"])
+                self.assertEqual(reason, config["body"].get("reason"))
+                self.assertEqual("{{customer_id}}", config["body"]["customer_id"])
+        for broken in ({"promise_recorded_count": "x", "close_attempts": "y"}, {"close_state": None}):
+            self.run_hangup(dict(broken))
+        # Without a hang-up row the default row is used.
+        config = self.run_hangup({}, index=1)
+        self.assertEqual("no_promise", config["body"]["outcome"])
+
+    def test_missing_bank_tool_stops_with_a_clear_error(self):
+        document = json.loads((ROOT / "build-the-builder-v2/tools/openapi.json").read_text(encoding="utf-8"))
+        document["paths"]["/close_up"] = document["paths"].pop("/close_call")
+        with self.assertRaisesRegex(SpecError, "does not define the bank tools.*close_call.*Tools found:.*close_up"):
+            build_spec_workflow(load_spec(FIXTURES[0]), tools_from_openapi(document))
+
+    def test_noted_product_counts_as_handled(self):
+        spec = load_spec(FIXTURES[1])
+        nodes = self.render(1)["nodes"]
+        products = json.dumps([CARD, LOAN])
+        accepted = json.dumps({"1": {"product_id": "p-card", "date": "2026-10-16", "amount": 95.0}})
+        variables = {
+            "late_products": products, "offers_accepted": accepted, "offers_noted": "[]",
+            "special_result_product_dispute": "True", "add_note_args.selected_product_number": 2,
+        }
+        exec(code_of(nodes["special_product_dispute_done"]), {"vars": variables})
+        self.assertEqual([2], json.loads(variables["offers_noted"]))
+        self.assertEqual("ready", variables["offer_progress"])
+        # A failed note does not count; nothing accepted yet is never ready.
+        variables = {"late_products": products, "offers_accepted": "{}", "offers_noted": "[]",
+                     "special_result_product_dispute": "False", "add_note_args.selected_product_number": 2}
+        exec(code_of(nodes["special_product_dispute_done"]), {"vars": variables})
+        self.assertEqual([], json.loads(variables["offers_noted"]))
+        self.assertEqual("open", variables["offer_progress"])
+        for broken in ({}, {"special_result_product_dispute": "true", "add_note_args": "x"}):
+            exec(code_of(nodes["special_product_dispute_done"]), {"vars": dict(broken)})
+        self.assertTrue(spec.special_paths)
+
+    def test_identity_selector_field_is_found_by_enum_not_by_name(self):
+        spec = load_spec(FIXTURES[0])
+        document = json.loads((ROOT / "build-the-builder-v2/tools/openapi.json").read_text(encoding="utf-8"))
+        schema = document["paths"]["/verify_identity"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        schema["properties"]["question"] = schema["properties"].pop("field")
+        schema["required"] = ["customer_id", "question", "answer"]
+        warnings = []
+        build_spec_workflow(spec, tools_from_openapi(document), warnings)
+        self.assertEqual([], warnings)
+        schema["properties"]["question"]["enum"] = ["something_else"]
+        warnings = []
+        build_spec_workflow(spec, tools_from_openapi(document), warnings)
+        self.assertEqual(1, len(warnings))
+        self.assertIn("not validated", warnings[0])
 
     def test_no_special_path_exit_depends_on_the_model(self):
         for index in range(len(FIXTURES)):
@@ -681,7 +889,8 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertEqual("tts", human["on_enter"]["type"])
         self.assertEqual("api_request", a["nodes"]["special_human_go"]["node_type"])
         b = self.render(1)
-        dispute = b["global_nodes"]["special_product_dispute"]
+        self.assertEqual("code", b["global_nodes"]["special_product_dispute_at_negotiate"]["node_type"])
+        dispute = b["nodes"]["special_product_dispute"]
         self.assertEqual(["add_note"], tool_names(dispute))
         tool = dispute["tools"][0]
         body = tool["function"]["parameters"]["properties"]["body"]
@@ -763,47 +972,49 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 for child in value:
                     yield from strings(child)
 
-        def keys(value):
-            if isinstance(value, dict):
-                for key, child in value.items():
-                    yield key
-                    yield from keys(child)
-            elif isinstance(value, list):
-                for child in value:
-                    yield from keys(child)
-
         openapi = json.loads((ROOT / "build-the-builder-v2/tools/openapi.json").read_text(encoding="utf-8"))
-        # Values and field names of the bank's tool API are its contract, not brief data.
-        openapi_values = set(strings(openapi)) | set(keys(openapi))
+        # OpenAPI values (enums, required lists) are the tool contract. Field names are NOT
+        # allowed wholesale: a tool field name hardcoded in builder/ would hide a build break.
+        openapi_values = set(strings(openapi))
         fixture_values = set()
         for path in FIXTURES:
             fixture_values.update(strings(json.loads(path.read_text(encoding="utf-8"))))
-        source_literals = set()
+        literal_files = {}
         for path in (ROOT / "builder").glob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            source_literals.update(
-                node.value for node in ast.walk(tree)
-                if isinstance(node, ast.Constant) and isinstance(node.value, str)
-            )
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    literal_files.setdefault(node.value, set()).add(path.name)
         allowed_fixed_tools = {
             "verify_identity", "get_account", "create_promise", "add_note",
             "schedule_callback", "transfer_to_agent", "close_call",
         }
+        # Skeleton vocabulary, derived from the code that defines it.
         required_framework_terms = {
             "third_party", "identity", "negotiate", "confirm_record",
-            "close", "return", "failed",
         } | set(CLOSE_STATE_NAMES) | set(OFFER_UNITS) | set(OFFER_ADJUST)
         # Call variable names are a kit contract (STARTER-KIT-FACTS), not brief data.
         allowed_fixed_tools = allowed_fixed_tools | CALL_VARIABLES
+        # Common words allowed only in the files that use them for their own meaning.
+        file_scoped = {
+            "type": {"tools_from_openapi.py", "workflow.py"},       # JSON schema / Freya node keyword
+            "default": {"spec.py", "tools_from_openapi.py", "workflow.py"},  # schema default, default row
+            "close": {"spec.py", "workflow.py"},                     # special path then=close
+            "return": {"spec.py", "workflow.py"},                    # special path then=return
+            "failed": {"build.py", "freya.py"},                      # trace / API status words
+        }
         leaked = {
             value for value in fixture_values
             if len(value) >= 4
+            and value in literal_files
             and value not in openapi_values
             and value not in allowed_fixed_tools
             and value not in required_framework_terms
-            and value in source_literals
+            and not literal_files[value] <= file_scoped.get(value, set())
         }
         self.assertEqual(set(), leaked)
+        # The identity tool's selector field name must not be hardcoded (review T-005b #2).
+        self.assertNotIn("workflow.py", literal_files.get("field", set()))
         workflow_source = (ROOT / "builder/workflow.py").read_text(encoding="utf-8")
         self.assertNotIn("min(len(products), 3)", workflow_source)
         workflow_tree = ast.parse(workflow_source)

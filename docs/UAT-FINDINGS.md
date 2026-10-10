@@ -101,7 +101,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The leakage allowlist had not been extended for the new spec's framework-level routing vocabulary.
 - **Category:** other
 - **Fix / lesson:** Explicitly distinguish task-mandated graph/schema vocabulary from fixture policy content while retaining the numeric product-limit regression assertion.
-- **Status:** fixed (pending CTO commit)
+- **Status:** fixed (656cb40)
 - **Retest:** Enhanced leakage checks and full offline suite passed (48/48).
 
 ### F-017: Prompt documentation was stale during T-003-fix test run
@@ -113,7 +113,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The test suite was run after changing `builder/prompts.py` but before running its deterministic documentation generator.
 - **Category:** other
 - **Fix / lesson:** Regenerate `docs/PROMPTS.md` immediately after prompt catalog changes, before the full suite.
-- **Status:** fixed (pending CTO commit)
+- **Status:** fixed (656cb40)
 - **Retest:** Prompt documentation regenerated; full offline suite passed (44/44).
 
 ### F-016: Generated post-hook failed to compile after prompt extraction
@@ -125,7 +125,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** Prompt text was inserted with an outer f-string while the hook source itself contained a literal empty dictionary; its braces were interpreted as an empty f-string expression.
 - **Category:** other
 - **Fix / lesson:** Generate hook source with token replacement rather than an outer f-string, so hook syntax and Freya placeholders cannot be reinterpreted.
-- **Status:** fixed (pending CTO commit)
+- **Status:** fixed (656cb40)
 - **Retest:** Hook and all builder modules compile; full offline suite passed (44/44).
 
 ### F-015: Literal leakage scan confused framework words with brief constants
@@ -137,7 +137,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The first scanner compared literal text without distinguishing required framework vocabulary from brief-derived policy values.
 - **Category:** other
 - **Fix / lesson:** Keep the scan strict for fixture content while explicitly exempting only task-mandated graph and trace vocabulary in addition to OpenAPI values and fixed tool names.
-- **Status:** fixed (pending CTO commit)
+- **Status:** fixed (656cb40)
 - **Retest:** Literal scan and full offline suite passed (42/42); no Freya request was made.
 
 ### F-014: Multi-step renderer used three invalid workflow field shapes
@@ -149,7 +149,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The renderer followed generic JSON-schema conventions and shorthand assumptions instead of the exact Freya shapes documented for extraction, pre-actions, and tool-call transitions.
 - **Category:** platform
 - **Fix / lesson:** Assert the exact documented wire shapes offline: extraction entries use `name` and `enum_values`, entry-call mappings live on the node, passthrough metadata is explicit, and `is_tool_call` is a transition flag.
-- **Status:** fixed (pending CTO commit)
+- **Status:** fixed (656cb40)
 - **Retest:** Exact wire-shape assertions and the full offline suite passed (41/41); no Freya request was made.
 
 ### F-013: Prompt catalog expansion made the documentation tests stale
@@ -161,7 +161,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The prompt catalog was expanded without regenerating its deterministic Markdown mirror or updating the count assertion to reflect a variable-size catalog.
 - **Category:** other
 - **Fix / lesson:** Regenerate the prompt documentation whenever the catalog changes and test the catalog entries rather than a historical fixed count.
-- **Status:** fixed (pending CTO commit)
+- **Status:** fixed (656cb40)
 - **Retest:** Prompt documentation was regenerated; catalog-aware assertion and full offline suite passed (41/41).
 
 ### F-012: No closing record when the customer hangs up
@@ -173,7 +173,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The closing tool is only a model tool inside the conversation step. Nothing runs it when the call ends another way.
 - **Category:** tool-call
 - **Fix / lesson:** Make sure an outcome is recorded on every path, including customer hang-up (for example an end-of-call lifecycle step with an outcome computed from call state). Must not double-record when the agent already closed.
-- **Status:** open
+- **Status:** fixed offline (T-005c): a top-level end-of-call lifecycle tool sends `close_call` with an outcome computed by the same code and outcome table as the closing chain (last call-end state, recorded promise, `hangup_unverified` / `hangup` rows if the spec has them, else the default row). It is skipped when the closing chain already sent `close_call`, so it never double-records. Every field has a literal or call-variable default, so no model call fills it. TO-CONFIRM in an approved test: that the lifecycle tool fires on a customer hang-up, that its pre-hook sees the call variables, and that the skip (empty URL) sends nothing.
 - **Retest:** -
 
 ### F-011: Deadline computed with the wrong band; holiday rule not applied
@@ -197,8 +197,8 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The model ignored negative tool results (known platform behavior with bare results), had the account tool available during identity, and tracked attempts from memory.
 - **Category:** routing / honesty
 - **Fix / lesson:** Identity step with only the identity tool; a post-hook that states plainly "answer wrong, N attempts left, ask again / end"; leave the step on the tool's verified or no-attempts-left result; never let the model resend an answer the customer did not give in this turn.
-- **Status:** open (post-hook part in T-003, step structure in T-004)
-- **Retest:** -
+- **Status:** fixed (656cb40, 96f1b80)
+- **Retest:** Retest 2026-10-10: PUB-03 chat on published version 5 (customer `c_5c89791d-107`), ledger score pass. Each wrong answer said honestly, no replayed answer, no "technical issue", no account call before verification.
 
 ### F-009: Identity tool called again after identity was already verified
 
@@ -209,8 +209,8 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** One step holds all tools; nothing removes the identity tool once verification is complete. The model repeated the call on its own.
 - **Category:** routing
 - **Fix / lesson:** Separate identity step that is left on `all_verified` from the tool result, so the identity tool is no longer available afterwards (T-004).
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-004/T-005a/T-005b), not yet retested in chat
+- **Retest:** pending: PUB-01 (happy path)
 
 ### F-008: Promise tool first called with an invented product id
 
@@ -221,8 +221,8 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The product id is a free, model-filled string. The kit warns about exactly this: ids come from the account result and must be given to the model or filled by code.
 - **Category:** tool-call
 - **Fix / lesson:** Fill the product id deterministically: map the account result to variables and offer the model a choice by index or an enum of the returned ids, or set the id in a pre-hook. Never let the model type an id.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-004/T-005a/T-005b), not yet retested in chat
+- **Retest:** pending: PUB-01 (promise)
 
 ### F-007: Moved string constraint was rendered with JSON quotes
 
@@ -233,7 +233,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The generic constraint formatter serialized every value as JSON, including simple strings.
 - **Category:** other
 - **Fix / lesson:** Render scalar strings directly while retaining deterministic JSON rendering for structured constraint values.
-- **Status:** fixed (pending CTO commit)
+- **Status:** fixed (656cb40)
 - **Retest:** Full offline suite passed (29/29); both affected OpenAPI description tests passed.
 
 ### F-006: Builder entry point failed when imported as a package
@@ -257,7 +257,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** Most likely the organizers reset workspaces when they released kit v3 (the README says the base agent "is already in your workspace"). Not confirmed.
 - **Category:** platform
 - **Fix / lesson:** Never trust the local slot file alone. Before updating, check that the stored workflow ID still exists; if not, create a new one and say so in the trace. Stale slot file removed by hand.
-- **Status:** open (builder check not yet implemented; slot file removed)
+- **Status:** fixed offline (T-005c): before saving, the builder reads the stored workflow ID (`builder/slots.py`). On 404 it drops the stale slot entry, writes a `warning:` line to the trace and creates a new workflow. Other errors still stop the build. `freya.py` is unchanged. Offline tests with a fake client.
 - **Retest:** -
 
 ### F-004: Agent said it would transfer but never called the transfer tool
@@ -269,8 +269,8 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** One conversation node with all seven tools and the whole brief as prompt. The model announced the action in words and ended the turn without the tool call; nothing in the workflow forced the call.
 - **Category:** tool-call
 - **Fix / lesson:** Do not rely on the model to remember a required tool. Put the action in a step whose exit depends on the tool result, give tool descriptions an explicit "CALL it when ..." trigger, and make the closing tool impossible to skip.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-004/T-005a/T-005b), not yet retested in chat
+- **Retest:** pending: PUB-09 (transfer)
 
 ### F-003: Promise date ignored the holiday rule
 
@@ -293,8 +293,8 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** Attempt counting and the "verify first" gate lived only in the prompt; the account tool was available from the first turn.
 - **Category:** routing
 - **Fix / lesson:** Keep the account tool out of the identity step; leave the identity step only on the tool's verified/failed result; count attempts from tool results, not from the model's memory.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed (656cb40, 96f1b80): identity step holds only the identity tool, account is read in a later step, attempts come from the tool result.
+- **Retest:** Retest 2026-10-10: PUB-03 chat on published version 5 (customer `c_5c89791d-107`), ledger score pass. Three wrong answers, no account call, closed `not_verified/failed`.
 
 ### F-001: Third party call ended without callback and without close
 
@@ -305,5 +305,5 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** Same as F-004: required tool calls depended on the model's initiative in a single all-purpose step.
 - **Category:** tool-call
 - **Fix / lesson:** A dedicated third-party path whose exit requires the callback/close tool results.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-004/T-005a/T-005b), not yet retested in chat
+- **Retest:** pending: PUB-02 (third party)

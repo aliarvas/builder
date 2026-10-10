@@ -14,6 +14,7 @@ from typing import Any
 if __package__:
     from . import freya
     from .run_trace import FREYA_KEY_PATTERN, TraceWriter
+    from .slots import save_with_slot_check
     from .spec import SpecError, load_spec, spec_entry_variables
     from .tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
     from .workflow import build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
@@ -21,6 +22,7 @@ else:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from builder import freya
     from builder.run_trace import FREYA_KEY_PATTERN, TraceWriter
+    from builder.slots import save_with_slot_check
     from builder.spec import SpecError, load_spec, spec_entry_variables
     from builder.tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
     from builder.workflow import build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
@@ -150,7 +152,10 @@ def main(argv: list[str] | None = None) -> int:
             trace.add("warning", warning)
         if args.spec_path:
             assert spec is not None
-            workflow = build_spec_workflow(spec, tools)
+            spec_warnings: list[str] = []
+            workflow = build_spec_workflow(spec, tools, spec_warnings)
+            for warning in spec_warnings:
+                trace.add("warning", warning)
             trace.add("renderer", "multi-step spec_version=1")
         else:
             workflow = build_workflow(brief_text, tools)
@@ -182,7 +187,9 @@ def main(argv: list[str] | None = None) -> int:
             if not os.environ.get("FREYA_API_KEY"):
                 raise RuntimeError("FREYA_API_KEY is not set; workflow was not validated or saved")
             freya.validate_workflow(slot, workflow)
-            saved = freya.save_workflow(slot, workflow)
+            saved = save_with_slot_check(
+                freya, slot, workflow, warn=lambda message: trace.add("warning", message)
+            )
             workflow_id = saved["workflow_id"]
             output_path = Path("submission") / f"{slot}.workflow.json"
             output_path.parent.mkdir(parents=True, exist_ok=True)

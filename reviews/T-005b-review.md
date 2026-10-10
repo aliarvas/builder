@@ -78,3 +78,58 @@
 
 ## Karar: merge edilebilir
 Teklif kontrolü bağımsız el modelimle birebir eşleşiyor, özel yollar kopyasız ve deterministik çıkışlı. **Bulgu 1 ve 2** küçük/orta işler: 1 Brief B'nin çok ürünlü vakalarını, 2 gizli brief'te build'in çökme riskini kapatıyor; ikisi de bir sonraki görevde (T-005c) ilk sırada yapılmalı. Bulgu 3 chat testinde (iki itirazlı B vakası) doğrulanmalı. İlk onaylı chat testinde (PUB-01, PUB-07) ek olarak gözlenecekler: global node tetiklenmesi, `offer_date`'in ISO biçiminde gelmesi, "Yes" cevabından tutarın çıkarılması ve `create_promise` ledger değerleri.
+
+---
+
+# Fix kontrolü (T-005b-fix, rapor: tasks/T-005b-fix-report.md)
+
+Kapsam: bulgu 1–6, yeni hardcode. Kod değiştirmedim, Freya'ya istek atmadım. `python3 -m unittest`: 81 test geçiyor. Yöntem: `git diff` okuması ve Brief B için üretilen `special_product_dispute_done` geçişlerinin dökümü.
+
+## Bulgu durumu
+
+| # | Bulgu | Durum |
+|---|---|---|
+| 1 | Beklenen ürün sayısı 1 varsayılanı | **Kapandı.** `ready` artık `len(handled_numbers(accepted)) >= len(products)` (`offer_check.py`). Kabul edilen veya not düşülen her ürün sayılıyor. `expected_variable` config'ten çıktı. Not: tüm ürünlere not düşülüp hiç kabul yoksa `ready` olmaz (`accepted` boşsa `open`); bu bilinçli, rapordaki açık soru 1. |
+| 2 | OpenAPI `field` adı kodda sabit | **Kapandı.** `_check_identity_fields` spec'in tüm soru alanlarını kapsayan herhangi bir enum'u arıyor, bulamazsa build durmuyor, trace'e `warning` yazıyor. `workflow.py`'de `"field"` literal'i kalmadı (grep). |
+| 3 | Eski `special_result_<id>` | **Yapı olarak kapandı, ama yeni bir hata var (aşağıda, Yeni-1).** Giriş kod adımı sonucu boşaltıyor, kaynak adımı kaydediyor, çıkış yalnızca o çağrının sonucuna bağlı. Doğru yaklaşım. |
+| 4 | `parse_amount` binlik ayırıcı | **Kapandı.** `1,200`→1200, `1.200,50`→1200.5, `1,200.50`→1200.5, `12,50`→12.5, `1.200.000`→1200000. Tek noktalı `1.200` ondalık sayılıyor; belirsiz, kabul edilebilir. |
+| 5 | Etiket farkı | **Kapandı.** `earliest_counted()` ile "gerçekten erken" ve "yalnızca iş günü değil" ayrılıyor. |
+| 6 | Sızıntı testi alan adı izni | **Kapandı.** Toptan izin kalktı, dosya bazlı dar liste ve gerekçeler var; `field` için ayrı koruma testi eklenmiş. |
+
+## Yeni bulgu
+
+### Yeni-1. [Orta-Yüksek] `_done` adımında aynı hedefli geçişler birleşiyor, Brief B'de yönlendirme bozuluyor
+- `workflow.py` `_model_tool_special` (`_done` geçişleri, yaklaşık satır 380–395). Brief B'de `available_in` = `negotiate`, `confirm_record`. Üretilen geçiş sırası: (1) `offer_progress equals ready` → `confirm_record`; (2) `from equals negotiate` → `negotiate`; (3) `always` → `confirm_record`.
+- Kit `workflow-format.md:408`: aynı `target_node`'a giden geçişler yükleme sırasında tek geçişe birleşir, biri koşulsuzsa birleşen koşulsuz olur. (1) ve (3) aynı hedefte, yani birleşince koşulsuz `confirm_record` olur. Rapor bu riski görmüş ("son kaynak yalnızca always yedeğiyle hedefleniyor") ama (1) de aynı hedefe gidiyor, bu yüzden önlem yetmiyor.
+- Sonuç, birleşik geçişin yerine göre: birinci sırada kalırsa `negotiate`'ta itiraz notundan sonra her zaman `confirm_record`'a gider (hiç kabul yokken söz kaydı adımına düşer); sonda kalırsa `ready` kısayolu kaybolur ve `negotiate` kaynağından hiç `confirm_record`'a geçilmez. İki durumda da amaçlanan davranış bozuk. Brief A'da yok (tek kaynaklı yol). Test "geçiş sırası"nı doğruluyor ama birleştirmeyi simüle etmiyor.
+- **Düzeltme:** hiçbir hedef iki kez geçmesin. `confirm_record`'a giden tek geçiş `always` yedeği olsun; kaynak geçişleri koşula `offer_progress not_equals ready` ekleyerek dönsün: `from equals negotiate AND progress not_equals ready → negotiate`, son kaynak yedeği `always → confirm_record` (kaynak `confirm_record` ise ready için de aynı). Böylece (1) tamamen kalkar. Kaynakların hiçbiri `confirm_record` olmayan bir spec'te ayrı bir `ready → confirm_record` geçişi sorun değil; kural: aynı hedef için tek geçiş yaz. Genel çözüm olarak üretimde hedefe göre grupla, grup içinde koşulları OR'la, hiçbir hedefi iki kez yazma, sıralamayı engine'in birleştirmesine bırakma. Bir birim test: üretilen her node'da `target_node` tekrarının olmadığını kontrol etsin (tüm fixture'lar için).
+
+### Yeni-2. [Düşük, bilgi] Araç adları kodda sabit
+- `workflow.py:34,598,608,667`: `verify_identity`, `get_account`, `create_promise`, `add_note`, `schedule_callback`, `transfer_to_agent`, `close_call`. Bunlar kitin sabit banka API'si (görev tanımı: hidden brief'te aynı tool dosyası); önceki turlarda kabul edilmişti. Gizli tool dosyası farklı adlar taşıyabilirse build `KeyError` ile çöker; en azından anlaşılır bir hata mesajı olsun.
+
+## Hardcode kontrolü
+Brief değeri (tatil, tarih, sayı, sonuç adı) yeni kodda yok. Yeni giriş/`_done` adımları spec'ten (`path.id`, `available_in`, `product_number_field`) üretiliyor. Prompt metni değişmemiş. Adım başına prompt: identity A ~506, B ~479 token, hepsi 1.500 altında.
+
+## Kurallara uyum
+Freya isteği yok, testler çevrimdışı, stdlib. TO-CONFIRM'ler (global **kod** node'u, `add_note_args.<alan>` düz anahtarı, B iki ürünlü akış) ilk onaylı chat testine kalıyor.
+
+## Karar: düzeltme gerekli
+Bulgu 1, 2, 4, 5, 6 kapandı; 3'ün yapısı doğru. **Yeni-1** (aynı hedefli geçişlerin birleşmesi) Brief B'nin ürün itirazı yolunu doğrudan bozduğu için chat testinden önce düzeltilmeli. Düzeltme küçük (geçiş listesini hedefe göre grupla); sonra hızlı bir yeniden bakışla merge edilebilir.
+
+---
+
+# Fix 2 kontrolü (Yeni-1, Yeni-2; rapor: tasks/T-005b-fix-report.md "Fix 2")
+
+Kod değiştirmedim, Freya yok. `python3 -m unittest`: 93 test geçiyor. Yöntem: `git diff` okuması, A ve B fixture'ları üretip her node ve global node'da `target_node` tekrarı taraması.
+
+## Yeni-1: kapandı
+- `group_transitions_by_target` (`workflow.py` ~165): aynı hedefe giden deterministik geçişler OR ile tek geçişe birleşiyor, birleştirme sırası ilk görünen yere göre sabit. Koşulsuz veya niyet/araç geçişi başka bir geçişle çakışırsa build `internal:` hatasıyla duruyor (sessiz birleştirme yok). Doğru tasarım.
+- Brief B `special_product_dispute_done` şimdi: (1) `from == negotiate AND offer_progress != ready → negotiate`, (2) `always → confirm_record`. Hedef tekrarı yok; `ready` ve diğer kaynak durumlarının hepsi yedeğe düşüyor. Önerdiğim çözümle aynı.
+- Tarama: A ve B'de hiçbir node veya global node'da tekrar eden `target_node` yok. Raporun bulduğu üç ek yer (`negotiate`, `close_record`, B özel yol) de OR'lanmış tek geçişe dönmüş.
+- Küçük not (Düşük): gruplayıcı çakışmada `ValueError` fırlatıyor; gizli brief'te bir spec bu duruma düşerse 30 dakikalık build çöker. Üretilen tüm node'ları yalnızca builder üretiyor ve fixture'lar temiz olduğu için olasılık düşük; yine de `build.py` bu hatayı `internal error` mesajıyla ve çıkış kodu ile yakalamalı (şu an yakalanıp yakalanmadığını doğrulamadım).
+
+## Yeni-2: kapandı
+- `_tool_index`: eksik araçlar, bulunan araçlar ve adın OpenAPI yolunun son parçasından alındığı açık mesajla `SpecError`. Araç adlarının sabit kalması kit gereği kabul.
+
+## Hardcode
+Yok. `Karar: merge edilebilir.`

@@ -276,8 +276,11 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Terminal call states the skeleton can produce. Brief-independent; the spec maps each
 # to an outcome-table row through ``outcomes[].on``.
+# Used only when the call ends before the closing chain ran (end-of-call close).
+HANGUP_CLOSE_STATES = ("hangup", "hangup_unverified")
 OPTIONAL_CLOSE_STATES = (
     "callback_failed", "account_failed", "turn_limit", "special_tool_failed", "offer_limit",
+    *HANGUP_CLOSE_STATES,
 )
 # Fixed call-end state names of the skeleton (state names built from spec values,
 # such as "opening:<value>", are not listed). The leakage test allows exactly these.

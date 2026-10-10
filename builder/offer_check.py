@@ -20,6 +20,7 @@ OFFER_PRODUCT = "offer_product_number"
 OFFER_PROGRESS = "offer_progress"
 OFFERS_ACCEPTED = "offers_accepted"
 OFFERS_ACCEPTED_COUNT = "offers_accepted_count"
+OFFERS_NOTED = "offers_noted"
 
 
 def _py_literal(value: Any) -> str:
@@ -43,7 +44,6 @@ def _config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, Any]:
         "products_variable": spec.account.data["products_variable"],
         "products_flat": "get_account_response.data." + spec.account.data["products_field"],
         "product_id_field": spec.account.data["product_id_field"],
-        "expected_variable": spec.confirmation.data["expected_count_variable"],
         "reset": reset_variables,
         "messages": _verdict_messages(),
     }
@@ -90,9 +90,19 @@ def parse_amount(value):
     if isinstance(value, (int, float)):
         return float(value)
     text = re.sub(r'[^0-9.,]', '', str(value or ''))
-    if text.count(',') and not text.count('.'):
-        text = text.replace(',', '.')
-    text = text.replace(',', '')
+    if ',' in text and '.' in text:
+        if text.rfind(',') > text.rfind('.'):
+            text = text.replace('.', '').replace(',', '.')
+        else:
+            text = text.replace(',', '')
+    elif ',' in text:
+        parts = text.split(',')
+        if len(parts[-1]) == 3 or len(parts) > 2:
+            text = text.replace(',', '')
+        else:
+            text = text.replace(',', '.')
+    elif text.count('.') > 1:
+        text = text.replace('.', '')
     try:
         return float(text)
     except Exception:
@@ -170,9 +180,13 @@ def amount_limit(product, rules):
     return round(base * float(rule.get('share', 1)), 2)
 
 
+def earliest_counted():
+    return add_days(today(), OFFER['earliest'])
+
+
 def limits(product):
     start = today()
-    earliest = add_days(start, OFFER['earliest'])
+    earliest = earliest_counted()
     if OFFER['promise_date_must_be_business_day']:
         earliest = shift_to_business(earliest, 1)
     latest = None
@@ -215,6 +229,33 @@ def accepted_offers():
     return value if isinstance(value, dict) else dict()
 
 
+def noted_numbers():
+    value = vars.get(CONFIG['noted'])
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            value = None
+    result = []
+    for item in value if isinstance(value, list) else []:
+        try:
+            result.append(int(item))
+        except Exception:
+            pass
+    return result
+
+
+def handled_numbers(accepted):
+    # Products with an accepted offer or a recorded note.
+    numbers = set(noted_numbers())
+    for key in accepted:
+        try:
+            numbers.add(int(key))
+        except Exception:
+            pass
+    return numbers
+
+
 def summary(accepted):
     lines = []
     for key in sorted(accepted, key=lambda item: int(item) if str(item).isdigit() else 0):
@@ -233,6 +274,7 @@ except Exception:
     vars['today_text'] = 'unknown'
 vars[CONFIG['accepted']] = json.dumps(dict())
 vars[CONFIG['accepted_count']] = 0
+vars[CONFIG['noted']] = json.dumps([])
 vars['offers_summary'] = 'none'
 vars['offer_message'] = 'No offer has been checked yet.'
 vars['offer_verdict'] = 'none'
@@ -264,7 +306,9 @@ try:
         product = products[number - 1]
         earliest, latest, low, high = limits(product)
         if day < earliest:
-            verdict = 'date_too_early'
+            # Before the counted earliest date: too early. On or after it, the date was only
+            # moved because it is not a business day (for example today is a holiday).
+            verdict = 'date_not_business_day' if day >= earliest_counted() else 'date_too_early'
             suggest_day = earliest
         elif latest is not None and day > latest:
             verdict = 'date_too_late'
@@ -289,12 +333,8 @@ try:
             vars[CONFIG['accepted']] = json.dumps(accepted)
             vars[CONFIG['accepted_count']] = len(accepted)
             vars['offers_summary'] = summary(accepted)
-            try:
-                expected = int(vars.get(CONFIG['expected_variable']) or 1)
-            except Exception:
-                expected = 1
-            expected = max(1, min(expected, len(products)))
-            progress = 'ready' if len(accepted) >= expected else 'more'
+            # Ready when every returned product has an accepted offer or a note.
+            progress = 'ready' if len(handled_numbers(accepted)) >= len(products) else 'more'
     signature = str(number) + '|' + str(vars.get(CONFIG['date_var'])) + '|' + str(vars.get(CONFIG['amount_var']))
     if verdict not in ('ok', 'missing', 'product_unknown'):
         try:
@@ -349,10 +389,38 @@ except Exception:
 """
 
 
+NOTED_BODY = """progress = 'open'
+try:
+    if str(vars.get(CONFIG['result_var']) or '').lower() == 'true' and CONFIG['number_arg']:
+        raw = vars.get(CONFIG['number_arg'])
+        if raw is None:
+            args = vars.get(CONFIG['args_var'])
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = None
+            if isinstance(args, dict):
+                raw = args.get(CONFIG['number_field'])
+        number = int(str(raw).strip())
+        noted = noted_numbers()
+        if number not in noted:
+            noted.append(number)
+        vars[CONFIG['noted']] = json.dumps(noted)
+    products = load_products()
+    accepted = accepted_offers()
+    if products and accepted and len(handled_numbers(accepted)) >= len(products):
+        progress = 'ready'
+except Exception:
+    pass
+vars[CONFIG['progress']] = progress
+"""
+
+
 def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, Any]:
     config = _config(spec, reset_variables)
     config.update({
-        "accepted": OFFERS_ACCEPTED, "accepted_count": OFFERS_ACCEPTED_COUNT,
+        "accepted": OFFERS_ACCEPTED, "accepted_count": OFFERS_ACCEPTED_COUNT, "noted": OFFERS_NOTED,
         "progress": OFFER_PROGRESS, "product_var": OFFER_PRODUCT, "date_var": OFFER_DATE,
         "amount_var": OFFER_AMOUNT,
         "number_field": spec.confirmation.data["product_number_field"],
@@ -375,6 +443,18 @@ def offer_setup_code(spec: PhoneAgentSpec) -> str:
 def check_offer_code(spec: PhoneAgentSpec, reset_variables: list[str]) -> str:
     """Check the extracted offer against the spec rules; never raises."""
     return _code(spec, CHECK_BODY, reset_variables)
+
+
+def special_noted_code(spec: PhoneAgentSpec, result_variable: str, tool_name: str, has_number: bool) -> str:
+    """After a product-level special path: remember the noted product, report readiness."""
+    config = _full_config(spec, [])
+    number_field = spec.confirmation.data["product_number_field"]
+    config.update({
+        "result_var": result_variable,
+        "number_arg": tool_name + "_args." + number_field if has_number else "",
+        "args_var": tool_name + "_args",
+    })
+    return PRELUDE.replace("__CONFIG__", _py_literal(config)) + NOTED_BODY
 
 
 def promise_values_hook(spec: PhoneAgentSpec) -> str:
