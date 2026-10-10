@@ -13,20 +13,22 @@ from pathlib import Path
 from typing import Any
 
 if __package__:
-    from . import freya
+    from . import freya, freya_chat
     from .extract import ExtractionError, ExtractionResult, extract_spec
     from .llm import AnthropicClient, LLMResult
     from .run_trace import ANTHROPIC_KEY_PATTERN, FREYA_KEY_PATTERN, SECRET_ENV_NAMES, TraceWriter
+    from .selftest import run_self_tests
     from .slots import save_with_slot_check
     from .spec import SpecError, load_spec, spec_entry_variables
     from .tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
     from .workflow import build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from builder import freya
+    from builder import freya, freya_chat
     from builder.extract import ExtractionError, ExtractionResult, extract_spec
     from builder.llm import AnthropicClient, LLMResult
     from builder.run_trace import ANTHROPIC_KEY_PATTERN, FREYA_KEY_PATTERN, SECRET_ENV_NAMES, TraceWriter
+    from builder.selftest import run_self_tests
     from builder.slots import save_with_slot_check
     from builder.spec import SpecError, load_spec, spec_entry_variables
     from builder.tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
@@ -45,6 +47,10 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--print", dest="print_only", action="store_true", help="print JSON without Freya calls (spec extraction still calls the model unless --spec)")
     mode.add_argument("--validate", action="store_true", help="run only Freya's dry-run validation")
     parser.add_argument("--slot", help="stable workflow slot name")
+    parser.add_argument(
+        "--no-self-test", action="store_true",
+        help="save and publish without post-publish chat checks (development only)",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
         "--spec", dest="spec_path",
@@ -187,7 +193,12 @@ def main(argv: list[str] | None = None) -> int:
         brief_paths, openapi_path, brief_text, document = _load_inputs(args.inputs)
         for path in [*brief_paths, openapi_path]:
             trace.add_input(path)
-        trace.add("self_tests", "none")
+        if args.print_only or args.validate:
+            trace.add("self_tests", "not run in --print/--validate mode")
+        elif args.no_self_test:
+            trace.add("self_tests", "disabled by --no-self-test")
+        else:
+            trace.add("self_tests", "enabled after publish")
         spec = None
         unmapped: list[str] = []
         known_entry_variables = CALL_VARIABLES
@@ -259,6 +270,36 @@ def main(argv: list[str] | None = None) -> int:
             trace.add("agent_id", saved["agent_id"])
             trace.add("published_version", published_version)
             trace.add("export", output_path)
+            if spec is None:
+                trace.add("self_test_summary", "skipped=no_spec")
+            elif args.no_self_test:
+                trace.add("self_test_summary", "skipped=--no-self-test")
+            else:
+                try:
+                    self_test_results = run_self_tests(freya_chat, workflow_id, spec, document)
+                    for item in self_test_results:
+                        trace.add(
+                            "self_test",
+                            f"case={item.case_id} result={item.result} reason={item.reason} "
+                            f"call_id={item.call_id} seconds={item.seconds:.1f}",
+                        )
+                    counts = {
+                        name: sum(item.result == name for item in self_test_results)
+                        for name in ("pass", "fail", "platform_error")
+                    }
+                    trace.add(
+                        "self_test_summary",
+                        f"total={len(self_test_results)} pass={counts['pass']} "
+                        f"fail={counts['fail']} platform_error={counts['platform_error']}",
+                    )
+                    print(
+                        f"self-test: total={len(self_test_results)} pass={counts['pass']} "
+                        f"fail={counts['fail']} platform_error={counts['platform_error']}"
+                    )
+                except Exception as exc:
+                    # The exported workflow remains the build artifact even when its checks fail.
+                    trace.add("self_test_summary", "platform_error=" + _error_text(exc))
+                    print("self-test: platform_error=" + _error_text(exc))
             print(
                 f"save: ok (workflow_id={workflow_id}, agent_id={saved['agent_id']}, "
                 f"published_version={published_version}, export={output_path}, trace={trace.path})"
