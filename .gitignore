@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Veri ve model ağırlıkları repoya girmez
+data/
+checkpoints/
+*.safetensors
+*.pt
+*.wav
+*.flac
+mlruns/
+
+# Secrets and local state
+env.sh
+*.env
+build-the-builder/env.sh
+build-the-builder/.freya-agents.json
+build-the-builder/.personas.json
+build-the-builder/results/
