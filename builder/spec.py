@@ -59,6 +59,7 @@ class Outcome:
     when: Rule
     say: Rule
     on: tuple[str, ...]
+    wins_over_promise: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,13 @@ def _required(obj: dict[str, Any], key: str, path: str) -> Any:
     if key not in obj:
         raise SpecError(f"missing required section or field: {path}.{key}")
     return obj[key]
+
+
+def _flag(obj: dict[str, Any], key: str, path: str) -> bool:
+    value = obj.get(key, False)
+    if not isinstance(value, bool):
+        raise SpecError(f"{path}.{key} must be true or false")
+    return value
 
 
 def _rule(value: Any, path: str) -> Rule:
@@ -161,6 +169,7 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
             _rule(_required(obj, "when", f"outcomes[{index}]"), f"outcomes[{index}].when"),
             _rule(_required(obj, "say", f"outcomes[{index}]"), f"outcomes[{index}].say"),
             _string_list(obj, "on", f"outcomes[{index}]"),
+            _flag(obj, "wins_over_promise", f"outcomes[{index}]"),
         )
         for index, item in enumerate(_list(_required(root, "outcomes", "$"), "outcomes"))
     )
@@ -258,6 +267,12 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Terminal call states the skeleton can produce. Brief-independent; the spec maps each
 # to an outcome-table row through ``outcomes[].on``.
 OPTIONAL_CLOSE_STATES = ("callback_failed", "account_failed", "turn_limit")
+# Fixed call-end state names of the skeleton (state names built from spec values,
+# such as "opening:<value>", are not listed). The leakage test allows exactly these.
+CLOSE_STATE_NAMES = (
+    "opening_unclear", "callback_scheduled", "identity_failed",
+    "promise_recorded", "promise_failed", "default", *OPTIONAL_CLOSE_STATES,
+)
 
 
 def required_close_states(spec: PhoneAgentSpec) -> tuple[str, ...]:

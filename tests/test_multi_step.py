@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from builder import build
 from builder.spec import (
-    OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
+    CLOSE_STATE_NAMES, OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
 )
 from builder.tools_from_openapi import CALL_VARIABLES, tools_from_openapi
 from builder.workflow import build_spec_workflow, close_table, workflow_prompt_estimates
@@ -200,7 +200,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 with self.subTest(fixture=FIXTURES[index].name, state=state):
                     self.assertEqual(expected[1], variables["close_outcome"])
                     self.assertEqual(expected[2], variables.get("close_reason", ""))
-                    self.assertTrue(variables["closing_say"])
+                    self.assertTrue(variables["closing_sentence"])
             for bad in ({}, {"close_state": None, "promise_recorded_count": "x"}, {"close_state": "nope"}):
                 variables = dict(bad)
                 exec(code, {"vars": variables})
@@ -218,7 +218,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
             variables = {"close_state": state}
             exec(code, {"vars": variables})
             self.assertEqual((outcome, reason), (variables["close_outcome"], variables["close_reason"]))
-            self.assertIn(phrase, variables["closing_say"])
+            self.assertIn(phrase, variables["closing_sentence"])
         variables = {"close_state": "promise_recorded"}
         exec(code, {"vars": variables})
         self.assertEqual("promise", variables["close_outcome"])
@@ -227,7 +227,39 @@ class MultiStepWorkflowTests(unittest.TestCase):
         variables = {"close_state": "unmapped", "promise_recorded_count": 1}
         exec(code, {"vars": variables})
         self.assertEqual("promise", variables["close_outcome"])
-        self.assertTrue(spec.outcomes)
+        # A transfer after a recorded promise still closes as transferred.
+        variables = {"close_state": "special:human", "promise_recorded_count": 1}
+        exec(code, {"vars": variables})
+        self.assertEqual(("transferred", "human"), (variables["close_outcome"], variables["close_reason"]))
+        # Hitting the turn limit is not a service error; it uses the default row.
+        default = next(item for item in spec.outcomes if "default" in item.on)
+        variables = {"close_state": "turn_limit"}
+        exec(code, {"vars": variables})
+        self.assertEqual((default.outcome, default.reason), (variables["close_outcome"], variables["close_reason"]))
+
+    def test_recorded_promise_wins_unless_the_row_says_otherwise(self):
+        for index in range(len(FIXTURES)):
+            spec = load_spec(FIXTURES[index])
+            code = code_of(self.render(index)["nodes"]["closing"])
+            table = {row[0]: row for row in close_table(spec)}
+            for state, row in table.items():
+                variables = {"close_state": state, "promise_recorded_count": 1}
+                exec(code, {"vars": variables})
+                expected = row if row[4] else table["promise_recorded"]
+                with self.subTest(fixture=FIXTURES[index].name, state=state):
+                    self.assertEqual(expected[1], variables["close_outcome"])
+        # Brief B: one product recorded, another failed twice -> promise.
+        code = code_of(self.render(1)["nodes"]["closing"])
+        variables = {"close_state": "promise_failed", "promise_recorded_count": 1}
+        exec(code, {"vars": variables})
+        self.assertEqual("promise", variables["close_outcome"])
+        self.assertNotIn("close_reason", variables)
+
+    def test_wins_over_promise_must_be_boolean(self):
+        value = json.loads(FIXTURES[0].read_text(encoding="utf-8"))
+        value["outcomes"][0]["wins_over_promise"] = "yes"
+        with self.assertRaisesRegex(SpecError, "wins_over_promise must be true or false"):
+            parse_spec(value)
 
     def test_close_call_runs_engine_side_with_baked_values_and_bounded_retry(self):
         nodes = self.render()["nodes"]
@@ -248,7 +280,8 @@ class MultiStepWorkflowTests(unittest.TestCase):
         exec(code_of(nodes["close_attempt"]), {"vars": attempt})
         self.assertEqual(2, attempt["close_attempts"])
         self.assertEqual("", attempt["close_call_ok"])
-        self.assertEqual({"type": "tts", "text": "{{closing_say}}"}, nodes["closing_say"]["on_enter"])
+        self.assertEqual({"type": "tts", "text": "{{closing_sentence}}"}, nodes["closing_say"]["on_enter"])
+        self.assertEqual(0, tool["config"]["maxRetries"])
         for key, node in nodes.items():
             self.assertNotIn("close_call", tool_names(node), key)
 
@@ -266,6 +299,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
             identity = spec.identity.data
             self.assertIn(identity["answer_verified_field"] + " is false: say the answer did not match", task)
             self.assertIn("Ask the same question again", task)
+            self.assertIn("After the last question, ask nothing more", task)
             self.assertIn("Do not thank them as if it passed", task)
             self.assertIn(identity["failed_answer_instruction"]["text"], task)
             self.assertIn(identity["attempts_left_field"] + " is 0: " + identity["exhausted_say"]["text"], task)
@@ -495,10 +529,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         required_framework_terms = {
             "third_party", "identity", "negotiate", "confirm_record",
             "close", "return", "failed",
-        } | set(OPTIONAL_CLOSE_STATES) | {
-            "opening_unclear", "callback_scheduled", "identity_failed",
-            "promise_recorded", "promise_failed", "default",
-        }
+        } | set(CLOSE_STATE_NAMES)
         # Call variable names are a kit contract (STARTER-KIT-FACTS), not brief data.
         allowed_fixed_tools = allowed_fixed_tools | CALL_VARIABLES
         leaked = {

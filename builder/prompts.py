@@ -148,7 +148,8 @@ IDENTITY_TASK_TEMPLATE = PromptDefinition(
     "Ask these security questions one at a time, in order. Call the identity tool with each answer:\n{questions}\n"
     "Convert the customer's spoken answer into the tool format yourself. Never ask the customer to say a technical format.\n"
     "After each tool result:\n"
-    "- {answer_verified} is true: acknowledge briefly and ask the next question.\n"
+    "- {answer_verified} is true: acknowledge briefly and ask the next question. "
+    "After the last question, ask nothing more; say the answers matched and give no account details yet.\n"
     "- {answer_verified} is false: say the answer did not match. Do not thank them as if it passed. "
     "Ask the same question again; never move to the next question until this one is verified. {failed_answer}\n"
     "- The action was not carried out: ask for the same answer again; it is not a wrong answer.\n"
@@ -168,7 +169,7 @@ CONFIRM_TASK_TEMPLATE = PromptDefinition(
 )
 CLOSING_FALLBACK_SAY = PromptDefinition(
     "CLOSING_FALLBACK_SAY", "Spoken goodbye when the matched outcome row has an empty closing sentence.", "phone agent (fixed spoken line)",
-    "builder/workflow.py — closing code step (closing_say)", "Thank you for your time. Goodbye.",
+    "builder/workflow.py — closing code step (closing_sentence)", "Thank you for your time. Goodbye.",
 )
 SPECIAL_PATH_TASK_TEMPLATE = PromptDefinition(
     "SPECIAL_PATH_TASK_TEMPLATE", "Handles one spec-defined exceptional customer path.", "phone agent",

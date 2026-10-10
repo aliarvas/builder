@@ -278,7 +278,8 @@
         "text": "Thank you for speaking with me today. Goodbye.",
         "source": "Rule 47"
       },
-      "on": []
+      "on": [],
+      "wins_over_promise": true
     },
     {
       "outcome": "no_promise",
@@ -413,8 +414,7 @@
       },
       "on": [
         "promise_failed",
-        "account_failed",
-        "turn_limit"
+        "account_failed"
       ]
     },
     {

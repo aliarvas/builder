@@ -321,26 +321,30 @@ def _close_state_code(state: str) -> str:
     return f"vars['close_state'] = {_py_str(state)}\n"
 
 
-def close_table(spec: PhoneAgentSpec) -> list[tuple[str, str, str, str]]:
-    """(state, outcome, reason, closing sentence) rows; the ``default`` row comes last."""
-    says = {(item.outcome, item.reason): item.say.text for item in spec.outcomes}
+def close_table(spec: PhoneAgentSpec) -> list[tuple[str, str, str, str, bool]]:
+    """(state, outcome, reason, closing sentence, wins over a recorded promise) rows.
+
+    The ``default`` row comes last.
+    """
+    by_pair = {(item.outcome, item.reason): item for item in spec.outcomes}
     rows = [
-        (state, item.outcome, item.reason, item.say.text)
+        (state, item.outcome, item.reason, item.say.text, item.wins_over_promise)
         for item in spec.outcomes for state in item.on if state != "default"
     ]
-    rows.extend(
-        ("special:" + path.id, path.outcome, path.reason, says[(path.outcome, path.reason)])
-        for path in spec.special_paths if path.then == "close"
-    )
+    for path in spec.special_paths:
+        if path.then == "close":
+            item = by_pair[(path.outcome, path.reason)]
+            rows.append(("special:" + path.id, path.outcome, path.reason, item.say.text, item.wins_over_promise))
     default = next(item for item in spec.outcomes if "default" in item.on)
-    rows.append(("default", default.outcome, default.reason, default.say.text))
+    rows.append(("default", default.outcome, default.reason, default.say.text, default.wins_over_promise))
     return rows
 
 
 def _closing_code(spec: PhoneAgentSpec) -> str:
     """Pick outcome, reason and the closing sentence from call state; never raises."""
     rows = ",\n".join(
-        "    (" + ", ".join(_py_str(value) for value in row) + ")" for row in close_table(spec)
+        "    (" + ", ".join(_py_str(value) for value in row[:4]) + f", {row[4]!r})"
+        for row in close_table(spec)
     )
     return f"""TABLE = [
 {rows},
@@ -352,26 +356,22 @@ try:
         recorded = int(vars.get('promise_recorded_count') or 0)
     except Exception:
         recorded = 0
-    candidates = [state]
-    if recorded > 0:
-        candidates.append('promise_recorded')
-    found = None
-    for candidate in candidates:
-        for row in TABLE:
-            if row[0] == candidate:
-                found = row
-                break
-        if found is not None:
+    for row in TABLE:
+        if row[0] == state:
+            chosen = row
             break
-    if found is not None:
-        chosen = found
+    if recorded > 0 and not chosen[4]:
+        for row in TABLE:
+            if row[0] == 'promise_recorded':
+                chosen = row
+                break
 except Exception:
     pass
 vars['close_resolved_state'] = chosen[0]
 vars['close_outcome'] = chosen[1]
 if chosen[2]:
     vars['close_reason'] = chosen[2]
-vars['closing_say'] = chosen[3] or {_py_str(CLOSING_FALLBACK_SAY.text)}
+vars['closing_sentence'] = chosen[3] or {_py_str(CLOSING_FALLBACK_SAY.text)}
 """
 
 
@@ -381,7 +381,8 @@ def _close_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
         closing["outcome_field"]: "{{close_outcome}}",
         closing["reason_field"]: "{{close_reason}}",
     }, "closing")
-    result.setdefault("config", {})["maxRetries"] = 1
+    # Write tool: no tool-level retries; the flow retries once (close_attempt).
+    result.setdefault("config", {})["maxRetries"] = 0
     return result
 
 
@@ -612,7 +613,7 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
             **_code_node("closing_say", "vars['closing_said'] = 'yes'\n", [
                 {"target_node": "close_attempt", "description": "Goodbye said", "condition": {"operator": "always"}},
             ]),
-            "on_enter": {"type": "tts", "text": "{{closing_say}}"},
+            "on_enter": {"type": "tts", "text": "{{closing_sentence}}"},
         },
         "close_attempt": _code_node("close_attempt", _increment_code("close_attempts", "close_call_ok"), [
             {"target_node": "close_record", "description": "Record the outcome", "condition": {"operator": "always"}},

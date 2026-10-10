@@ -83,3 +83,34 @@
 
 ## Karar: merge edilebilir
 F-019..F-022 düzeltmeleri doğru ve kapanış mühendisliği (kodla seçim, tek `end_call` yolu, sınırlı yeniden deneme, dürüst başarısızlık) sağlam. **Bulgu 1 ve 2** küçük ve genel; Brief B / çok ürün testlerinden önce kapatılmalı. Sonraki onaylı chat testinde sırayla gözlenecekler: self-loop kalkınca "Suppressed: Missing prior assistant message" kayboldu mu, `closing_say` cümlesi `close_call`'dan önce konuşuldu mu, `close_reason` boşken alan düştü mü, `close_record` `data.ok`'u doldurdu mu.
+
+---
+
+# Fix kontrolü (T-005a-fix: bulgu 1, 2, 4, 5, 6, 7)
+
+**Kapsam:** `tasks/T-005a-fix-report.md`; `builder/spec.py`, `builder/workflow.py`, `builder/prompts.py`, `tests/test_multi_step.py`, fixtures. Bulgu 3 (TO-CONFIRM) chat testine bırakıldı, kapsam dışı.
+**Karar: merge edilebilir.** Altı bulgunun hepsi kanıtla kapandı; 62 test geçiyor; yeni hardcode yok. Freya'ya istek atılmadı, kod değiştirmedim.
+
+## Bulgu durumu
+
+| # | Durum | Kanıt |
+|---|---|---|
+| 1 (söz kayıtlıyken kapanış önceliği) | **Kapandı** | `spec.py`: `outcomes[].wins_over_promise` (isteğe bağlı, varsayılan false, boolean olmayan değer SpecError; test `test_wins_over_promise_must_be_boolean`). `workflow.py` `_closing_code`: önce durumun kendi satırı, sonra `recorded > 0 and not chosen[4]` ise `promise_recorded` satırı. Üretilen kodu çalıştırdım: B'de `promise_failed` + 1 kayıt → `promise`; `negotiation:no_arrangement` + 1 kayıt → `promise`; `special:human_transfer` + 1 kayıt → `transferred/human` (transfer kazanıyor); kayıt 0 iken `promise_failed` → `no_promise/service_error`. A için aynı davranış (`special:human` fixture'da `wins_over_promise: true`). |
+| 2 (`close_call` `maxRetries`) | **Kapandı** | `_close_tool`: `config.maxRetries = 0` (render çıktısı: `{'timeoutMs': 10000, 'maxRetries': 0}`, A ve B); yeniden deneme yalnızca `close_attempt` döngüsünde (en çok 2 çağrı). Test (`tests/test_multi_step.py:284`). `get_account` için `maxRetries: 1` kalıyor (salt-okuma, kural uyumlu). |
+| 4 (düğüm/değişken adı) | **Kapandı** | Değişken `closing_sentence`; düğüm `closing_say`; `on_enter` `{{closing_sentence}}` (test `:283`); `closing` kodunda eski `vars['closing_say']` kalmadı. |
+| 5 (son kimlik sorusu sonrası) | **Kapandı** | `prompts.py:152`: "After the last question, ask nothing more; say the answers matched and give no account details yet." Test `:302`. |
+| 6 (izin listesi türetme) | **Kapandı, kısmi** | `spec.py` `CLOSE_STATE_NAMES` tek sabit; sızıntı testi `set(CLOSE_STATE_NAMES)` kullanıyor (`:532`), elle liste yok. Dosya bazlı kapsam (öneri) yapılmadı: `failed`, `default`, `return` hâlâ her dosyada izinli. Düşük risk (alt dize taramam temiz); isteğe bağlı iyileştirme olarak kalıyor. |
+| 7 (`turn_limit` eşlemesi) | **Kapandı** | A ve B fixture'larında `turn_limit` artık `default` satırına düşüyor (çalıştırdım: `turn_limit` → `no_promise/refused`, çözülen durum `default`); `service_error` yalnızca `promise_failed`/`account_failed`'da. Test `:236`. |
+
+## Yeni hardcode taraması
+
+- `builder/*.py` alt dize taraması (banka adı, tarih/tutar, outcome/reason adı, kuyruk adı, saat penceresi, "mobile app/branch"): **temiz.**
+- Yeni sabitler yapısal: `CLOSE_STATE_NAMES` (iskelet sözlüğü), `wins_over_promise` (spec alanı, brief değeri kodda yok), `maxRetries 0/1`. Brief'e özgü sayı veya sözcük eklenmedi.
+
+## Notlar (bloklayıcı değil)
+
+- **T-006 için:** `wins_over_promise` ve `default` satırı seçimi artık extractor'ın brief'ten çıkaracağı alanlar (rapor açık sorusu 3 doğru). Brief'te "transfer her zaman kazanır" gibi bir cümle yoksa varsayılan `false` kalır; bu da hiçbir satırın promise'ı ezmemesi demek, yani yalnızca açık kural varsa bayrak true olmalı.
+- **Bulgu 3 ve F-012** (açık kalanlar): ilk onaylı chat testinde gözlenecek maddeler değişmedi (sabit cümle `close_call`'dan önce söyleniyor mu, `close_reason` boşken alan düşüyor mu, `close_record` `data.ok`'u dolduruyor mu); müşteri kapatırsa kayıt yazılması hâlâ end-of-call yedeğini bekliyor. `add_note(service_error)` (Brief B kural 11) T-005'te.
+
+## Karar: merge edilebilir
+Bulgular 1, 2, 4, 5, 6 ve 7 kapandı; yeni hardcode yok. Brief B / çok ürün chat testlerine geçilebilir.

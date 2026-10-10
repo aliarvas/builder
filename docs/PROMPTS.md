@@ -147,14 +147,14 @@ Rules:
 - Purpose: Asks ordered identity questions and uses the verification tool.
 - Receiver: phone agent
 - Used at: builder/workflow.py — identity
-- Approximate tokens: ~155 static + `{questions}` characters ÷ 4 + `{answer_verified}` characters ÷ 4 + `{failed_answer}` characters ÷ 4 + `{attempts_left}` characters ÷ 4 + `{exhausted_say}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~180 static + `{questions}` characters ÷ 4 + `{answer_verified}` characters ÷ 4 + `{failed_answer}` characters ÷ 4 + `{attempts_left}` characters ÷ 4 + `{exhausted_say}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Ask these security questions one at a time, in order. Call the identity tool with each answer:
 {questions}
 Convert the customer's spoken answer into the tool format yourself. Never ask the customer to say a technical format.
 After each tool result:
-- {answer_verified} is true: acknowledge briefly and ask the next question.
+- {answer_verified} is true: acknowledge briefly and ask the next question. After the last question, ask nothing more; say the answers matched and give no account details yet.
 - {answer_verified} is false: say the answer did not match. Do not thank them as if it passed. Ask the same question again; never move to the next question until this one is verified. {failed_answer}
 - The action was not carried out: ask for the same answer again; it is not a wrong answer.
 - {attempts_left} is 0: {exhausted_say} Ask nothing more and give no account details.
@@ -192,7 +192,7 @@ Rules:
 
 - Purpose: Spoken goodbye when the matched outcome row has an empty closing sentence.
 - Receiver: phone agent (fixed spoken line)
-- Used at: builder/workflow.py — closing code step (closing_say)
+- Used at: builder/workflow.py — closing code step (closing_sentence)
 - Approximate tokens: ~9 (characters ÷ 4)
 
 ```text
