@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import math
 import re
@@ -10,6 +11,8 @@ from typing import Any
 
 from .prompts import (
     ACCOUNT_WAIT_LINE,
+    SPECIAL_ASK_PHRASED_TEMPLATE,
+    SPECIAL_SAY_FALLBACK,
     CLOSING_FALLBACK_SAY,
     CONVERSATION_NO_TOOL_RULE,
     CONVERSATION_TOOL_RULE_TEMPLATE,
@@ -33,9 +36,11 @@ from .offer_check import (
     promise_values_hook, special_noted_code,
 )
 from .spec import ENFORCEMENT_CHECKS, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
+from .spoken import agent_directed, spoken_words
 from .tools_from_openapi import CALL_VARIABLES
 
 
+IDENTITY_CHECK = "identity_check"
 FIXED_TOOL_NAMES = frozenset(
     {"verify_identity", "get_account", "create_promise", "add_note", "schedule_callback", "transfer_to_agent", "close_call"}
 )
@@ -361,6 +366,8 @@ def _special_nodes(
             ]),
         ]
 
+    extra: dict[str, Any] = {}
+
     def action(node_key: str) -> dict[str, Any]:
         if tool is None and path.then == "close":
             node = _code_node(node_key, _write_close_state([("True", "special:" + path.id)]), [
@@ -376,9 +383,12 @@ def _special_nodes(
                 "transitions": [{"target_node": success, "description": "Line spoken", "condition": {"operator": "always"}}],
             }
         if not _model_fields(tool):
-            return {
-                "name": node_key, "node_type": "api_request",
-                "on_enter": {"type": "tts", "text": path.say.text},
+            # F-050: a tts entry on a passthrough api_request step breaks the turn on the platform
+            # (HTTP 502, state rolled back). The line is spoken by a code step; the api step is silent.
+            call_key = node_key + "_call"
+            extra[call_key] = {
+                "name": call_key, "node_type": "api_request",
+                "on_enter": {"type": "silent"},
                 "passthrough": True, "passthrough_default_transition": failure,
                 "pre_actions": [tool],
                 "response_mapping": [{"path": "data.ok", "variable": result_variable}],
@@ -387,12 +397,16 @@ def _special_nodes(
                     {"target_node": failure, "description": "Special-path tool did not succeed", "condition": {"operator": "always"}},
                 ],
             }
+            node = _code_node(node_key, f"vars[{(result_variable + '_said')!r}] = 'yes'\n", [
+                {"target_node": call_key, "description": "Line spoken; run the tool", "condition": {"operator": "always"}},
+            ])
+            node["on_enter"] = {"type": "tts", "text": path.say.text}
+            return node
         scoped = _response_mapping(tool, {"data.ok": result_variable})
         return _conversation(node_key, render_prompt(
             SPECIAL_PATH_TASK_TEMPLATE, when=path.when.text, say=path.say.text
         ), [scoped], ok_transitions())
 
-    extra: dict[str, Any] = {}
     if tool is not None and _model_fields(tool) and path.ask is None:
         return _model_tool_special(spec, path, key, tool, result_variable, success, failure)
     if path.ask is None:
@@ -401,11 +415,14 @@ def _special_nodes(
         go_key = key + "_go"
         extra[go_key] = action(go_key)
         choice = result_variable + "_choice"
-        node = _conversation(key, render_prompt(SPECIAL_ASK_TASK_TEMPLATE, ask=path.ask.text), [], [
+        # F-047: an ask written as an instruction is phrased by the agent, never read aloud.
+        phrased = bool(agent_directed(path.ask.text))
+        ask_prompt = SPECIAL_ASK_PHRASED_TEMPLATE if phrased else SPECIAL_ASK_TASK_TEMPLATE
+        node = _conversation(key, render_prompt(ask_prompt, ask=path.ask.text), [], [
             _transition(go_key, "The customer still wants this", [_condition(choice, "equals", "proceed")]),
             _transition("__previous__", "The customer accepts help instead", [_condition(choice, "equals", "stay")]),
         ])
-        node["on_enter"] = {"type": "tts", "text": path.ask.text}
+        node["on_enter"] = {"type": "llm"} if phrased else {"type": "tts", "text": path.ask.text}
         node["extraction_schema"] = [{
             "name": choice, "type": "string", "enum_values": ["proceed", "stay"],
             "description": "proceed: the customer still insists on this request; stay: they accept help or drop it",
@@ -952,7 +969,7 @@ def _render_spec_workflow(
         special_result_variable(path) for path in spec.special_paths
     ] + [negotiation["intent_variable"], confirmation["intent_variable"]]
     used = {
-        "opening", "opening_reask", "opening_unclear", "third_party", "identity", "account", "negotiate",
+        "opening", "opening_reask", "opening_unclear", "third_party", IDENTITY_CHECK, "identity", "account", "negotiate",
         "confirm_record", "confirmation_progress", "closing", "closing_say", "close_attempt",
         "offer_setup", "check_offer",
         "close_record", "end_call",
@@ -983,7 +1000,7 @@ def _render_spec_workflow(
 
     opening_transitions = [
         *(to_closing("opening:" + value, "Opening path must close") for value in opening["close_values"]),
-        _transition("identity", "Customer answered", [
+        _transition(IDENTITY_CHECK, "Customer answered", [
             _condition(opening["who_answered_variable"], "equals", value)
             for value in opening["identity_values"]
         ]),
@@ -1046,12 +1063,20 @@ def _render_spec_workflow(
             to_closing("callback_failed", "Callback could not be scheduled"),
             *(to_closing("third_party:" + value, "Third-party path is complete") for value in third["close_values"]),
         ]),
+        # F-049: a replayed or re-entered identity step must not ask again once verified.
+        IDENTITY_CHECK: _code_node(IDENTITY_CHECK, "vars['identity_checked'] = 'yes'\n", [
+            _transition("account", "Identity already verified", [
+                _condition("identity_verified", "equals", value) for value in ("true", "True")
+            ]),
+            {"target_node": "identity", "description": "Ask the security questions", "condition": {"operator": "always"}},
+        ]),
         "identity": _conversation("identity", render_prompt(
             IDENTITY_TASK_TEMPLATE, questions=questions,
             answer_verified=identity["answer_verified_field"],
             failed_answer=identity["failed_answer_instruction"]["text"],
             attempts_left=identity["attempts_left_field"],
             exhausted_say=identity["exhausted_say"]["text"],
+            wait_line=spec.agent.wait_line or ACCOUNT_WAIT_LINE.text,
             rules=_rule_lines(plan.rules("identity")),
         ), [identity_tool], [
             _transition("account", "Identity verified", [
@@ -1060,9 +1085,9 @@ def _render_spec_workflow(
             to_closing("identity_failed", "No identity attempts remain"),
         ]),
         "account": {
-            # F-043: a fixed line covers the account lookup, so the platform adds no filler of its own.
-            "name": "account", "node_type": "api_request",
-            "on_enter": {"type": "tts", "text": spec.agent.wait_line or ACCOUNT_WAIT_LINE.text},
+            # F-050: silent. A tts entry here broke the turn on the platform (502 and rollback);
+            # the wait line is said by the identity step after the last answer passed.
+            "name": "account", "node_type": "api_request", "on_enter": {"type": "silent"},
             "passthrough": True, "passthrough_default_transition": "offer_setup",
             "pre_actions": [account_tool],
             "response_mapping": [{
@@ -1269,7 +1294,6 @@ def _render_spec_workflow(
             MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
             agent_name=spec.agent.name,
             language=spec.agent.language,
-            introduction=spec.agent.introduction.text,
             rules=_rule_lines(plan.rules(GLOBAL)),
         ),
         "nodes": nodes,
@@ -1289,6 +1313,7 @@ def _render_spec_workflow(
 
 PROMPT_TARGET_TOKENS = 1200
 PROMPT_HARD_LIMIT_TOKENS = 1500
+BUDGET_EXCEEDED = "budget_exceeded_but_shipped"
 GLOBAL = "global"
 # Step prompt -> spec sections whose rules it shows. Closing rules have no step prompt:
 # a rule not guaranteed by the closing code goes to the global prompt.
@@ -1311,14 +1336,16 @@ _FILLER = re.compile(r"\b(?:the|a|an|that)\b")
 def enforcement_available(spec: PhoneAgentSpec, check: str) -> bool:
     """True when the generated code really performs ``check`` for this spec."""
     offer = spec.offer.data
+    limit = offer.get("max_rejected_offers")
     return {
-        "offer_dates": True,  # earliest is required; latest rules may be empty (no latest date)
+        # Dates: a latest-date rule must exist (earliest alone does not cover deadline rules).
+        "offer_dates": bool(offer.get("latest")),
         "business_days": bool(offer.get("promise_date_must_be_business_day")),
         "offer_amounts": bool(offer.get("min_amount") or offer.get("max_amount")),
         "weekday_reading": offer.get("next_weekday", "ask") != "ask",
-        "invalid_offer_limit": True,
-        "identity_attempts": True,
-        "closing_outcome": True,
+        "invalid_offer_limit": isinstance(limit, int) and not isinstance(limit, bool) and limit >= 1,
+        "identity_attempts": bool(spec.identity.data.get("attempts_left_field") and spec.identity_questions),
+        "closing_outcome": bool(spec.outcomes and spec.closing.data.get("outcome_field")),
     }.get(check, False)
 
 
@@ -1350,11 +1377,9 @@ class RulePlan:
                 for index, rule in enumerate(sections[name]):
                     key = f"global_rules[{index}]" if name == "global" else f"{name}.rules[{index}]"
                     self.entries.append([key, rule, step])
-                    self.notes[key] = "closing rule, not guaranteed by code" if name == "closing" else "its section"
-        # Closing rules guaranteed by the closing code never needed a prompt.
-        for entry in self.entries:
-            if entry[0].startswith("closing.") and self._code_ok(entry[1]):
-                self._to_code(entry)
+                    self.notes[key] = "closing rule, no step prompt" if name == "closing" else "its section"
+        # Closing rules have no step prompt: all start in the global prompt. A rule tagged
+        # closing_outcome leaves it only under budget pressure, like every other tag (T-009b).
 
     def _code_ok(self, rule: Rule) -> bool:
         return bool(rule.enforced_by) and enforcement_available(self.spec, rule.enforced_by)
@@ -1434,6 +1459,45 @@ class RulePlan:
         return lines
 
 
+def speakable_spec(spec: PhoneAgentSpec) -> tuple[PhoneAgentSpec, list[str]]:
+    """Make every field spoken word for word safe to say (F-047).
+
+    ``Say: "..."`` wrappers are unwrapped. Text that still addresses the agent is replaced:
+    an outcome line by a polite goodbye, a special path line by a short thank-you, a wait
+    line by the builder default; a special path question is phrased by the agent instead.
+    Every replacement is returned as a ``spoken_fallback`` warning.
+    """
+    notes: list[str] = []
+
+    def clean(text: str, fallback: str, where: str) -> str:
+        words = spoken_words(text)
+        reason = agent_directed(words)
+        if not reason:
+            return words
+        notes.append(f"spoken_fallback {where}: {reason}; spoken instead: {fallback!r}")
+        return fallback
+
+    outcomes = tuple(
+        dataclasses.replace(item, say=dataclasses.replace(
+            item.say, text=clean(item.say.text, CLOSING_FALLBACK_SAY.text, f"outcomes[{index}].say")))
+        for index, item in enumerate(spec.outcomes)
+    )
+    paths = []
+    for index, path in enumerate(spec.special_paths):
+        say = dataclasses.replace(path.say, text=clean(path.say.text, SPECIAL_SAY_FALLBACK.text,
+                                                       f"special_paths[{index}].say"))
+        ask = path.ask
+        if ask is not None:
+            ask = dataclasses.replace(ask, text=spoken_words(ask.text))
+            reason = agent_directed(ask.text)
+            if reason:
+                notes.append(f"spoken_fallback special_paths[{index}].ask: {reason}; the agent phrases the question")
+        paths.append(dataclasses.replace(path, say=say, ask=ask))
+    wait_line = clean(spec.agent.wait_line, ACCOUNT_WAIT_LINE.text, "agent.wait_line") if spec.agent.wait_line else ""
+    agent = dataclasses.replace(spec.agent, wait_line=wait_line)
+    return dataclasses.replace(spec, outcomes=outcomes, special_paths=tuple(paths), agent=agent), notes
+
+
 def build_spec_workflow(
     spec: PhoneAgentSpec, tools: list[dict[str, Any]], warnings: list[str] | None = None,
     placements: list[str] | None = None, *,
@@ -1443,10 +1507,11 @@ def build_spec_workflow(
 
     Prompt budget: a step over ``target_tokens`` first loses rules the generated code
     guarantees, then duplicate wording, then rules shared by several steps move to the
-    global prompt. A step still over ``hard_limit_tokens`` fails the build; no policy rule
-    is cut. Non-fatal problems go to ``warnings``; ``placements`` receives one line per rule
+    global prompt. A step still over ``hard_limit_tokens`` is shipped with every rule and a
+    ``budget_exceeded_but_shipped`` placement line; the build never stops on the budget. Non-fatal problems go to ``warnings``; ``placements`` receives one line per rule
     (where it ended up) and the per-step budget summary.
     """
+    spec, spoken_notes = speakable_spec(spec)
     plan = RulePlan(spec)
 
     def render() -> tuple[dict[str, Any], list[str], dict[str, int]]:
@@ -1480,6 +1545,7 @@ def build_spec_workflow(
 
     if warnings is not None:
         warnings.extend(found)
+        warnings.extend(spoken_notes)
     if placements is not None:
         placements.extend(plan.placements())
         for key in sorted(estimates):
@@ -1488,17 +1554,19 @@ def build_spec_workflow(
                                   f"(target {target_tokens}, limit {hard_limit_tokens})")
         if stages:
             placements.append("budget stages: " + "; ".join(stages))
+    # CTO decision (T-009b): an over-long prompt never stops the build. Losing a whole brief
+    # is worse than a long prompt; the step ships with every rule and a clear warning.
     over_limit = {key: value for key, value in estimates.items() if value > hard_limit_tokens}
-    if over_limit:
-        raise SpecError(
-            "prompt budget exceeded after leaving out code-enforced rules, removing duplicates and moving "
-            "shared rules to the global prompt (no policy rule is cut): "
-            + ", ".join(f"{key} ~{value} tokens" for key, value in sorted(over_limit.items()))
-            + f" > {hard_limit_tokens}. Shorten the brief's rules for these steps or raise the limit."
-        )
+    if placements is not None:
+        for key, value in sorted(over_limit.items()):
+            placements.append(f"{BUDGET_EXCEEDED} {key}: ~{value} tokens > limit {hard_limit_tokens} "
+                              "after all budget stages; shipped with every rule")
     if warnings is not None:
         for key, value in sorted(estimates.items()):
-            if value > target_tokens:
+            if value > hard_limit_tokens:
+                warnings.append(f"{key}: prompt ~{value} tokens is over the hard limit {hard_limit_tokens}; "
+                                "shipped anyway, no rule cut")
+            elif value > target_tokens:
                 warnings.append(f"{key}: prompt ~{value} tokens is over the target {target_tokens} "
                                 f"(limit {hard_limit_tokens})")
     return workflow

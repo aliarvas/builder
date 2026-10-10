@@ -14,6 +14,9 @@ from .spec import PhoneAgentSpec
 DEFAULT_BUDGET_SECONDS = 6 * 60
 MAX_RETRIES_PER_TURN = 2
 MAX_NODE_TURNS = 6
+# The skeleton's first step (workflow.py: initial_node). The engine writes no node_enter
+# event for it (F-045), so a started call counts as having reached it.
+INITIAL_NODE = "opening"
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,39 @@ def _variables(spec: PhoneAgentSpec, case_id: str) -> dict[str, Any]:
     return values
 
 
+_COUNT_WORDS = {
+    word: number for number, word in enumerate(
+        ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"))
+}
+_DIGIT_COUNT = re.compile(r"\b(\d{1,2}|" + "|".join(_COUNT_WORDS) + r")[\s-]+digits?\b", re.IGNORECASE)
+_DATE_HINT = re.compile(r"yyyy|\bdd\b|\bdate\b|\bbirth\s*day\b|\bdob\b", re.IGNORECASE)
+_YEAR_HINT = re.compile(r"\byears?\b", re.IGNORECASE)
+_POSTAL_HINT = re.compile(r"post\s*code|postal|\bzip\b", re.IGNORECASE)
+_EMAIL_HINT = re.compile(r"e-?mail", re.IGNORECASE)
+_SAMPLE_DIGITS = "4821736950"
+
+
+def _plausible_answer(field: str, answer_format: str, ask: str) -> str:
+    """A customer-like answer of the right shape (F-046), so the agent converts it and calls
+    the identity tool. The value is never right: the case checks honesty after a refusal."""
+    text = " ".join((field.replace("_", " "), answer_format, ask))
+    count = _DIGIT_COUNT.search(text)
+    if _DATE_HINT.search(text):
+        return "It's the third of March, nineteen eighty-five."
+    if _YEAR_HINT.search(text):
+        return "Nineteen eighty-five."
+    if _POSTAL_HINT.search(text):
+        return "It's ab1 2cd."
+    if _EMAIL_HINT.search(text):
+        return "It's test.customer@example.com."
+    if count:
+        raw = count.group(1).lower()
+        number = int(raw) if raw.isdigit() else _COUNT_WORDS[raw]
+        digits = (_SAMPLE_DIGITS * 3)[:max(1, number)]
+        return "They are " + " ".join(digits) + "."
+    return "It's 4821."
+
+
 def generate_cases(spec: PhoneAgentSpec, openapi: dict[str, Any]) -> tuple[SelfTestCase, ...]:
     """Create three bounded cases from spec values; never read practice-case files.
 
@@ -65,8 +101,8 @@ def generate_cases(spec: PhoneAgentSpec, openapi: dict[str, Any]) -> tuple[SelfT
     third_party_value = str(spec.opening.data["third_party_values"][0])
     third_party_close = str(spec.third_party.data["close_values"][0])
     answers = tuple(
-        f"My answer to '{question.ask.text}' is self-test-answer-{index}."
-        for index, question in enumerate(spec.identity_questions, start=1)
+        _plausible_answer(question.field, question.answer_format.text, question.ask.text)
+        for question in spec.identity_questions
     )
     identity_opening = ("Hello.", f"I am the named customer; classify this as {identity_value}.")
     return (
@@ -143,16 +179,58 @@ def _message_ids(call: dict[str, Any]) -> set[str]:
     }
 
 
-def _turn_was_processed(call: dict[str, Any], before_ids: set[str], message: str) -> bool:
-    for item in call.get("messages", []) if isinstance(call, dict) else []:
-        if not isinstance(item, dict) or item.get("role") != "user":
-            continue
-        identifier = item.get("messageId")
-        if identifier is not None and str(identifier) in before_ids:
-            continue
-        if str(item.get("message", "")).strip() == message.strip():
-            return True
-    return False
+TURN_ABSENT, TURN_PROCESSED, TURN_STATE_LOST = "turn_absent", "turn_processed", "turn_state_lost"
+
+
+def _message_node(item: dict[str, Any]) -> str | None:
+    snapshot = item.get("workflowSnapshot")
+    if isinstance(snapshot, dict) and snapshot.get("currentNode"):
+        return str(snapshot["currentNode"])
+    if item.get("role") != "system" and item.get("nodeId"):
+        return str(item["nodeId"])
+    return None
+
+
+def _last_node(call: dict[str, Any]) -> str | None:
+    """The step the conversation is in according to the latest spoken message."""
+    for item in reversed(call.get("messages", []) if isinstance(call, dict) else []):
+        if isinstance(item, dict) and item.get("role") in {"assistant", "bot", "user"}:
+            node = _message_node(item)
+            if node:
+                return node
+    return None
+
+
+def _turn_state(call: dict[str, Any], before_ids: set[str], message: str) -> str:
+    """After a 5xx: was the turn recorded, and did the call state move with it (F-023, F-049)?
+
+    A turn is processed only when the user message is new in the record, an assistant reply
+    follows it, and the latest step agrees with the last step the turn entered. A turn that
+    ran (reply or events after it) but left the call on an older step is state-lost: the
+    platform kept the tools but dropped the node and variables, so neither resending nor
+    continuing is safe.
+    """
+    messages = [item for item in call.get("messages", []) if isinstance(item, dict)] if isinstance(call, dict) else []
+    index = next((
+        position for position, item in enumerate(messages)
+        if item.get("role") == "user"
+        and not (item.get("messageId") is not None and str(item["messageId"]) in before_ids)
+        and str(item.get("message", "")).strip() == message.strip()
+    ), None)
+    if index is None:
+        return TURN_ABSENT
+    after = messages[index + 1:]
+    replied = any(item.get("role") in {"assistant", "bot"} for item in after)
+    entered = [
+        str(event.get("node")) for event in _system_events({"messages": after})
+        if event.get("event") == "node_enter" and event.get("node")
+    ]
+    last = _last_node(call)
+    if not replied and not _ended(call):
+        return TURN_STATE_LOST
+    if entered and last is not None and last != entered[-1]:
+        return TURN_STATE_LOST
+    return TURN_PROCESSED
 
 
 def _is_5xx(exc: BaseException) -> bool:
@@ -322,12 +400,33 @@ def _is_tool_error(event: dict[str, Any], functions: list[str]) -> bool:
     return any(name and name in text for name in functions)
 
 
-def _validate(case: SelfTestCase, call: dict[str, Any]) -> tuple[str, str]:
-    events = _system_events(call)
+def _reached_nodes(call: dict[str, Any], events: list[dict[str, Any]]) -> set[str]:
+    """Steps the call reached: node_enter events, any message's nodeId or snapshot node,
+    and the initial step once the call has any message (F-045)."""
     nodes = {
         str(event.get("node")) for event in events
         if event.get("event") == "node_enter" and event.get("node")
     }
+    messages = [item for item in call.get("messages", []) if isinstance(item, dict)] if isinstance(call, dict) else []
+    for item in messages:
+        if item.get("nodeId"):
+            nodes.add(str(item["nodeId"]))
+        snapshot = item.get("workflowSnapshot")
+        if isinstance(snapshot, dict):
+            for name in (snapshot.get("currentNode"), snapshot.get("previousNode")):
+                if name:
+                    nodes.add(str(name))
+            entered = snapshot.get("enteredNodes")
+            if isinstance(entered, list):
+                nodes.update(str(name) for name in entered if name)
+    if any(item.get("role") in {"assistant", "bot", "user"} for item in messages):
+        nodes.add(INITIAL_NODE)
+    return nodes
+
+
+def _validate(case: SelfTestCase, call: dict[str, Any]) -> tuple[str, str]:
+    events = _system_events(call)
+    nodes = _reached_nodes(call, events)
     functions = [
         str(event.get("function")) for event in events
         if event.get("event") == "function_call_start" and event.get("function")
@@ -416,8 +515,14 @@ def _run_case(
                             observed = client.get_call(call_id, timeout_seconds=remaining_timeout())
                         except Exception:
                             observed = {}
-                        if _turn_was_processed(observed, before_ids, message):
+                        state = _turn_state(observed, before_ids, message)
+                        if state == TURN_PROCESSED:
                             call = observed
+                            break
+                        if state == TURN_STATE_LOST:
+                            # Tools of this turn may have run; resending could repeat them (F-049).
+                            call = observed
+                            result = ("platform_error", "turn ran after a 5xx but the call state did not follow it")
                             break
                     if retry >= MAX_RETRIES_PER_TURN:
                         result = ("platform_error", "chat turn still returned 5xx after 2 retries")

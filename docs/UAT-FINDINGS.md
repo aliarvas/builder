@@ -30,6 +30,80 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-050: A fixed spoken line on the account api step crashes the turn (502) and rolls the call back
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-07 chat on version 11, two runs; experiment on a copy
+- **Run:** customers `c_4586bc52-288`, `c_674d92c1-105` (version 11); experiment workflow `b83e8dcd-170e-4164-83a7-6fc9d00bdd13`, customer `c_8680078c-41a`
+- **Symptom:** In both version 11 runs, the turn that completed identity returned HTTP 502. Both identity calls and `get_account` ran (ledger), and the wait line was said, but the call state was not saved. The next customer message landed back in `identity` with the variables reset. The agent kept asking for the phone digits, nothing was recorded and no `close_call` ran. Ledger: fail.
+- **Root cause:** Confirmed by experiment. The same workflow with only `account.on_enter` changed from a `tts` line to `silent` passed that turn without an error, and the platform's own Turkish filler came back (F-043). A `tts` `on_enter` on a passthrough `api_request` step that is followed by more passthrough steps and a conversation step breaks the turn on the platform side.
+- **Category:** platform
+- **Fix / lesson:** Revert F-043's fixed line on the api step (keep `account` silent). If a wait sentence is wanted, let the identity step say it in its last message after `all_verified`. Report the 502 + rollback to the organizers. Lesson: test every new `on_enter` form live before relying on it.
+- **Status:** open
+- **Retest:** -
+- **Note:** the experiment workflow was created with `create_workflow` only, so it did not get the event model (`experimental-5`, set by `update_workflow`). Its later turns, where tool calls were written out as text, say nothing about our agent. The workspace now holds this extra workflow (the kit has no delete route).
+
+### F-049: A 5xx turn can execute tools but lose the call state
+
+- **Date:** 2026-10-11
+- **Brief / case:** PUB-07, version 11 (see F-050)
+- **Symptom:** After a 502 the ledger shows the tools of that turn, but the conversation resumes from the previous assistant message with the old node and variables.
+- **Root cause:** Platform behavior on a failed turn. In our runs the trigger was F-050, but any 5xx (staging outages, F-023) can do the same.
+- **Category:** platform
+- **Fix / lesson:** The test driver's "turn was processed" check must look at the node and variables, not only the user message count. Design so a replayed step is safe: identity routing should also leave on `identity_verified` already true at entry. Ask the organizers.
+- **Status:** open
+- **Retest:** -
+
+### F-048: Introduction repeated in the third-party step
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, official build run, self-test case `third_party_close` (version 11)
+- **Run:** call `9fd0eeb0-9cf5-4004-86f2-600d7d99b4ee`, `traces/brief-a.log`
+- **Symptom:** The opening already said "I am a digital assistant calling from Freya Bank and the call is recorded". After the routing to `third_party`, the agent said it again.
+- **Root cause:** The global "say the introduction first if not yet said" rule (T-005d). The model cannot tell that it was already said in an earlier step. The T-005d review predicted this.
+- **Category:** policy
+- **Fix / lesson:** Track it in state: a variable set when the opening has spoken (the opening step is always first), and the rule appears only while that variable is unset, or the rule lives only in the steps that can be reached first.
+- **Status:** open
+- **Retest:** -
+
+### F-047: Closing sentence spoken as an instruction ("Thank the customer and say goodbye.")
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, official build run (version 11), extracted spec `traces/brief-a.spec.json`
+- **Run:** call `9fd0eeb0-9cf5-4004-86f2-600d7d99b4ee`
+- **Symptom:** The closing step said "Thank the customer and say goodbye." to the customer. In this extraction 11 of 16 outcome rows have that instruction as their `say` text. Earlier extractions of the same brief produced real sentences ("Thank you for your time, goodbye."), so the result varies from run to run.
+- **Root cause:** The `say` field is spoken verbatim by a fixed line, but extraction accepted an instruction copied from the brief ("Thank the customer and say goodbye before `close_call`") as the sentence. No check rejects imperative, third-person instructions in spoken fields.
+- **Category:** extraction
+- **Fix / lesson:** Validate every spoken field (`say`, `ask`, `introduction`, `wait_line`, exhausted sentence): reject text that addresses the agent ("the customer", "say", "tell", "ask", "offer", imperative at the start) and repair. The prompt must ask for the literal words to the customer. Last resort: a generic polite closing in the agent's language, traced as a fallback.
+- **Status:** open
+- **Retest:** -
+
+### F-046: Self-test customer answers are not plausible
+
+- **Date:** 2026-10-11
+- **Brief / case:** official build run, self-test case `identity_attempt`
+- **Run:** call `8a5c1134-489c-4799-ae9f-2d226055fc6d`
+- **Symptom:** The scripted customer answered "My answer to 'Ask for the customer's date of birth.' is self-test-answer-1". The agent asked again and never called `verify_identity`, so the case could not check the tool path.
+- **Root cause:** Customer lines are built from the question text plus a placeholder, not from the answer format.
+- **Category:** other
+- **Fix / lesson:** Generate a plausible answer from the identity field's answer format or type (a date, four digits, a postcode-like string), so the agent converts it and calls the tool. The bank will say "unknown customer", which is what the case checks.
+- **Status:** open
+- **Retest:** -
+
+### F-045: Self-test expects an entry event for the initial step
+
+- **Date:** 2026-10-11
+- **Brief / case:** official build run, all three self-test cases failed with "missing node(s): opening"
+- **Run:** `traces/brief-a.log`, version 11
+- **Symptom:** All cases reported `fail`, although the opening ran (its messages carry `nodeId: opening`).
+- **Root cause:** The engine writes no `node_enter` event for the initial node. The self-test only looks at `node_enter`.
+- **Category:** other
+- **Fix / lesson:** Count a step as reached when a `node_enter` event names it **or** a message carries its `nodeId` (or it is the `initial_node`).
+- **Status:** open
+- **Retest:** -
+
+The official command (`python3 builder/build.py brief-a.md openapi.json`, no flags) ran end to end in **184 s**: extraction 103 s (6 calls, 0 repair rounds), budget stage brought `negotiate` from ~1547 to ~1175 tokens, save + publish (version 11), 3 self-test cases (~75 s), export and trace.
+
 ### F-044: Read-back sounds machine-made ("Product 1", ISO date, "420.00")
 
 - **Date:** 2026-10-10

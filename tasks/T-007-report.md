@@ -146,3 +146,50 @@ git diff --check -- builder/selftest.py tests/test_selftest.py   # clean
 Still `[TO-CONFIRM]` on the first approved live run: the real shape of `function_call_complete.result`, saved as a fixture; whether `pre_actions` close calls produce `function_call_start` events at all (if not, case 3 reports `platform_error`); whether the hang-up start event's `args.url` shows the URL after the hook ran.
 
 Constraints: no Freya call, no commit, no `env.sh`.
+
+## F-045/046 (and F-049) — self-test fixes from the first official run
+
+**Owner:** claude (second developer). Only `builder/selftest.py` and `tests/test_selftest.py` changed. The source is `docs/UAT-FINDINGS.md` F-045, F-046 and F-049 (version 11 run, calls `8a5c1134…` and `9fd0eeb0…`, used only as described there).
+
+1. **F-045: initial step without `node_enter`.** A step now counts as reached (`_reached_nodes`) when:
+   - a `node_enter` event names it,
+   - any message carries it as `nodeId`,
+   - a `workflowSnapshot` names it (`currentNode`, `previousNode`, `enteredNodes`),
+   - or it is `INITIAL_NODE` and the call has any spoken message.
+
+   `INITIAL_NODE = "opening"` mirrors `workflow.py`'s `initial_node`. A test renders all three fixture workflows and checks they agree. The selftest has no access to the rendered workflow without a `build.py` change.
+2. **F-046: plausible answers.** `_plausible_answer(field, answer_format, ask)` reads the field name, the answer format and the question, and returns an answer of the right shape:
+   - a date in words ("the third of March, nineteen eighty-five") for date hints (`YYYY`, `DD`, "date", "birthday", "DOB");
+   - a spoken year for "year";
+   - N digits for "N digits" (also as a word or "six-digit");
+   - a postcode-like value for "postcode", "postal" or "zip";
+   - an e-mail address for "e-mail";
+   - `4821` otherwise.
+
+   The rules match generic words and contain no brief value. The answer is never correct, which is fine because the bank refuses the synthetic customer anyway; the point is that the agent converts the answer and calls `verify_identity`. The question text is no longer echoed in the customer line.
+3. **F-049: 5xx turn that kept its tools but lost its state.** `_turn_state` replaces `_turn_was_processed`. It returns one of three states:
+   - `turn_absent`: the user message is not new in the record. The turn is retried as before.
+   - `turn_processed`: the message is new, an assistant reply follows it (or the call ended), and the latest spoken step (`workflowSnapshot.currentNode`, otherwise the message `nodeId`) equals the last step the turn entered.
+   - `turn_state_lost`: the message is recorded but there is no reply, or the turn entered a step while the latest message still sits on an older one. The case then ends as `platform_error` ("turn ran after a 5xx but the call state did not follow it"). It does **not** resend, because the tools of that turn may already be in the ledger.
+
+Tests (`tests/test_selftest.py`, 39 tests):
+- `nodeId`, snapshot and started-call reachability; a pass without an opening `node_enter`; `INITIAL_NODE` equals the rendered `initial_node` for all three fixtures;
+- answer shapes (date, four digits, six-digit, year, postcode, fallback); generated cases use them for the three fixtures and `tests/briefs/changed-a`;
+- turn states (absent, processed, no reply, stale node, ended without reply, replayed old message); a 502 with lost state gives `platform_error` without resending.
+
+The existing processed-turn test now records an assistant reply too.
+
+```text
+python3 -m unittest tests.test_selftest   # 39 OK
+python3 -m unittest                        # 243 OK
+git diff --check -- builder/selftest.py tests/test_selftest.py   # clean
+```
+
+`[TO-CONFIRM]` on the next approved run:
+- Does the agent call `verify_identity` with the spoken-date and digit answers?
+- Do the three cases now report `identity`/`third_party` as reached?
+- A real 5xx record, to fixture the `turn_state_lost` shape.
+
+Note: claude-dev's work in progress adds an identity entry check (F-049 design lesson); if a step is renamed, the expected node names in `generate_cases` must follow.
+
+Constraints: no Freya call, no commit, no `env.sh`.

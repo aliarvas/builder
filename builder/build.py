@@ -21,7 +21,7 @@ if __package__:
     from .slots import save_with_slot_check
     from .spec import SpecError, load_spec, spec_entry_variables
     from .tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
-    from .workflow import build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
+    from .workflow import BUDGET_EXCEEDED, build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from builder import freya, freya_chat
@@ -32,7 +32,7 @@ else:
     from builder.slots import save_with_slot_check
     from builder.spec import SpecError, load_spec, spec_entry_variables
     from builder.tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
-    from builder.workflow import build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
+    from builder.workflow import BUDGET_EXCEEDED, build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
 
 
 class BuilderInputError(ValueError):
@@ -219,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             trace.add("self_tests", "enabled after publish")
         spec = None
         unmapped: list[str] = []
+        over_budget: list[str] = []
         known_entry_variables = CALL_VARIABLES
         if args.spec_path:
             trace.add("model_calls", "none")
@@ -249,7 +250,10 @@ def main(argv: list[str] | None = None) -> int:
                 for warning in spec_warnings:
                     trace.add("warning", warning)
                 for line in placements:  # T-009: where every spec rule ended up, and the prompt budget
-                    if line.startswith("budget "):
+                    if line.startswith(BUDGET_EXCEEDED + " "):
+                        over_budget.append(line.removeprefix(BUDGET_EXCEEDED + " "))
+                        trace.add(BUDGET_EXCEEDED, over_budget[-1])
+                    elif line.startswith("budget "):
                         trace.add("budget", line.removeprefix("budget "))
                     else:
                         trace.add("rule_placement", line)
@@ -333,6 +337,13 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"save: ok (workflow_id={workflow_id}, agent_id={saved['agent_id']}, "
                 f"published_version={published_version}, export={output_path}, trace={trace.path})"
+            )
+        summary_stream = sys.stderr if args.print_only else sys.stdout
+        if over_budget:
+            # T-009b: shipped, never stopped; one line at the end of the run's summary output.
+            print(
+                f"warning: prompt budget exceeded but shipped: {'; '.join(over_budget)} (see {trace.path})",
+                file=summary_stream,
             )
         if unmapped:
             # Last line of the run's summary output (stderr with --print, whose stdout is the JSON).

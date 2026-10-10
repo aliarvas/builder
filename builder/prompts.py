@@ -127,17 +127,15 @@ MULTI_STEP_SYSTEM_PROMPT_TEMPLATE = PromptDefinition(
         "Call at most one tool per message. Never claim an action succeeded unless its tool result says so.\n"
         "Never say a payment or promise was recorded unless create_promise returned ok true. "
         "Never say a note or callback was recorded unless its tool returned ok true.\n"
-        "If you have not yet given this introduction in this call, give it first in your next message, "
-        "whatever the customer said: {introduction}\n"
         "Global rules:\n{rules}"
     ),
-    runtime_placeholders=("{agent_name}", "{language}", "{introduction}", "{rules}"),
+    runtime_placeholders=("{agent_name}", "{language}", "{rules}"),
 )
 
 OPENING_TASK_TEMPLATE = PromptDefinition(
     "OPENING_TASK_TEMPLATE", "Opens the call and identifies who answered.", "phone agent",
     "builder/workflow.py — opening",
-    "Start the call with this, once: {introduction}\nThe person to ask for is {address}. Use these words when you address them.\n"
+    "Your first words in this call, whatever the customer said, and only once: {introduction}\nThe person to ask for is {address}. Use these words when you address them.\n"
     "Ask: {question}\n"
     "If they only greet you or check the line (for example \"Hello?\"), that is not an answer: reply briefly and ask the question again.\n"
     "If unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
@@ -172,13 +170,13 @@ IDENTITY_TASK_TEMPLATE = PromptDefinition(
     "Convert the customer's spoken answer into the tool format yourself. Never ask the customer to say a technical format.\n"
     "After each tool result:\n"
     "- {answer_verified} is true: acknowledge briefly and ask the next question. "
-    "After the last question, ask nothing more; say the answers matched and give no account details yet.\n"
+    "After the last question, ask nothing more; say the answers matched, then say: {wait_line} Give no account details yet.\n"
     "- {answer_verified} is false: say the answer did not match. Do not thank them as if it passed. "
     "Ask the same question again; never move to the next question until this one is verified. {failed_answer}\n"
     "- The action was not carried out: ask for the same answer again; it is not a wrong answer.\n"
     "- {attempts_left} is 0: {exhausted_say} Ask nothing more and give no account details.\n"
     "Rules:\n{rules}",
-    ("{questions}", "{answer_verified}", "{failed_answer}", "{attempts_left}", "{exhausted_say}", "{rules}"),
+    ("{questions}", "{answer_verified}", "{failed_answer}", "{wait_line}", "{attempts_left}", "{exhausted_say}", "{rules}"),
 )
 NEGOTIATION_TASK_TEMPLATE = PromptDefinition(
     "NEGOTIATION_TASK_TEMPLATE", "Discusses the account and obtains a date and an amount per product.", "phone agent",
@@ -220,8 +218,8 @@ CONFIRM_TASK_TEMPLATE = PromptDefinition(
     ("{rules}",),
 )
 ACCOUNT_WAIT_LINE = PromptDefinition(
-    "ACCOUNT_WAIT_LINE", "Fixed line spoken while the account is fetched, when the spec gives none (F-043).",
-    "phone agent (fixed spoken line)", "builder/workflow.py — account step on_enter",
+    "ACCOUNT_WAIT_LINE", "Line said after identity passed, before the account lookup, when the spec gives none (F-043, F-050).",
+    "phone agent (in the identity step prompt)", "builder/workflow.py — identity step, {wait_line}",
     "Thank you. One moment while I check your account.",
 )
 CLOSING_FALLBACK_SAY = PromptDefinition(
@@ -237,6 +235,20 @@ SPECIAL_PATH_TASK_TEMPLATE = PromptDefinition(
     "Only if the tool result says ok true, say exactly: {say}\n"
     "If it did not return ok true, do not say anything was recorded or completed.",
     ("{when}", "{say}"),
+)
+SPECIAL_SAY_FALLBACK = PromptDefinition(
+    "SPECIAL_SAY_FALLBACK",
+    "Spoken instead of a special path's line when the spec's line is an instruction to the agent (F-047).",
+    "phone agent (fixed spoken line)", "builder/workflow.py — special path say fallback",
+    "Thank you for letting me know.",
+)
+SPECIAL_ASK_PHRASED_TEMPLATE = PromptDefinition(
+    "SPECIAL_ASK_PHRASED_TEMPLATE",
+    "Lets the agent phrase a special path's question when the spec gives an instruction instead of words (F-047).",
+    "phone agent", "builder/workflow.py — global special_<id> with ask (fallback)",
+    "Ask the customer this as one short question, in your own words: {ask}\n"
+    "Wait for the answer. Do not call any tool and do not promise anything.",
+    ("{ask}",),
 )
 SPECIAL_ASK_TASK_TEMPLATE = PromptDefinition(
     "SPECIAL_ASK_TASK_TEMPLATE", "Waits for the answer to a special path's first question.", "phone agent",
@@ -330,7 +342,8 @@ EXTRACT_OPENING_IDENTITY_TASK = PromptDefinition(
     "Return this JSON shape:\n"
     "{\n"
     ' "agent": {"name": "how the agent presents itself", "language": "language of the call", '
-    '"introduction": RULE (what the first sentence must say: who is calling, for whom, recording notice), '
+    '"introduction": RULE (text: the exact first sentence the agent says to the customer, word for word: who is '
+    'calling, for whom, recording notice. Not an instruction such as "Say you are ..."), '
     '"wait_line": "one short sentence in the language of the call, said while the account is looked up after '
     'identity is verified, for example a thank-you and a request to wait; no debt details"},\n'
     ' "opening": {\n'
@@ -364,7 +377,8 @@ EXTRACT_OPENING_IDENTITY_TASK = PromptDefinition(
     '  "attempts_left_field": "identity tool response field (integer) with the wrong answers or attempts left",\n'
     '  "answer_verified_field": "identity tool response field (boolean) for the answer just checked",\n'
     '  "failed_answer_instruction": RULE (what to do after a failed answer, including any hint the tool returns),\n'
-    '  "exhausted_say": RULE (what to tell the customer when no attempts are left)\n'
+    '  "exhausted_say": RULE (text: the exact words said to the customer when no attempts are left, word for word, '
+    'not an instruction such as "Tell the customer ...")\n'
     " },\n"
     ' "global_rules": [RULE] (rules for the whole call: honesty, questions the agent cannot answer, '
     "repeated refusals to talk, recording claims, goodbye before the closing tool),\n"
@@ -467,12 +481,14 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     "what the agent does during the call, such as notes or transfers, belongs to the step where it happens, not here), "
     '"outcome_field": "closing tool request field for the outcome", '
     '"reason_field": "closing tool request field for the reason"},\n'
-    ' "outcomes": [{"outcome": "...", "reason": "... or \\"\\"", "when": RULE, "say": RULE (the goodbye sentence '
-    "said before the closing tool; include every sentence the brief requires in that situation), "
+    ' "outcomes": [{"outcome": "...", "reason": "... or \\"\\"", "when": RULE, "say": RULE (text: the exact words '
+    "the agent says to the customer before the closing tool, word for word, read aloud as written; include every "
+    "sentence the brief requires in that situation and end with a goodbye. Never an instruction such as "
+    "\"Thank the customer and say goodbye.\"; write \"Thank you for your time. Goodbye.\" instead), "
     '"wins_over_promise": true or false (true only if this row is used even after a promise was recorded), '
     '"states": ["call-end state names below that close with this row"]}]\n'
     "   (one row per outcome and reason pair the brief allows; every pair from the closing table.)\n"
-    ' "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (said word for word), '
+    ' "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (text: the exact words said to the customer, read aloud as written; never an instruction to the agent), '
     '"ask": RULE (optional; leave the key out unless the documents require one question before acting, for example '
     "whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer "
     'and waits for the answer, so it must be one question ending with "?", never an instruction), '
@@ -499,6 +515,8 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     "- tool_args keys are request fields of that tool; enum fields use an enum value from the tool contract.\n"
     "- Every state name below appears in exactly one row's states; every required state is mapped.\n"
     "- An ask is one question ending with \"?\" and only with then close; otherwise leave the key out.\n"
+    "- Every say and ask is the customer's words, read aloud as written: no \"the customer\", no instruction "
+    "to the agent such as \"Say ...\", \"Tell ...\", \"Offer ...\" or \"Do not ...\".\n"
     "Call-end states. Map each required state to exactly one row. If the documents do not name a state, map it to "
     "the closest row and list it in derived_states. An optional state left out uses the row of \"default\":\n{states}",
     ("{states}",),
@@ -587,6 +605,8 @@ PROMPTS = (
     CLOSING_FALLBACK_SAY,
     SPECIAL_PATH_TASK_TEMPLATE,
     SPECIAL_ASK_TASK_TEMPLATE,
+    SPECIAL_SAY_FALLBACK,
+    SPECIAL_ASK_PHRASED_TEMPLATE,
     CONVERSATION_NO_TOOL_RULE,
     CONVERSATION_TOOL_RULE_TEMPLATE,
     EXTRACTION_SYSTEM_PROMPT,

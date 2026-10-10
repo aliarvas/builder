@@ -39,6 +39,7 @@ from .prompts import (
     PromptDefinition,
     render_prompt,
 )
+from .spoken import agent_directed, spoken_words
 from .spec import (
     CLOSE_STATE_NAMES,
     OPENING_GREETING_VALUE,
@@ -51,6 +52,7 @@ from .tools_from_openapi import CALL_VARIABLES, contract_field_kind, tool_contra
 
 MAX_REPAIR_ROUNDS = 2
 MAX_LOGGED_ISSUES = 60
+SPOKEN_MARK = "is said to the customer word for word"
 
 # Routes the intermediate JSON uses; the merge turns them into the spec's value lists.
 OPENING_ROUTES = ("verify", "other_person", "ask_again", "end")
@@ -285,7 +287,11 @@ def _strings(value: Any):
 class _Checker:
     """Collects (path, message) errors and warnings for one validation pass."""
 
-    def __init__(self, brief: str, contract: dict[str, Any], openapi_strings: set[str]) -> None:
+    def __init__(
+        self, brief: str, contract: dict[str, Any], openapi_strings: set[str], *, spoken_soft: bool = False,
+    ) -> None:
+        # In the last round a spoken-text problem is a warning: the renderer then uses its fallback.
+        self.spoken_soft = spoken_soft
         self.brief = brief
         self.brief_normal = _normal(brief)
         self.contract = contract
@@ -936,6 +942,23 @@ def check_spec_data(spec: dict[str, Any], check: _Checker) -> None:
             check.error(where + ".tool_args", "must be empty when there is no tool")
         check.outcome_pair(where, path.get("outcome"), path.get("reason", ""))
 
+    # F-047: text spoken word for word (or given as the agent's words) must address the customer.
+    spoken = [("agent.introduction", get("agent", "introduction")), ("identity.exhausted_say", get("identity", "exhausted_say"))]
+    spoken += [(f"outcomes[{i}].say", row.get("say")) for i, row in enumerate(get("outcomes") or []) if isinstance(row, dict)]
+    for i, path in enumerate(get("special_paths") or []):
+        if isinstance(path, dict):
+            spoken += [(f"special_paths[{i}].{key}", path.get(key)) for key in ("say", "ask") if key in path]
+    wait_line = get("agent", "wait_line")
+    if isinstance(wait_line, str) and wait_line.strip():
+        spoken.append(("agent.wait_line", {"text": wait_line}))
+    for where, value in spoken:
+        text = value.get("text") if isinstance(value, dict) else None
+        reason = agent_directed(spoken_words(text)) if isinstance(text, str) else ""
+        if reason:
+            message = (f"{SPOKEN_MARK}; write the exact words the agent says to the customer (for example "
+                       f"\"Thank you for your time. Goodbye.\"), not an instruction to the agent: {reason}")
+            (check.warn if check.spoken_soft else check.error)(where, message)
+
     # Every rule has a source excerpt.
     for section in ("opening", "third_party", "identity", "account", "negotiation", "confirmation", "offer", "closing"):
         check.rules(get(section, "rules") or [], f"{section}.rules")
@@ -1076,7 +1099,7 @@ def extract_spec(
     parsed: PhoneAgentSpec | None = None
     check = _Checker(brief, contract, openapi_strings)
     for round_number in range(MAX_REPAIR_ROUNDS + 1):
-        check = _Checker(brief, contract, openapi_strings)
+        check = _Checker(brief, contract, openapi_strings, spoken_soft=round_number == MAX_REPAIR_ROUNDS)
         failing: dict[str, list[str]] = {}
         for name, conversation in conversations.items():
             if conversation.reply is None:

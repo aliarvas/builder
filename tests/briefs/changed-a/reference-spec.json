@@ -4,7 +4,7 @@
     "name": "Kestrel Bank virtual assistant",
     "language": "English",
     "introduction": {
-      "text": "Say you are Kestrel Bank's virtual assistant and that the call may be recorded for quality.",
+      "text": "Hello, this is Kestrel Bank's virtual assistant. This call may be recorded for quality.",
       "source": "Rule 1"
     }
   },
@@ -141,7 +141,7 @@
       "source": "Rule 13"
     },
     "exhausted_say": {
-      "text": "Tell the customer to call the number on the back of their card.",
+      "text": "I am sorry, I cannot continue. Please call the number on the back of your card.",
       "source": "Rule 14"
     }
   },

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from builder.workflow import (
     PROMPT_HARD_LIMIT_TOKENS,
     PROMPT_TARGET_TOKENS,
     build_spec_workflow,
+    enforcement_available,
     workflow_prompt_estimates,
 )
 
@@ -51,7 +53,12 @@ class PromptBudgetTests(unittest.TestCase):
         self.assertEqual(sorted(all_rule_keys(AB_TAGGED)), sorted(placed))
         self.assertEqual(len(placed), len(set(placed)))
         self.assertIn("budget stages: code-enforced rules left out; duplicate wording removed", placements)
-        self.assertTrue(any(line.startswith("budget negotiate: ~1595 -> ~13") for line in placements))
+        # Tagged closing rules start in the global prompt and leave it only under budget pressure.
+        line = next(line for line in placements if line.startswith("budget negotiate: "))
+        before, after = map(int, re.findall(r"~(\d+)", line)[:2])
+        self.assertGreater(before, PROMPT_HARD_LIMIT_TOKENS)
+        self.assertLess(after, PROMPT_HARD_LIMIT_TOKENS)
+        self.assertFalse(any(line.startswith("budget_exceeded_but_shipped") for line in placements))
 
     def test_left_out_rules_are_only_tagged_or_duplicates(self):
         workflow, _, placements = render(AB_TAGGED)
@@ -69,22 +76,27 @@ class PromptBudgetTests(unittest.TestCase):
         self.assertNotIn("Accept any amount from the floor up to the full past-due amount", prompts)
         self.assertIn("On any transfer add no notes", workflow["system_prompt"])
 
-    def test_untagged_extraction_fails_clearly_instead_of_cutting_rules(self):
-        with self.assertRaises(SpecError) as caught:
-            render(AB)
-        message = str(caught.exception)
-        self.assertIn("prompt budget exceeded", message)
-        self.assertIn("negotiate ~", message)
-        self.assertIn("no policy rule is cut", message)
+    def test_untagged_extraction_ships_with_a_clear_warning(self):
+        # CTO decision (T-009b): over the hard limit the step ships with every rule.
+        workflow, warnings, placements = render(AB)
+        self.assertGreater(workflow_prompt_estimates(workflow)["negotiate"], PROMPT_HARD_LIMIT_TOKENS)
+        exceeded = [line for line in placements if line.startswith("budget_exceeded_but_shipped negotiate: ~")]
+        self.assertEqual(1, len(exceeded))
+        self.assertTrue(exceeded[0].endswith("tokens > limit 1500 after all budget stages; shipped with every rule"))
+        self.assertTrue(any("over the hard limit 1500; shipped anyway, no rule cut" in w for w in warnings))
+        rule_lines = [l for l in placements if not l.startswith("budget")]
+        self.assertEqual(sorted(all_rule_keys(AB)), sorted(l.split(" -> ")[0] for l in rule_lines))
+        self.assertFalse(any(" -> not in a prompt (code: " in l for l in rule_lines))  # untagged: nothing to code
 
-    def test_many_rules_trigger_the_guard_and_the_failure(self):
+    def test_many_rules_trigger_the_guard_and_ship_with_a_warning(self):
         data = copy.deepcopy(FIXTURE_A)
         data["negotiation"]["rules"] += [
             {"text": f"Synthetic policy rule number {i} with enough words to take real room in the prompt.", "source": "x"}
             for i in range(60)
         ]
-        with self.assertRaises(SpecError):
-            render(data)
+        workflow, _, placements = render(data)
+        self.assertTrue(any(line.startswith("budget_exceeded_but_shipped negotiate:") for line in placements))
+        self.assertIn("Synthetic policy rule number 59", workflow["nodes"]["negotiate"]["task_message"])
         _, warnings, placements = render(data, hard_limit_tokens=10_000)
         self.assertTrue(any("over the target" in warning for warning in warnings))
         self.assertTrue(any(line.startswith("budget negotiate:") for line in placements))
@@ -132,19 +144,72 @@ class PromptBudgetTests(unittest.TestCase):
         self.assertIn("Next Friday means", workflow["nodes"]["negotiate"]["task_message"])
         self.assertTrue(any("tagged weekday_reading but this spec has no data" in line for line in placements))
 
+    def test_enforcement_needs_the_spec_data(self):
+        data = copy.deepcopy(FIXTURE_A)
+        data["offer"]["latest"] = []  # no latest date: a deadline rule is not enforced by code
+        data["offer"]["rules"] = [{"text": "Never record a date after the deadline.", "source": "x",
+                                   "enforced_by": "offer_dates"}]
+        workflow, _, placements = render(data, target_tokens=1, hard_limit_tokens=10_000)
+        self.assertIn("Never record a date after the deadline.", workflow["nodes"]["negotiate"]["task_message"])
+        self.assertTrue(any("tagged offer_dates but this spec has no data" in line for line in placements))
+        spec = parse_spec(copy.deepcopy(FIXTURE_A))
+        for check in ("offer_dates", "business_days", "offer_amounts", "weekday_reading", "invalid_offer_limit",
+                      "identity_attempts", "closing_outcome"):
+            self.assertTrue(enforcement_available(spec, check), check)
+        self.assertFalse(enforcement_available(spec, "magic"))
+
+    def test_build_ships_over_budget_and_warns_at_the_end(self):
+        import io
+        import os
+        import tempfile
+        from contextlib import redirect_stderr, redirect_stdout
+
+        from builder import build
+
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    code = build.main([
+                        str(ROOT / "build-the-builder-v2/briefs/brief-a.md"),
+                        str(ROOT / "build-the-builder-v2/tools/openapi.json"),
+                        "--spec", str(ROOT / "tests/fixtures/extract/brief-ab-extracted.json"),
+                        "--print", "--slot", "over",
+                    ])
+                trace = Path("traces/over.print.log").read_text(encoding="utf-8")
+            finally:
+                os.chdir(previous)
+        self.assertEqual(0, code)
+        json.loads(stdout.getvalue())  # --print stdout stays the workflow JSON
+        self.assertRegex(trace, r"budget_exceeded_but_shipped: negotiate: ~\d+ tokens > limit 1500")
+        self.assertRegex(
+            stderr.getvalue().strip().splitlines()[-1],
+            r"^warning: prompt budget exceeded but shipped: negotiate: ~\d+ tokens > limit 1500 after all budget "
+            r"stages; shipped with every rule \(see traces/over.print.log\)$",
+        )
+
     def test_unknown_enforcement_tag_is_a_spec_error(self):
         data = copy.deepcopy(FIXTURE_A)
         data["offer"]["rules"] = [{"text": "x", "source": "x", "enforced_by": "magic"}]
         with self.assertRaises(SpecError):
             parse_spec(data)
 
-    def test_tagged_closing_rule_needs_no_prompt(self):
+    def test_tagged_closing_rule_follows_the_budget_policy(self):
         data = copy.deepcopy(FIXTURE_A)
         data["closing"]["rules"] = [
             {"text": "Call close_call exactly once, last.", "source": "x", "enforced_by": "closing_outcome"},
             {"text": "Add no notes on a transfer.", "source": "x"},
         ]
+        # Within budget the tagged closing rule stays in the global prompt (T-009b, review finding 1).
         workflow, _, placements = render(data)
+        self.assertIn("close_call exactly once, last", workflow["system_prompt"])
+        self.assertIn("Add no notes on a transfer.", workflow["system_prompt"])
+        self.assertTrue(any(l.startswith("closing.rules[0] -> global prompt (closing rule, no step prompt; code also "
+                                         "enforces closing_outcome, kept: within budget)") for l in placements))
+        # Under budget pressure it moves to code; the untagged one stays.
+        workflow, _, placements = render(data, target_tokens=1, hard_limit_tokens=10_000)
         self.assertNotIn("close_call exactly once, last", workflow["system_prompt"])
         self.assertIn("Add no notes on a transfer.", workflow["system_prompt"])
         self.assertTrue(any(l.startswith("closing.rules[0] -> not in a prompt (code: closing_outcome)") for l in placements))

@@ -5,124 +5,139 @@
 
 ## Rule
 
-Brief analysis, policy handling and the IR are independent of Freya. All Freya payloads and API calls live in one adapter module. Nothing about a specific brief appears in builder code; everything brief-specific is data extracted at run time.
+Only the extractor interprets brief text; everything brief-specific is spec data produced at run time. The spec, renderer and offer code never import the Freya client. Only `build.py` (and the chat wrapper `freya_chat.py`, used by the self-test) talks to Freya. Builder code contains no brief value; `tests/test_multi_step.py` scans every string literal in `builder/` against the fixture specs.
 
-## Pipeline
+## Pipeline `[VERIFIED: code, commit e4ed265]`
 
 ```text
-read brief(s) + OpenAPI
-  -> extract rules and parameters (LLM, structured output, source excerpts)
-  -> resolve overrides and conflicts
-  -> bind tools from OpenAPI
-  -> build IR (flow + parameter tables)
-  -> validate IR
-  -> render Freya workflow (nodes, prompts, tools, code nodes, hooks)
-  -> dry-run validate, save (create or update + publish)
-  -> self-test (bounded)
-  -> export workflow + write trace
+python3 builder/build.py <brief...> <openapi.json>
+  load inputs, hash them into the trace                          build.py
+  -> extract spec (model)                                         extract.py, llm.py, prompts.py
+       4 parallel section calls -> code checks -> repair (<= 2 rounds)
+       -> coverage call -> one targeted re-ask -> traces/<slot>.spec.json
+  -> parse + validate spec                                        spec.py
+  -> tools from OpenAPI (fields, enums, baked call variables)     tools_from_openapi.py
+  -> render multi-step workflow + prompt budget plan              workflow.py, offer_check.py
+  -> trace: steps, tools per step, prompt estimates, rule placements,
+            sent_agent_config / sent_nulls
+  -> dry-run validate -> save (slot check) -> publish -> export   build.py, slots.py, freya.py
+  -> self-test (chat, bounded)                                    selftest.py, freya_chat.py
+  -> trace finish (status, end time, total duration)              run_trace.py
+offline, after the run: tools/submission_check.py <trace> <export>
 ```
 
-Each stage returns typed data or an explicit error. A later stage never guesses what an earlier one failed to produce.
+Each stage returns typed data or raises. Input, OpenAPI and spec errors exit with code 2; any other error exits 1. Both write `traces/<slot>.failed.log`.
 
-## Core design idea `[HYPOTHESIS]`
+Modes: `--print` stops before Freya and prints the workflow JSON. `--validate` runs only the dry run. `--spec <file>` uses a written spec instead of extraction, with no model call. `--single-step` is the legacy one-node agent with no spec. `--no-self-test` exists for development only. `--slot` names the workflow slot; the default is the brief file stems joined with `+`.
 
-Prompts alone are unreliable (the phone-agent model is fixed and sometimes inconsistent, and every case needs 3 of 3 passes). So the builder splits work:
+## Core design idea `[VERIFIED by chat tests; see UAT-FINDINGS]`
+
+Prompts alone were unreliable: the kit's one-node baseline failed on tool discipline, attempt counting and date arithmetic (Results log in [`EVALUATION-AND-TESTING.md`](EVALUATION-AND-TESTING.md)). So the builder splits work:
 
 - **Model (in the workflow):** understanding speech, empathy, wording.
-- **Generated code nodes/hooks (in the workflow):** date arithmetic (business days, holidays, deadlines, "next Friday"), amount floors and bounds, attempt counters, read-back checks, argument normalization. The generic code is written once; the **numbers, calendars and tables it uses are extracted from the brief** and passed in as data. No brief value is written into the builder.
-- **Graph (in the workflow):** separate nodes for distinct stages (opening, identity, account, negotiation, confirmation, closing), tools exposed only in the node that may use them, transitions on tool results.
-- **Lifecycle tool:** `close_call` guaranteed at call end where the brief requires exactly one close.
+- **Generated code steps and hooks:** date arithmetic, amount bounds, attempt counters, outcome selection, read-back text, argument baking. The code is generic; the numbers, calendars and tables are spec data embedded as JSON.
+- **Graph:** one step per stage. Tools are exposed only where they may be used. Transitions route on tool results.
+- **Lifecycle tool:** the closing chain records exactly one close. An end-of-call tool records one when the call ends early.
 
-The minimal sample builder (one node, brief pasted as prompt) scores about half; the above is where the remaining points are. Start simple and add structure only when a failure label justifies it.
+Chat retests of the multi-step agent passed the ledger check on PUB-03 (version 5) and PUB-01 (version 10, extracted spec). The baseline's failures F-001..F-004 no longer appear. A full 13-case scored run of the current builder is still open.
 
-## Phone agent template `[VERIFIED decision, 2026-10-10; node set refined by evidence]`
+## Phone agent skeleton `[VERIFIED: rendered from tests/fixtures/spec-brief-a.json]`
 
-The builder renders a fixed, domain-generic skeleton of steps. The skeleton is code; every value, rule text, outcome code and calendar inside it is data extracted from the brief. A brief that lacks a stage simply leaves that branch unused.
+`workflow.py` (`build_spec_workflow`) renders a fixed, domain-generic skeleton. Node names are framework vocabulary; every rule text, value, outcome code and calendar comes from the spec.
 
 ```text
-setup (code)           now + calendar data -> today, business days, deadlines
-  -> opening           who answered: customer / third party / wrong number / deceased / unclear
-       -> third_party  callback window checked by code -> schedule_callback -> close
-  -> identity          only the identity tool; leave on the tool result, count attempts from results
-  -> account (api)     account tool runs on entry; code turns products into short facts per product
-  -> negotiate         state the debt, ask for date/amount; extraction of proposal and intent
-  -> check_offer (code) date and amount against the brief's rules -> verdict + suggested alternative
-  -> confirm_record    read-back, explicit yes, promise tool; honest result handling
-  -> close (code + api) outcome/reason computed from call state, closing tool called with baked values
-  -> end_call
-special paths (from any step): dispute, already paid, hardship, restructuring, human, scam, robot question
+opening (conv)            who answered -> identity | third_party | opening_unclear -> opening_reask
+third_party (conv)        schedule_callback in scope -> closing
+identity (conv)           verify_identity only; attempts counted from tool results -> account | closing
+account (api)             get_account runs as a pre-action (maxRetries 1), speaks the wait line
+offer_setup (code)        products -> per-product facts, spoken names (offer_check.py)
+negotiate (conv)          debt and proposal -> check_offer | confirm_record | closing
+check_offer (code)        date/amount/business-day/next-weekday rules -> verdict, alternative
+confirm_record (conv)     read-back, explicit yes, create_promise (product id baked by hook)
+confirmation_progress     per-product attempt limit; next product or closing
+closing (code)            close state derived from call variables -> outcome/reason
+closing_say -> close_attempt -> close_record (api, close_call; one retry if not ok) -> end_call
+global special paths      e.g. dispute / already paid / human: fixed line, tool, exit on result
+close_call_on_hangup      workflow-level tool, alwaysRunsAt end_of_call; skipped if the chain already sent close_call
 ```
 
-Responsibilities:
+Special paths come from `spec.special_paths` and become global nodes, limited to their source steps (`source_steps`). Each path speaks its fixed line. If it has a tool, the engine runs it as a pre-action (`api_request`); a tool that needs a value from the conversation, such as which product, runs in a conversation step (`_model_tool_special`). The path exits on the tool result, never on the model saying it is done (T-005b). A path with `then=close` goes to `closing`; `then=return` goes back to the step it came from. A failed tool on a closing path goes to `close_special_tool_failed`.
 
 | Work | Owner |
 |---|---|
 | Speech, understanding, empathy, wording | phone-agent model |
-| Attempt counters, date and amount checks, outcome selection | code steps and hooks |
-| Which tool is available when; that the closing tool always runs | workflow graph |
+| Attempt counters, date and amount checks, outcome selection, read-back text | code steps and hooks |
+| Which tool is available when; that the closing tool always runs | workflow graph + end-of-call tool |
 
-Each step's prompt follows the prompt budget below.
+## Spec (the IR) `[VERIFIED: code]`
 
-## Messy inputs `[VERIFIED decision, 2026-10-10]`
+`spec.py` holds the typed, versioned spec (`spec_version` 1). Sections: `agent`, `opening`, `third_party`, `identity`, `account`, `negotiation`, `confirmation`, `offer`, `outcomes`, `special_paths`, `closing`, `global_rules`.
 
-Both inputs can be messy: the brief (raw mail, memo that changes a policy, code list, tables) and the bank's tool responses during a call.
+- Each `Rule` has `text`, `source` (the brief excerpt it came from) and an optional `enforced_by` tag. The tag is one of `offer_dates`, `business_days`, `offer_amounts`, `weekday_reading`, `invalid_offer_limit`, `identity_attempts` or `closing_outcome`.
+- `parse_spec` rejects missing, mistyped or contradictory fields with a `SpecError` that names the path.
+- Field names inside the spec (identity selector, product id, outcome and reason fields) must exist in the OpenAPI contract. They are checked during extraction and rendering.
 
-**Brief (builder time).** Extraction is an agent loop, not one model call:
+## Messy inputs `[VERIFIED: code; live extraction on brief A, A+B and the raw/changed test briefs]`
 
-1. Extract rules and tables with a source excerpt for each.
-2. Check with code: values against the OpenAPI enums, outcome table complete, dates valid, superseded rules marked, numbers parsed.
-3. Coverage check: every brief sentence is linked to a rule or marked irrelevant.
-4. Ask the model again only about gaps or conflicts.
-5. Arithmetic (business-day counts, windows) is computed by code, never guessed by the model.
+**Brief (builder time), `extract.py`:**
 
-**Fallback tiers, so no rule is lost:** (1) structured data enforced by code; (2) a short rule in the prompt of the step it belongs to; (3) a global rule in `system_prompt`. The trace lists each rule's tier, so it is visible which rules are guaranteed and which are only instructions.
+1. Four extraction calls run in parallel (`opening_identity`, `flow`, `offer`, `outcomes`). Each gets the whole brief and the tool contract. They return a small intermediate JSON shape: routes and outcome pairs instead of state names, so no call depends on another.
+2. Code validates each group, merges them and validates the merged spec. Validation covers `parse_spec`, the tool contract, brief values (dates and numbers must appear in the brief) and a dry render. Only the errors go back to the call that owns the failing section, for at most `MAX_REPAIR_ROUNDS = 2` rounds. If errors remain, `ExtractionError` is raised and the candidate is written to `traces/<slot>.spec.failed.json`.
+3. Coverage: the brief is split into items. One call maps each item to a spec path or marks it not relevant. Missing items get one targeted follow-up call. An addition that would break validation is dropped and traced (`coverage_rejected`). Items still unmapped are traced (`coverage_unmapped`) and printed as a warning.
+4. The model never does arithmetic. It copies counts, units and conditions; code evaluates them.
 
-**Tool responses (call time).** The agent never guesses a customer fact; it gets it from a tool or says it does not have it. A post-hook on each tool turns the raw response into short plain facts and a `what_to_do_next` line, and tolerates missing or extra fields. The phone agent may call only the bank's tools, so all interpretation that needs extra help happens at builder time.
+**Where a rule ends up:** (1) code that enforces it, when its `enforced_by` check is available for this spec (`enforcement_available`); (2) the prompt of the step it belongs to (`RULE_STEPS`); (3) the global `system_prompt` (global and closing rules, or shared rules moved there by the budget plan). Every rule's placement is a `rule_placement` trace line; extraction also traces `rule_tiers`.
 
-## Components
+**Tool responses (call time):** every OpenAPI tool gets a `post_process_code` hook (`tools_from_openapi.py`). It removes headers and normalizes `data`. It sets `data.ok = False` on an HTTP error, an error status, an `error` field, a missing `ok` or non-dict data. It writes a `what_to_do_next` line (failure / false fields / ok / unclear), and it never raises. The agent gets customer facts only from tools.
 
-- **Entry** (`builder/build.py`): parses the arguments, runs the pipeline, prints the result. No policy logic.
-- **Extractor:** brief text to typed rules and parameter tables. The only place brief text is interpreted. Uses a model; every call goes to the trace. Must tolerate raw material (mail, memo, code list) and later documents overriding earlier ones. Implemented in `builder/extract.py` (T-006): four parallel section calls, code validation with at most two repair rounds, one coverage call plus one targeted re-ask; output `traces/<slot>.spec.json`. `build.py` extracts unless `--spec` (written spec) or `--single-step` (legacy) is given.
-- **Resolver/validator:** override order, conflicts, missing information, tool existence.
-- **Tool binder:** tool descriptors (fields, enums, required) from the OpenAPI file; never hardcoded field names.
-- **Renderer (Freya adapter):** IR to workflow JSON; create/update/publish/export. See [`FREYA-INTEGRATION.md`](FREYA-INTEGRATION.md).
-- **Self-test runner:** a bounded run of cases through the Freya simulation route; reports failure labels.
-- **Trace writer:** plain-text log: start/end time, each model call (model, purpose), Freya IDs and step/tool counts, self-test results. Strips secrets.
+## Components `[VERIFIED: code]`
+
+| Module | Role |
+|---|---|
+| `builder/build.py` | CLI, wires the stages, writes trace lines, dry run / save / publish (`_ensure_published_version`) / export, runs the self-test. No policy logic. |
+| `builder/llm.py` | Anthropic Messages client over stdlib `urllib`; pinned model; one transport retry; prompt caching of the shared context. |
+| `builder/prompts.py` | Every prompt and fixed agent line; rendered to [`PROMPTS.md`](PROMPTS.md). |
+| `builder/extract.py` | Brief -> spec (parallel calls, checks, repair, coverage). The only place brief text is interpreted. |
+| `builder/spec.py` | Spec dataclasses, `load_spec` / `parse_spec`, close-state vocabulary. |
+| `builder/tools_from_openapi.py` | OpenAPI POST operations -> Freya `api_call` tools (enums, required, `$ref`/`allOf`, call variables baked, post-hook); `tool_contract` for extraction checks. |
+| `builder/workflow.py` | Spec + tools -> workflow JSON; closing chain, hang-up tool, special paths, prompt budget plan (`RulePlan`). |
+| `builder/offer_check.py` | Generated Python for `offer_setup`, `check_offer`, promise values and spoken read-back; reads and writes only `vars`, never raises. |
+| `builder/selftest.py` | Post-publish chat checks generated from the spec (see [`EVALUATION-AND-TESTING.md`](EVALUATION-AND-TESTING.md)). |
+| `builder/freya.py` | The kit client, byte-identical to `build-the-builder-v2/freya.py`. |
+| `builder/freya_chat.py` | Chat message / call record / end-chat calls with timeouts, reusing the kit's URL and headers. |
+| `builder/slots.py` | `save_with_slot_check`: drops a stale slot whose workflow was deleted, then `freya.save_workflow` (F-005). |
+| `builder/run_trace.py` | Plain-text trace; masks env secret values, `fak_…` and `sk-ant-…`; writes `total_duration_seconds`, `status`, `end_utc`. |
+| `tools/submission_check.py` | Offline check of one trace + export (+ spec) against the kit's submission rules. |
+| `tools/compare_spec.py` | Compares an extracted spec with a written one (development). |
 
 ## Repository shape
 
 ```text
-builder/
-  build.py            # official entry point (python3 builder/build.py brief tools)
-src/agent_factory/    # or builder/lib; keep imports simple for a fresh checkout
-  extract/  resolve/  tools/  ir/  freya/  selftest/  run_trace.py
-tests/                # unit, regression; synthetic briefs only
-submission/           # exported hidden-brief workflows
-traces/               # per-brief run logs
-reference/            # copy of kit material we rely on (freya.py client, docs)
+builder/      the builder (modules above); python3 builder/build.py ...
+tools/        offline helpers: submission_check.py, compare_spec.py
+tests/        unittest suites; fixtures/ (specs, synthetic OpenAPI, extraction replies); briefs/ (raw-a, changed-a)
+traces/       <slot>.log, <slot>.spec.json per run (print/validate/failed logs are git-ignored)
+submission/   <slot>.workflow.json exports
+docs/ tasks/ reviews/   design, task briefs and reports, reviews
+build-the-builder-v2/   the kit (reference; not imported)
 ```
 
-The kit folder `build-the-builder-v2/` is reference material. Copy the parts the builder needs (e.g. `freya.py`) into the repo so a fresh checkout is self-contained.
+## Dependency rules `[VERIFIED: imports]`
 
-## Dependency rules
+- `spec.py` imports nothing from the builder. `workflow.py`, `offer_check.py`, `extract.py` and `tools_from_openapi.py` never import `freya`.
+- `freya.py` stays identical to the kit; additions go in `freya_chat.py` / `slots.py`.
+- Standard library only, Python 3.10+; no SDK.
 
-- `ir/` imports nothing from `freya/`.
-- `freya/` consumes validated IR; it does not read the brief.
-- `build.py` only wires modules together.
-- Standard library only where reasonable (the kit client is stdlib-only; Python 3.10+). Add a model SDK only if needed; pin versions. No syntax newer than 3.10.
+## Builder model `[VERIFIED: code + live run T-006]`
 
-## Builder model `[VERIFIED decision, 2026-10-10]`
-
-- Provider: Anthropic Messages API over stdlib `urllib` (no SDK). Key from `ANTHROPIC_API_KEY` in `env.sh`; never logged.
-- Default model `claude-sonnet-5-5` for extraction; `claude-opus-5-5` only where a measured failure justifies it. Model names are pinned in one config place and written to the trace for every call.
-- Temperature 0, structured JSON output validated against the IR schema; one retry on invalid JSON, then fail the build with a clear error.
+- Anthropic Messages API over `urllib`. The key comes from `ANTHROPIC_API_KEY`, is read at call time and is never logged.
+- `EXTRACTION_MODEL = "claude-sonnet-5-5"`, pinned in `llm.py`, and written to the trace for every call (`model_call: model=… purpose=… duration_seconds=…`).
+- No temperature is sent: the pinned model rejected it ("temperature is deprecated for this model", T-006). If a 400 response names temperature, the client drops it and resends. `max_tokens` 16000, timeout 300 s, one retry on 408/429/5xx/529 or a transport error.
+- Output is JSON checked by code (not a schema API); invalid output goes through the repair rounds above.
 
 ## Constraints that shape the design
 
-- **Prompt budget:** each step's dialogue prompt (`system_prompt` + `role_message` + `task_message`) stays within 500 to 1,500 tokens (Freya guidance, see [`STARTER-KIT-FACTS.md`](STARTER-KIT-FACTS.md)). The whole brief is never pasted into one step. Each step gets only the rules for its stage, rewritten short, with computed facts (dates, amounts) filled in by code. The builder measures every step and fails or splits when a step is over budget. Implemented in `build_spec_workflow` (T-009): target 1,200 and hard limit 1,500 tokens. Over the target, a step first leaves out rules tagged `enforced_by` whose check the spec supports, then duplicate sentences, then rules shared by several steps move to the global prompt. Over the hard limit the build fails. Every rule's placement is a `rule_placement` trace line.
-
-- 30 minutes per brief including self-tests; a ten-case simulation takes 3 to 11 minutes, and simulations queue one at a time. Budget at most one or two self-test runs.
-- Build time is a tie-breaker: few model calls, parallel where independent.
-- Reproducibility: organizers rerun the builder from the commit. Pin model names, low temperature, no hidden state; the saved workflow slot file must not be required.
-- Update the existing workflow in place with `save_workflow`.
-- `save_workflow` keeps its local slot mapping in the ignored root file `.freya-agents.json`. A fresh checkout has no mapping, so its first run creates a workflow; later runs from the same working directory update that workflow in place. This consumes one additional workflow per fresh checkout, so keep the workspace cap in mind.
+- **Prompt budget** `[VERIFIED: code, T-009]`. Every conversation step is estimated as characters/4 of `system_prompt` + `task_message` + its tool descriptions (`workflow_prompt_estimates`). The target is 1,200 tokens and the hard limit 1,500. A step over the target first leaves out rules whose `enforced_by` check the code performs. Next, duplicate sentences are removed. Last, rules shared by several steps move to the global prompt. No rule is cut. Over the hard limit, commit e4ed265 fails the build with a `SpecError`. `[TO-CONFIRM]` An uncommitted change in the working tree (T-009 follow-up) ships the workflow instead and writes a `budget_exceeded_but_shipped` trace line; update this line when it lands. Per-step estimates are `prompt_estimate` trace lines.
+- **Time:** 30 minutes per brief including self-tests. Extraction calls run in parallel; the self-test has a 6-minute budget.
+- **Reproducibility:** pinned model name, spec saved per run, no hidden state needed. `save_workflow` keeps its slot map in the git-ignored `.freya-agents.json`. A fresh checkout creates one new workflow on its first run and updates it in place afterwards.
+- **Send rules:** the builder never sends `agent_config` or `null`. The trace proves this with `sent_agent_config: absent` and `sent_nulls: 0`. The kit's `update_workflow` then sets the platform-filled `agent_config.llmConfig` to the kit model.

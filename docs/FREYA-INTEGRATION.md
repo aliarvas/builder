@@ -5,46 +5,62 @@
 
 Facts and the API table are in [`STARTER-KIT-FACTS.md`](STARTER-KIT-FACTS.md). The workflow JSON itself is specified in `build-the-builder-v2/docs/workflow-format.md` and `tools-and-code.md`; follow those, do not paraphrase them here.
 
-## Adapter responsibilities
+## Where Freya is called `[VERIFIED: code, commit e4ed265]`
 
-- Render validated IR to the Freya workflow format and nothing else.
-- `POST ...?dryRun=true` before saving; report the platform's rejection text.
-- Save with create-then-update-in-place; always publish the new version (an unpublished update is not simulated). `freya.save_workflow` does both.
-- Read the saved workflow back after saving when in doubt: the platform silently strips misplaced fields (`tools` outside conversation nodes, `pre_actions` outside action nodes).
-- Export with `freya.export_workflow`.
-- Keep `FREYA_API_KEY`, `FREYA_BANK_TEAM_KEY` out of logs, traces and the repo.
-- Never change the phone-agent model. Omit `agent_config`.
-- Normalize errors; separate retryable (timeouts, 5xx) from validation/auth errors.
+| Step | Code | What it does |
+|---|---|---|
+| Dry run | `build.py` -> `freya.validate_workflow(slot, workflow)` | `POST /api/v2/workflow?dryRun=true`. Runs in `--validate` and before every save; the platform's rejection text becomes the build error. |
+| Save | `slots.save_with_slot_check` -> `freya.save_workflow` | If the slot's stored workflow returns 404, the stale entry is dropped and a new workflow is created (F-005). Otherwise the workflow is updated in place. The slot map is `.freya-agents.json` (git-ignored). |
+| Model setting | kit `update_workflow` | After the update the kit reads the platform-filled `agent_config` and sets `llmConfig` to the kit's `AGENT_LLM`. The builder itself never sends `agent_config`. |
+| Publish | `build._ensure_published_version` | Publishes the newest version if it is not published, reads the versions back and fails if it is still unpublished. The version number goes to the trace (`published_version`). |
+| Export | `freya.export_workflow` | Writes `submission/<slot>.workflow.json` before the self-test, so a failing self-test never blocks the artifact. |
+| Self-test | `freya_chat.chat_message` / `get_call` / `end_chat` | Bounded chat turns against the published workflow (see [`EVALUATION-AND-TESTING.md`](EVALUATION-AND-TESTING.md)). |
 
-The adapter must not read the brief, invent policy, or silently drop a critical rule the format cannot express.
+- `builder/freya.py` is byte-identical to the kit's `freya.py`. Additions live in `freya_chat.py` (it reuses the kit's `URL`, `HEADERS` and error format) and `slots.py`.
+- No other module imports `freya`. `--print` makes no Freya call.
+- Keys: `FREYA_API_KEY`, `FREYA_BANK_TEAM_KEY` and `ANTHROPIC_API_KEY` come only from the environment. `run_trace.py` masks their values and the `fak_…` / `sk-ant-…` patterns in every trace line. The builder never uses the bank team key; only the kit's `run_cases.py` does.
+- A save without `FREYA_API_KEY` stops before any request with a clear error.
 
-## Format rules the renderer must obey (from the kit)
+## What the renderer sends `[VERIFIED: code + tests]`
 
-- No `null` values. Node `name` equals its key.
-- Fixed values use `default`, never `const`. `customer_id` is baked from `{{customer_id}}`; other body fields have `default: "{{field}}"` with no variable of that name, so the model fills them. A model-filled field must not share a name with a variable already set on node entry.
-- Give model-filled fields `enum`s from the OpenAPI file; add descriptions that say when to call the tool ("CALL it only after ...").
-- `response_mapping` on the tool for `tools`, on the node for `pre_actions`; paths start with `data.`.
-- Test booleans as both `"true"` and `"True"`, or map a string field.
-- Every path reaches an `end_call` node; passthrough nodes end with an `always` transition; set `max_turn_transition` wherever `max_node_turns` is set.
-- Code: no `{{ }}`, wrap in try/except, read inputs from `vars`, write finished text facts to `vars`.
-- Write tools get `maxRetries: 0` at the tool level; retry decisions are made in the flow (a failed `create_promise` is retried once by the agent).
-- Add a `post_process_code` hook with a `what_to_do_next` line where the model tends to go silent or ignore a negative result (identity answers, promise recording).
-- Do not add anything to a node that calls services other than the bank tool API.
+These are the kit format rules as the renderer applies them. The trace proves the first rule for every run (`sent_agent_config: absent`, `sent_nulls: 0`), and `tools/submission_check.py` checks those two lines.
+
+- No `agent_config`, no `null`. Node `name` equals its key.
+- Tools come from the OpenAPI file (`tools_from_openapi.py`): `$ref` and `allOf` are resolved, enums and required fields are kept, and constraints the format cannot hold move into descriptions. Call variables (`customer_id`, …) are baked as `{{variable}}` defaults. Model-filled fields keep no variable of the same name.
+- Fixed arguments use `default`, never `const`. Tool-specific values (outcome, reason, product id) are baked or filled by a pre-hook, not by the model, where the spec provides them.
+- `response_mapping` sits on the tool for `tools` and on the node for `pre_actions`; paths start with `data.`. Booleans are tested as both `"true"` and `"True"`.
+- Every tool has the `post_process_code` hook that normalizes `data.ok` and writes `what_to_do_next` (see [`ARCHITECTURE.md`](ARCHITECTURE.md), "Messy inputs").
+- Retries:
+  - Write tools (`create_promise`, closing and special-path tools) get `maxRetries: 0`; the flow decides any retry. A promise is retried per product up to the spec's `confirmation.max_attempts_per_product` (`confirmation_progress`). `close_call` is retried once when it did not return ok (`close_attempt` -> `close_record`, at most two sends).
+  - `get_account` runs as a pre-action with `maxRetries: 1`.
+- `close_call_on_hangup` is a workflow-level lifecycle tool (`alwaysRunsAt: ["end_of_call"]`). Its pre-hook blanks the URL when the closing chain already sent `close_call`, so one call never records two closes. Otherwise it derives the outcome from call state.
+- Code steps and hooks contain no `{{ }}`, read and write only `vars`, are wrapped in `try/except`, and are generated from spec data (`offer_check.py`, `workflow.py`).
+- Every path reaches `end_call`; passthrough nodes end with an `always` transition. One transition per target (`group_transitions_by_target`, T-005c).
+- Nothing in the workflow calls a service other than the bank tool API.
+
+## Verified platform behavior (from our runs)
+
+Details and causes are in [`UAT-FINDINGS.md`](UAT-FINDINGS.md).
+
+- The chat route can return 503/504 on a turn that was in fact processed (F-023). The self-test reads the call record before resending.
+- In chat, routing right after a tool result can be suppressed (F-021), and `end_call` is deferred: a later message resumes the conversation (F-031). The self-test stops sending after the call ends.
+- The platform's default `agent_config` has Turkish STT/TTS and inserts a Turkish wait filler on slow passthrough steps (F-043). The account step now speaks a fixed wait line. `[TO-CONFIRM]` live.
+- The exported file always contains a platform-filled `agent_config` and `null` defaults (T-008 review). Only the sent definition is checked for them.
 
 ## Testing through Freya
 
-- Fast single-turn check: `POST /api/v2/chat/message` (no queue). Note: the chat route may skip a code step that is the first node, so values computed there can be empty in chat but exist in simulations.
-- Simulations: `freya.run_simulation` with personas; one at a time per workspace; budget the 30-minute builder limit.
-- Debug a failure: `freya.get_call(call_id)["messages"]` and its `route_evaluated` / `function_call_*` events, including `variable_table`.
+Every Freya action needs approval (AGENTS.md). The order is chat first, voice only after chat passes.
 
-## First vertical slice
+- Single chat turns: `POST /api/v2/chat/message` (no queue). The builder's own self-test uses this route.
+- Scored practice runs: the kit's `tools/run_cases.py <agent_id> --brief A|B` (simulations, one at a time per workspace).
+- Debug: `freya.get_call(call_id)["messages"]`, specifically the `node_enter`, `route_evaluated` (with `variable_table`) and `function_call_start` / `function_call_complete` events.
 
-1. `cp env.example env.sh`, fill keys, `source env.sh`.
-2. Done 2026-10-10 with the v1 sample builder (workflow `50dafbaa...`, baseline 6/10). In the v3 kit the equivalent is saving `examples/base-agent.json` or running `examples/agent_builder.py`.
-3. `python3 tools/run_cases.py <agent_id> --brief A`; record the baseline in `docs/EVALUATION-AND-TESTING.md` results.
-4. Build `builder/build.py` reproducing the minimal builder but reading tools from the OpenAPI file, then export a workflow. This proves the contract end to end.
-5. Only then add the structured pipeline.
+## Vertical slice `[VERIFIED: done]`
+
+1. 2026-10-10: kit baseline (one node, brief as prompt) scored 6/10 on Brief A.
+2. `builder/build.py` reads tools from the OpenAPI file and creates, publishes and exports a workflow end to end (T-001). The latest committed live run is `traces/brief-a.log` (a `--spec` run, published version 10) with `submission/brief-a.workflow.json`.
+3. The structured pipeline above replaced the single-step agent. `--single-step` still exists as the legacy path.
 
 ## Safe behavior
 
-When a critical rule cannot be expressed safely in the Freya format: fail the build with a precise error, or use a documented safe fallback. Never claim enforcement stronger than the platform gives. Never fabricate an agent ID, API success or test result.
+When a critical rule cannot be expressed safely in the Freya format, the builder fails the build with a precise error (`SpecError`: unknown tool, missing contract field, invalid spec) or uses a documented safe fallback (the global prompt). It never claims enforcement stronger than the platform gives, and never fabricates an agent ID, API success or test result. A rule placed only in a prompt is marked as such in the trace (`rule_placement`).

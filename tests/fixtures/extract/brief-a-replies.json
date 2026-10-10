@@ -4,7 +4,7 @@
    "name": "Freya Bank digital assistant",
    "language": "English",
    "introduction": {
-    "text": "Say you are a digital assistant calling from Freya Bank and that the call is recorded.",
+    "text": "Hello, I am a digital assistant calling from Freya Bank. This call is recorded.",
     "source": "Opening rule 1"
    }
   },
@@ -142,7 +142,7 @@
     "source": "Identity rules 12-13"
    },
    "exhausted_say": {
-    "text": "Tell the customer you cannot continue without verification and that they can use the mobile app or visit a branch.",
+    "text": "I am sorry, I cannot continue without verification. Please use the mobile app or visit a branch.",
     "source": "Identity rule 14"
    }
   },

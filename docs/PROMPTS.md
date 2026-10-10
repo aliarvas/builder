@@ -104,12 +104,11 @@ Fields: {field_details}
 - Purpose: Sets spec-derived identity and global rules for the multi-step phone agent.
 - Receiver: phone agent
 - Used at: builder/workflow.py — spec workflow system_prompt
-- Approximate tokens: ~113 static + `{agent_name}` characters ÷ 4 + `{language}` characters ÷ 4 + `{introduction}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~83 static + `{agent_name}` characters ÷ 4 + `{language}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
 You are {agent_name}. Speak {language}. Keep every turn concise and truthful. Call at most one tool per message. Never claim an action succeeded unless its tool result says so.
 Never say a payment or promise was recorded unless create_promise returned ok true. Never say a note or callback was recorded unless its tool returned ok true.
-If you have not yet given this introduction in this call, give it first in your next message, whatever the customer said: {introduction}
 Global rules:
 {rules}
 ```
@@ -119,10 +118,10 @@ Global rules:
 - Purpose: Opens the call and identifies who answered.
 - Receiver: phone agent
 - Used at: builder/workflow.py — opening
-- Approximate tokens: ~73 static + `{introduction}` characters ÷ 4 + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~83 static + `{introduction}` characters ÷ 4 + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
-Start the call with this, once: {introduction}
+Your first words in this call, whatever the customer said, and only once: {introduction}
 The person to ask for is {address}. Use these words when you address them.
 Ask: {question}
 If they only greet you or check the line (for example "Hello?"), that is not an answer: reply briefly and ask the question again.
@@ -179,14 +178,14 @@ Rules:
 - Purpose: Asks ordered identity questions and uses the verification tool.
 - Receiver: phone agent
 - Used at: builder/workflow.py — identity
-- Approximate tokens: ~180 static + `{questions}` characters ÷ 4 + `{answer_verified}` characters ÷ 4 + `{failed_answer}` characters ÷ 4 + `{attempts_left}` characters ÷ 4 + `{exhausted_say}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~182 static + `{questions}` characters ÷ 4 + `{answer_verified}` characters ÷ 4 + `{failed_answer}` characters ÷ 4 + `{wait_line}` characters ÷ 4 + `{attempts_left}` characters ÷ 4 + `{exhausted_say}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Ask these security questions one at a time, in order. Call the identity tool with each answer:
 {questions}
 Convert the customer's spoken answer into the tool format yourself. Never ask the customer to say a technical format.
 After each tool result:
-- {answer_verified} is true: acknowledge briefly and ask the next question. After the last question, ask nothing more; say the answers matched and give no account details yet.
+- {answer_verified} is true: acknowledge briefly and ask the next question. After the last question, ask nothing more; say the answers matched, then say: {wait_line} Give no account details yet.
 - {answer_verified} is false: say the answer did not match. Do not thank them as if it passed. Ask the same question again; never move to the next question until this one is verified. {failed_answer}
 - The action was not carried out: ask for the same answer again; it is not a wrong answer.
 - {attempts_left} is 0: {exhausted_say} Ask nothing more and give no account details.
@@ -249,9 +248,9 @@ Rules:
 
 ## ACCOUNT_WAIT_LINE
 
-- Purpose: Fixed line spoken while the account is fetched, when the spec gives none (F-043).
-- Receiver: phone agent (fixed spoken line)
-- Used at: builder/workflow.py — account step on_enter
+- Purpose: Line said after identity passed, before the account lookup, when the spec gives none (F-043, F-050).
+- Receiver: phone agent (in the identity step prompt)
+- Used at: builder/workflow.py — identity step, {wait_line}
 - Approximate tokens: ~13 (characters ÷ 4)
 
 ```text
@@ -291,6 +290,29 @@ If it did not return ok true, do not say anything was recorded or completed.
 
 ```text
 You asked: {ask}
+Wait for the answer. Do not call any tool and do not promise anything.
+```
+
+## SPECIAL_SAY_FALLBACK
+
+- Purpose: Spoken instead of a special path's line when the spec's line is an instruction to the agent (F-047).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/workflow.py — special path say fallback
+- Approximate tokens: ~8 (characters ÷ 4)
+
+```text
+Thank you for letting me know.
+```
+
+## SPECIAL_ASK_PHRASED_TEMPLATE
+
+- Purpose: Lets the agent phrase a special path's question when the spec gives an instruction instead of words (F-047).
+- Receiver: phone agent
+- Used at: builder/workflow.py — global special_<id> with ask (fallback)
+- Approximate tokens: ~34 static + `{ask}` characters ÷ 4 at runtime
+
+```text
+Ask the customer this as one short question, in your own words: {ask}
 Wait for the answer. Do not call any tool and do not promise anything.
 ```
 
@@ -376,13 +398,13 @@ Leave enforced_by out for anything the agent must say, ask, propose or decide, a
 - Purpose: Extracts the agent identity, opening, third-party handling, identity check and global rules.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'opening_identity'
-- Approximate tokens: ~933 (characters ÷ 4)
+- Approximate tokens: ~977 (characters ÷ 4)
 
 ```text
 Extract the sections agent, opening, third_party, identity and global_rules. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
 Return this JSON shape:
 {
- "agent": {"name": "how the agent presents itself", "language": "language of the call", "introduction": RULE (what the first sentence must say: who is calling, for whom, recording notice), "wait_line": "one short sentence in the language of the call, said while the account is looked up after identity is verified, for example a thank-you and a request to wait; no debt details"},
+ "agent": {"name": "how the agent presents itself", "language": "language of the call", "introduction": RULE (text: the exact first sentence the agent says to the customer, word for word: who is calling, for whom, recording notice. Not an instruction such as "Say you are ..."), "wait_line": "one short sentence in the language of the call, said while the account is looked up after identity is verified, for example a thank-you and a request to wait; no debt details"},
  "opening": {
   "rules": [RULE] (other opening rules: what may be said before verification, how to answer questions about who or what is calling),
   "confirmation_question": RULE (how to ask whether the intended customer is speaking),
@@ -402,7 +424,7 @@ Return this JSON shape:
   "attempts_left_field": "identity tool response field (integer) with the wrong answers or attempts left",
   "answer_verified_field": "identity tool response field (boolean) for the answer just checked",
   "failed_answer_instruction": RULE (what to do after a failed answer, including any hint the tool returns),
-  "exhausted_say": RULE (what to tell the customer when no attempts are left)
+  "exhausted_say": RULE (text: the exact words said to the customer when no attempts are left, word for word, not an instruction such as "Tell the customer ...")
  },
  "global_rules": [RULE] (rules for the whole call: honesty, questions the agent cannot answer, repeated refusals to talk, recording claims, goodbye before the closing tool),
  "sources": {"opening.max_unclear_asks": "excerpt or fallback: why", "opening.forbidden_before_verification": "excerpt"},
@@ -475,16 +497,16 @@ Return this JSON shape:
 - Purpose: Extracts the closing table, the special paths and the closing tool fields.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'outcomes'
-- Approximate tokens: ~901 static + `{states}` characters ÷ 4 at runtime
+- Approximate tokens: ~1017 static + `{states}` characters ÷ 4 at runtime
 
 ```text
 Extract the sections outcomes, special_paths and closing. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
 Return this JSON shape:
 {
  "closing": {"rules": [RULE] (how the call ends; most are enforced_by closing_outcome. An instruction for what the agent does during the call, such as notes or transfers, belongs to the step where it happens, not here), "outcome_field": "closing tool request field for the outcome", "reason_field": "closing tool request field for the reason"},
- "outcomes": [{"outcome": "...", "reason": "... or \"\"", "when": RULE, "say": RULE (the goodbye sentence said before the closing tool; include every sentence the brief requires in that situation), "wins_over_promise": true or false (true only if this row is used even after a promise was recorded), "states": ["call-end state names below that close with this row"]}]
+ "outcomes": [{"outcome": "...", "reason": "... or \"\"", "when": RULE, "say": RULE (text: the exact words the agent says to the customer before the closing tool, word for word, read aloud as written; include every sentence the brief requires in that situation and end with a goodbye. Never an instruction such as "Thank the customer and say goodbye."; write "Thank you for your time. Goodbye." instead), "wins_over_promise": true or false (true only if this row is used even after a promise was recorded), "states": ["call-end state names below that close with this row"]}]
    (one row per outcome and reason pair the brief allows; every pair from the closing table.)
- "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (said word for word), "ask": RULE (optional; leave the key out unless the documents require one question before acting, for example whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer and waits for the answer, so it must be one question ending with "?", never an instruction), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]
+ "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (text: the exact words said to the customer, read aloud as written; never an instruction to the agent), "ask": RULE (optional; leave the key out unless the documents require one question before acting, for example whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer and waits for the answer, so it must be one question ending with "?", never an instruction), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]
    (situations that interrupt the normal flow, for example: the customer says the payment was already made, denies the debt, reports financial difficulty, asks for a different plan or for a person; or a note on one product. tool_args holds only values the brief fixes; fields the conversation must fill are left out. then close: the call closes with outcome and reason, which must be a row above. then return: the agent goes back to the step it came from (outcome and reason are still required; repeat a row's values). Do not use the identity, account, promise or closing tools here. available_in lists only steps where the situation may happen: never before identity is verified if it would disclose the account.)
  "derived_states": {"state name": "why this row"} (every state below that the documents do not name, with the reason you chose its row; no excerpt needed),
  "sources": {},
@@ -497,6 +519,7 @@ Code checks this reply; each failed check costs a repair round:
 - tool_args keys are request fields of that tool; enum fields use an enum value from the tool contract.
 - Every state name below appears in exactly one row's states; every required state is mapped.
 - An ask is one question ending with "?" and only with then close; otherwise leave the key out.
+- Every say and ask is the customer's words, read aloud as written: no "the customer", no instruction to the agent such as "Say ...", "Tell ...", "Offer ..." or "Do not ...".
 Call-end states. Map each required state to exactly one row. If the documents do not name a state, map it to the closest row and list it in derived_states. An optional state left out uses the row of "default":
 {states}
 ```

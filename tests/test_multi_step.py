@@ -924,7 +924,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
 
     def test_special_tool_args_are_baked(self):
         nodes = self.render()["nodes"]
-        tool = nodes["special_human_go"]["pre_actions"][0]
+        tool = nodes["special_human_go_call"]["pre_actions"][0]
         body = tool["function"]["parameters"]["properties"]["body"]
         self.assertEqual("general", body["properties"]["queue"]["default"])
         self.assertNotIn("queue", body.get("required", []))
@@ -1082,9 +1082,14 @@ class MultiStepWorkflowTests(unittest.TestCase):
                     if "opening" in edges(node)
                 ]
                 self.assertEqual([], into_opening)
-                # Disclosure first, from any step the call can reach first.
-                self.assertIn("give it first in your next message, whatever the customer said: " + introduction,
-                              workflow["system_prompt"])
+                # Disclosure first: only in the opening, the step every call starts in. Not in the
+                # global prompt, or later steps repeat it (F-048).
+                self.assertIn("Your first words in this call, whatever the customer said, and only once: "
+                              + introduction, nodes["opening"]["task_message"])
+                self.assertNotIn(introduction, workflow["system_prompt"])
+                for key, node in {**nodes, **workflow["global_nodes"]}.items():
+                    if key != "opening":
+                        self.assertNotIn(introduction, node.get("task_message", ""), key)
 
     def test_model_product_field_is_never_written_as_a_workflow_variable(self):
         workflow = self.render(1)
@@ -1139,6 +1144,10 @@ class MultiStepWorkflowTests(unittest.TestCase):
                         continue
                     node = globals_[key]
                     targets = exits(node) + (exits(nodes[key + "_go"]) if path.ask else [])
+                    # F-050: an engine-run tool sits in a silent "<step>_call" api step after the spoken line.
+                    targets += [exit for step in list(targets) if step.endswith("_call") and step in nodes
+                                for exit in exits(nodes[step])]
+                    targets = [target for target in targets if not target.endswith(("_go", "_call"))]
                     if path.then == "return":
                         self.assertEqual({"__previous__"}, set(targets))
                     else:
@@ -1378,7 +1387,11 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertEqual("tts", paid["on_enter"]["type"])
         human = a["global_nodes"]["special_human"]
         self.assertEqual("tts", human["on_enter"]["type"])
-        self.assertEqual("api_request", a["nodes"]["special_human_go"]["node_type"])
+        # F-050: the line is spoken by a code step; the tool runs in a silent api step after it.
+        self.assertEqual("code", a["nodes"]["special_human_go"]["node_type"])
+        self.assertEqual("tts", a["nodes"]["special_human_go"]["on_enter"]["type"])
+        self.assertEqual("api_request", a["nodes"]["special_human_go_call"]["node_type"])
+        self.assertEqual({"type": "silent"}, a["nodes"]["special_human_go_call"]["on_enter"])
         b = self.render(1)
         self.assertEqual("code", b["global_nodes"]["special_product_dispute_at_negotiate"]["node_type"])
         dispute = b["nodes"]["special_product_dispute"]

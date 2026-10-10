@@ -43,28 +43,36 @@ def read_back(data, products, offers, now="2026-10-14T11:00"):
 
 
 class WaitLineTests(unittest.TestCase):
-    def test_account_lookup_speaks_a_fixed_line(self):
-        account = nodes_for(FIXTURE_A)["account"]
-        self.assertEqual({"type": "tts", "text": ACCOUNT_WAIT_LINE.text}, account["on_enter"])
-        self.assertTrue(account["passthrough"])
+    """F-043 wait line, moved by F-050: the identity step says it after the last answer passed;
+    no passthrough api step speaks (a tts entry there broke the turn on the platform)."""
+
+    def test_identity_step_says_the_default_wait_line(self):
+        nodes = nodes_for(FIXTURE_A)
+        self.assertIn("then say: " + ACCOUNT_WAIT_LINE.text, nodes["identity"]["task_message"])
+        self.assertEqual({"type": "silent"}, nodes["account"]["on_enter"])
         self.assertNotIn("{{", ACCOUNT_WAIT_LINE.text)
         self.assertLessEqual(len(ACCOUNT_WAIT_LINE.text.split()), 12)
 
     def test_spec_wait_line_in_the_call_language_wins(self):
         data = copy.deepcopy(FIXTURE_A)
         data["agent"]["wait_line"] = "  Einen Moment bitte.  "
-        self.assertEqual("Einen Moment bitte.", nodes_for(data)["account"]["on_enter"]["text"])
+        self.assertIn("then say: Einen Moment bitte.", nodes_for(data)["identity"]["task_message"])
         data["agent"]["wait_line"] = 5
         with self.assertRaises(SpecError):
             parse_spec(data)
 
-    def test_only_the_account_step_gets_the_line(self):
-        nodes = nodes_for(FIXTURE_A)
-        spoken = [key for key, node in nodes.items()
-                  if node.get("node_type") in ("api_request", "code") and node.get("on_enter", {}).get("type") == "tts"]
-        self.assertIn("account", spoken)
-        self.assertNotIn("offer_setup", spoken)
-        self.assertNotIn("check_offer", spoken)
+    def test_no_passthrough_api_step_speaks(self):
+        for path in sorted((ROOT / "tests/fixtures").glob("spec-*.json")) + sorted(
+                (ROOT / "tests/fixtures/extract").glob("*extracted*.json")):
+            tools = TOOLS
+            if path.name == "spec-synthetic.json":
+                tools = tools_from_openapi(json.loads(
+                    (ROOT / "tests/fixtures/openapi-synthetic.json").read_text(encoding="utf-8")))
+            workflow = build_spec_workflow(parse_spec(json.loads(path.read_text(encoding="utf-8"))), tools)
+            for key, node in {**workflow["nodes"], **workflow["global_nodes"]}.items():
+                if node.get("node_type") == "api_request":
+                    self.assertTrue(node.get("passthrough"), (path.name, key))
+                    self.assertEqual({"type": "silent"}, node.get("on_enter"), (path.name, key))
 
 
 class ReadBackTests(unittest.TestCase):

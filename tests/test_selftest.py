@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from builder import build, freya, freya_chat
 from builder.selftest import (
-    MAX_CLOSE_ATTEMPTS, TOOL_FAILED, TOOL_OK, TOOL_UNKNOWN, SelfTestCase, SelfTestResult, _run_case, _success_claim, _tool_outcome,
+    INITIAL_NODE, MAX_CLOSE_ATTEMPTS, TOOL_FAILED, TURN_ABSENT, TURN_PROCESSED, TURN_STATE_LOST,
+    _plausible_answer, _reached_nodes, _turn_state, TOOL_OK, TOOL_UNKNOWN, SelfTestCase, SelfTestResult, _run_case, _success_claim, _tool_outcome,
     generate_cases, run_self_tests,
 )
 from builder.spec import load_spec, spec_entry_variables
@@ -178,7 +179,8 @@ class SelfTestGenerationTests(unittest.TestCase):
                     ["identity_attempt", "identity_failure_honesty", "third_party_close"],
                     [case.id for case in cases],
                 )
-                self.assertIn(spec.identity_questions[0].ask.text, " ".join(cases[0].messages))
+                self.assertEqual(2 + len(spec.identity_questions), len(cases[0].messages))
+                self.assertNotIn(spec.identity_questions[0].ask.text, " ".join(cases[0].messages))
                 self.assertIn(spec.opening.data["third_party_values"][0], " ".join(cases[2].messages))
 
     def test_cases_never_expect_a_bank_success(self):
@@ -232,9 +234,10 @@ class SelfTestRunnerTests(unittest.TestCase):
             def chat_message(self, workflow_id, message, variables, call_id=None, timeout_seconds=120):
                 if self.chat_calls == 1:
                     self.chat_calls += 1
-                    self.call["messages"].append({
-                        "role": "user", "messageId": "processed", "message": message,
-                    })
+                    self.call["messages"].extend([
+                        {"role": "user", "messageId": "processed", "message": message},
+                        {"role": "assistant", "messageId": "processed-reply", "message": "ok"},
+                    ])
                     raise RuntimeError("POST /api/v2/chat/message -> 503: unavailable")
                 return super().chat_message(
                     workflow_id, message, variables, call_id, timeout_seconds=timeout_seconds
@@ -244,6 +247,30 @@ class SelfTestRunnerTests(unittest.TestCase):
         case = SelfTestCase("processed", ("hello", "next"), {}, (), ())
         result = _run_case(client, "workflow", case, 100, lambda: 1)
         self.assertEqual("pass", result.result)
+        self.assertEqual(2, client.chat_calls)
+
+    def test_5xx_turn_that_lost_its_state_is_platform_error_without_resend(self):
+        class LostState(FakeClient):
+            def chat_message(self, workflow_id, message, variables, call_id=None, timeout_seconds=120):
+                if self.chat_calls == 1:
+                    self.chat_calls += 1
+                    self.call["messages"].extend([
+                        {"role": "user", "messageId": "lost", "message": message, "nodeId": "identity"},
+                        event("function_call_start", function="verify_identity"),
+                        event("node_enter", node="account"),
+                        {"role": "assistant", "messageId": "old", "message": "again",
+                         "workflowSnapshot": {"currentNode": "identity"}},
+                    ])
+                    raise RuntimeError("POST /api/v2/chat/message -> 502: bad gateway")
+                return super().chat_message(
+                    workflow_id, message, variables, call_id, timeout_seconds=timeout_seconds
+                )
+
+        client = LostState({"messages": []})
+        case = SelfTestCase("lost", ("hello", "answer", "more"), {}, (), ())
+        result = _run_case(client, "workflow", case, 100, lambda: 1)
+        self.assertEqual("platform_error", result.result)
+        self.assertIn("state did not follow", result.reason)
         self.assertEqual(2, client.chat_calls)
 
     def test_5xx_unprocessed_turn_is_retried(self):
@@ -437,6 +464,104 @@ class SelfTestRunnerTests(unittest.TestCase):
         self.assertEqual(3, len(results))
         self.assertTrue(all(item.result == "platform_error" for item in results))
         self.assertEqual(0, client.chat_calls)
+
+
+class InitialNodeTests(unittest.TestCase):
+    """F-045: the engine writes no node_enter for the initial step."""
+
+    def test_message_node_id_snapshot_and_started_call_count_as_reached(self):
+        call = {"messages": [
+            {"role": "assistant", "messageId": "a1", "message": "Hello", "nodeId": "opening"},
+            {"role": "user", "messageId": "u1", "message": "yes",
+             "workflowSnapshot": {"currentNode": "identity", "enteredNodes": ["opening", "identity"]}},
+        ]}
+        self.assertTrue({"opening", "identity"} <= _reached_nodes(call, []))
+        bare = {"messages": [{"role": "assistant", "messageId": "a1", "message": "Hello"}]}
+        self.assertIn(INITIAL_NODE, _reached_nodes(bare, []))
+        self.assertNotIn(INITIAL_NODE, _reached_nodes({"messages": []}, []))
+
+    def test_case_passes_without_opening_node_enter(self):
+        call = {"messages": [
+            {"role": "assistant", "messageId": "a1", "message": "Hello", "nodeId": "opening"},
+            event("node_enter", node="third_party"),
+            event("function_call_start", function="close_call"),
+            event("node_enter", node="end_call"),
+        ], "endedReason": "end_call"}
+        case = SelfTestCase("tp", ("hello",), {}, ("opening", "third_party", "end_call"), (), True)
+        result = _run_case(FakeClient(call), "workflow", case, 100, lambda: 1)
+        self.assertEqual("pass", result.result, result.reason)
+
+    def test_initial_node_matches_rendered_workflow(self):
+        for spec_path, openapi_path in zip(SPECS, OPENAPIS):
+            with self.subTest(spec=spec_path.name):
+                spec = load_spec(spec_path)
+                document = json.loads(openapi_path.read_text(encoding="utf-8"))
+                tools = tools_from_openapi(
+                    document, known_entry_variables=CALL_VARIABLES | spec_entry_variables(spec)
+                )
+                self.assertEqual(INITIAL_NODE, build_spec_workflow(spec, tools)["initial_node"])
+
+
+class PlausibleAnswerTests(unittest.TestCase):
+    """F-046: answers have the shape the identity field expects."""
+
+    def test_answer_shapes(self):
+        cases = (
+            ("date_of_birth", "Send it as YYYY-MM-DD.", "Ask for date of birth.", r"March.*nineteen eighty-five"),
+            ("phone_last4", "Send four digits.", "Ask for the last four phone digits.", r"^They are \d \d \d \d\.$"),
+            ("pin", "A 6-digit code.", "Ask for the pin.", r"^They are(?: \d){6}\.$"),
+            ("birth_year", "Four digits.", "Ask for the year of birth.", r"^Nineteen eighty-five\.$"),
+            ("postcode", "Upper case, no spaces.", "Ask for the postcode.", r"ab1 2cd"),
+            ("member_ref", "Send the reference.", "Ask for the reference.", r"4821"),
+        )
+        for field, answer_format, ask, pattern in cases:
+            with self.subTest(field=field):
+                self.assertRegex(_plausible_answer(field, answer_format, ask), pattern)
+
+    def test_generated_cases_use_plausible_answers(self):
+        briefs = [*zip(SPECS, OPENAPIS), (
+            ROOT / "tests/briefs/changed-a/reference-spec.json",
+            ROOT / "tests/briefs/changed-a/openapi-changed-a.json",
+        )]
+        for spec_path, openapi_path in briefs:
+            with self.subTest(spec=spec_path.name):
+                spec = load_spec(spec_path)
+                cases = generate_cases(spec, json.loads(openapi_path.read_text(encoding="utf-8")))
+                text = " ".join(cases[0].messages)
+                self.assertNotIn("self-test-answer", text)
+                for question in spec.identity_questions:
+                    self.assertIn(
+                        _plausible_answer(question.field, question.answer_format.text, question.ask.text),
+                        cases[0].messages,
+                    )
+
+
+class TurnStateTests(unittest.TestCase):
+    """F-023 / F-049: what a 5xx turn left in the call record."""
+
+    def user(self, message="answer", **extra):
+        return {"role": "user", "messageId": "u-new", "message": message, **extra}
+
+    def test_states(self):
+        before = {"old"}
+        self.assertEqual(TURN_ABSENT, _turn_state({"messages": []}, before, "answer"))
+        processed = {"messages": [
+            self.user(), event("node_enter", node="identity"),
+            {"role": "assistant", "messageId": "a", "message": "Thanks", "nodeId": "identity"},
+        ]}
+        self.assertEqual(TURN_PROCESSED, _turn_state(processed, before, "answer"))
+        no_reply = {"messages": [self.user()]}
+        self.assertEqual(TURN_STATE_LOST, _turn_state(no_reply, before, "answer"))
+        stale = {"messages": [
+            self.user(), event("node_enter", node="account"),
+            {"role": "assistant", "messageId": "a", "message": "again",
+             "workflowSnapshot": {"currentNode": "identity"}},
+        ]}
+        self.assertEqual(TURN_STATE_LOST, _turn_state(stale, before, "answer"))
+        ended = {"messages": [self.user(), event("node_enter", node="end_call")], "endedReason": "end_call"}
+        self.assertEqual(TURN_PROCESSED, _turn_state(ended, before, "answer"))
+        replayed = {"messages": [{"role": "user", "messageId": "old", "message": "answer"}]}
+        self.assertEqual(TURN_ABSENT, _turn_state(replayed, before, "answer"))
 
 
 class BuildSelfTestIntegrationTests(unittest.TestCase):
