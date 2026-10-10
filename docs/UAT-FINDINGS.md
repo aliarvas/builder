@@ -39,8 +39,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** Unknown. The failed turns tended to be ones where a tool call or a step change was due. It may be platform instability (staging, weekend), or our hooks may fail on the server. The call record lists no `problems`.
 - **Category:** platform
 - **Fix / lesson:** The chat driver needs one automatic retry with a pause. A simulation run (approved) would show whether the errors are ours, because the platform would then report them per call. Ask the organizers if 503s persist.
-- **Status:** open (TO-CONFIRM)
-- **Retest:** -
+- **Status:** open (TO-CONFIRM). The driver now retries 503/504/502 with a pause.
+- **Retest:** 2026-10-10 PUB-03 rerun: one HTTP 502 on the deciding turn, but the turn was processed (ledger complete). A 5xx does not always mean the turn was lost: check the ledger or call record before resending.
 
 ### F-022: Closing step does not know what to say or which outcome to record
 
@@ -51,8 +51,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The closing prompt only shows the outcome table. It does not know why the call is ending, and the identity step's rules do not carry over. This is review finding T-004 #5(a)/(d), deferred to T-005.
 - **Category:** routing
 - **Fix / lesson:** T-005a: every path that ends the call now goes through a small step that records why (identity exhausted, third party, promise recorded or failed, special path, turn limit, ...). A code step picks outcome, reason and closing sentence from the spec's outcome table (each row lists the call-end states it covers and its closing sentence). The sentence is spoken as a fixed line, then the engine runs `close_call` with the baked values (one retry), then the call ends. The model can no longer choose, skip or change the outcome. The spec fails to load if a call-end state has no outcome row.
-- **Status:** fixed offline (T-005a, not committed); open: whether a fixed line on a passthrough code step is spoken in chat before the engine call (TO-CONFIRM)
-- **Retest:** -
+- **Status:** fixed (96f1b80, 608fd1e). Open detail: the closing sentence appears in the transcript as the final message on `end_call`, after the engine ran `close_call`; check whether the judge minds the order.
+- **Retest:** Retest 2026-10-10: PUB-03 chat, published version 5, call in `scratchpad pub03v5`, customer `c_5c89791d-107`; ledger score pass. `close_call` = `not_verified/failed` in the same turn as the third wrong answer; sentence said once (app or branch, goodbye).
 
 ### F-021: Routing right after a tool result is suppressed in chat
 
@@ -63,8 +63,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** Freya evaluates routing after the tool result but suppresses it with "Missing prior assistant message". In this run, routing on a tool result happened only on the next user turn, not in the same turn as the kit docs suggest.
 - **Category:** platform
 - **Fix / lesson:** T-005a, two layers. (1) Conversation steps no longer have an unconditional self-loop: the log showed the step re-entering itself on every turn, which likely leaves no assistant message in the current step when the tool result arrives. With no match the engine stays in the step anyway (kit docs). (2) The identity prompt itself says the failure sentence and asks nothing more when no attempts are left, so a one-turn delay does no harm. A passthrough code step after the tool would not help, because the route into it is the one being suppressed.
-- **Status:** fixed offline (T-005a); cause of the suppression is TO-CONFIRM in the next approved chat test. Check also voice.
-- **Retest:** -
+- **Status:** fixed (96f1b80). Confirmed: without the self-loop, routing after the tool result ran in the same turn (`identity_attempts_left < 1` → closing chain). Voice still to check.
+- **Retest:** Retest 2026-10-10: PUB-03 chat, published version 5, call in `scratchpad pub03v5`, customer `c_5c89791d-107`; ledger score pass.
 
 ### F-020: Agent said "thank you" and moved on after a failed identity answer
 
@@ -75,8 +75,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The post-hook sentence ("these fields are false, treat as NOT satisfied") arrived correctly, but the identity prompt lists the questions in order and gives no rule for a failed answer. The spec fixture has no wrong-answer wording, and the model follows the question list. The format instruction for the answer was read aloud to the customer as a demand.
 - **Category:** honesty
 - **Fix / lesson:** Identity step: on `verified: false`, say it did not match and ask the same field again (the brief decides if hints are allowed). Move to the next field only on `verified: true`. Convert spoken dates yourself and never ask the customer for a technical format. The rules come from the spec (T-006 extraction); the "do not move on after a failed check" behavior is generic and belongs in the template. T-005a: generic rules for true / false / not carried out / no attempts left are in the identity template; the per-answer result field, the retry hint wording and the exhausted sentence come from the spec. The answer format is now labelled as a tool format the agent converts itself.
-- **Status:** fixed offline (T-005a), retest pending
-- **Retest:** -
+- **Status:** fixed (96f1b80)
+- **Retest:** Retest 2026-10-10: PUB-03 chat, published version 5, call in `scratchpad pub03v5`, customer `c_5c89791d-107`; ledger score pass. Each wrong answer: "That answer did not match" and the same question again; no format demand.
 
 ### F-019: Opening did not use the customer's name
 
@@ -87,8 +87,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The opening prompt describes the rule ("ask for the named customer") but does not insert the call variables for title and name.
 - **Category:** other
 - **Fix / lesson:** Fill the opening prompt with the customer name variables from the call (generic: the variable names come from the brief or the OpenAPI, never hardcoded). T-005a: the spec lists the call variables to address the customer with (`opening.address_with`); the opening prompt inserts them as placeholders.
-- **Status:** fixed offline (T-005a), retest pending
-- **Retest:** -
+- **Status:** fixed (96f1b80)
+- **Retest:** Retest 2026-10-10: PUB-03 chat, published version 5, call in `scratchpad pub03v5`, customer `c_5c89791d-107`; ledger score pass. Opening: "Am I speaking with Mr Park?"
 
 Verified in the same test: the Freya editor warning "unresolved variables (`field`, `answer`, `date`, `time`), field is removed from the request" is a false alarm for tools the model calls. The bank ledger shows `verify_identity` received `field` and `answer` filled in by the model.
 
