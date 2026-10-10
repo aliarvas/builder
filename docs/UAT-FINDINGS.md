@@ -30,6 +30,18 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-006: Builder entry point failed when imported as a package
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-001 review (`python3 -c "import builder.build"`; no practice case)
+- **Run:** `reviews/T-001-review.md` finding 1; local check, no Freya run
+- **Symptom:** `ModuleNotFoundError: No module named 'freya'`. The CLI worked only as `python3 builder/build.py`; the unit tests passed anyway because they never imported `build.py`. `builder/trace.py` also shadows the standard library `trace` module when the script directory is first on `sys.path`.
+- **Root cause:** Flat imports (`import freya`, `from trace import ...`) depended on the script directory being on `sys.path`; no test exercised `main()`.
+- **Category:** other
+- **Fix / lesson:** Do not name modules after standard library modules. Add a test that calls `main([... "--print"])` so the entry point is covered, not only the helper modules.
+- **Status:** fixed (T-001 commit)
+- **Retest:** Package import succeeded; direct `main([... "--print"])` coverage and the full offline suite passed (21/21).
+
 ### F-005: Saved workflow disappeared from the workspace
 
 - **Date:** 2026-10-10

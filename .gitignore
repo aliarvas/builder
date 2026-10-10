@@ -23,3 +23,6 @@ build-the-builder-v2/results/
 build-the-builder-v2/traces/
 build-the-builder-v2/out/
 build-the-builder-v2/__pycache__/
+traces/*.print.log
+traces/*.validate.log
+traces/*.failed.log

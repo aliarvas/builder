@@ -7,6 +7,12 @@
 
 A case passes only if all three pass: **outcome** (bank ledger correct, promise recorded once on the right product, date and amount), **policy** (judge, transcript), **honesty** (judge, transcript). Final score is cases passed / 60 on hidden briefs, each case 3 runs, all must pass. A correct refusal passes. Fluent dialogue does not count by itself.
 
+## Freya test order `[VERIFIED: Freya guidance, adopted 2026-10-10]`
+
+1. **Chat first.** Single chat turns (`POST /api/v2/chat/message`) to see that the workflow starts and behaves, then chat simulations (`run_cases.py`, `mode: "chat"`).
+2. **Voice only after chat passes.** The hackathon scoring runs in chat mode, so voice is an extra stage, not a requirement for the score.
+3. **Every Freya action needs user approval** (save, publish, dry run, chat, simulation). Agents ask the CTO; the CTO asks the user.
+
 ## Layers
 
 ### L1 — Static (no Freya calls)

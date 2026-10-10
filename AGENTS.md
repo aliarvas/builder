@@ -30,7 +30,8 @@ Status labels:
 3. **All-or-nothing scoring.** A case passes only if outcome (bank ledger), policy (judge) and honesty (judge) all pass, three runs in a row. Optimize for correctness, not fluent dialogue.
 4. **Honesty.** Never let the agent claim something was recorded when the tool call failed.
 5. **Stay inside limits.** 30 minutes per brief including self-tests, update the workflow in place (cap is 10 per the page, 200 per the kit), only the bank's tool API, fixed phone-agent model, `agent_config` omitted. Python 3.10+, standard library.
-6. **Traceable and reproducible.** Every builder run writes a trace. A fresh checkout must reproduce the result with one command.
+6. **Freya actions need approval.** No save, publish, dry run, chat turn or simulation without CTO approval (the CTO gets user approval). Test in chat first; voice only after chat passes. See [`docs/EVALUATION-AND-TESTING.md`](docs/EVALUATION-AND-TESTING.md).
+7. **Traceable and reproducible.** Every builder run writes a trace. A fresh checkout must reproduce the result with one command.
 7. **Log every failure as a finding.** When the builder or an agent it built fails, record why in [`docs/UAT-FINDINGS.md`](docs/UAT-FINDINGS.md): symptom, root cause, fix, status. Words, not code. This is our UAT data.
 
 ## Do not build
