@@ -26,7 +26,8 @@ from .prompts import (
 )
 from .offer_check import (
     OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED_COUNT,
-    _py_literal, check_offer_code, offer_setup_code, promise_values_hook, special_noted_code,
+    OFFER_AMOUNT_KIND, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
+    promise_values_hook, special_noted_code,
 )
 from .spec import OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
 from .tools_from_openapi import CALL_VARIABLES
@@ -211,22 +212,13 @@ def product_id_pre_process_code(
     products_variable: str, products_field: str, product_number_field: str, product_id_field: str
 ) -> str:
     """Build a defensive hook that replaces a 1-based selection with a stored API id."""
+    reader = product_reader_code(products_variable, products_field)
     return f"""import json
+import re
+{reader}
 try:
     body = config.get('body')
-    products = vars.get({products_variable!r})
-    if isinstance(products, str):
-        try:
-            products = json.loads(products)
-        except Exception:
-            products = []
-    if not isinstance(products, list):
-        products = vars.get({'get_account_response.data.' + products_field!r})
-    if isinstance(products, str):
-        try:
-            products = json.loads(products)
-        except Exception:
-            products = []
+    products = load_products()
     choice = body.get({product_number_field!r}) if isinstance(body, dict) else None
     try:
         index = int(str(choice).strip()) - 1
@@ -522,7 +514,8 @@ def _confirmation_progress_code(spec: PhoneAgentSpec) -> str:
     expected = confirmation["expected_count_variable"]
     number = "create_promise_args." + confirmation["product_number_field"]
     maximum = confirmation["max_attempts_per_product"]
-    return f"""try:
+    return f"""import json
+try:
     expected_count = max(1, int(vars.get({OFFERS_ACCEPTED_COUNT!r}) or vars.get({expected!r}) or 1))
 except Exception:
     expected_count = 1
@@ -530,13 +523,36 @@ try:
     recorded_count = int(vars.get('promise_recorded_count') or 0)
 except Exception:
     recorded_count = 0
-product_number = str(vars.get({number!r}) or '')
+raw_number = vars.get({number!r})
+if raw_number is None:
+    raw_args = vars.get('create_promise_args')
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args)
+        except Exception:
+            raw_args = None
+    if isinstance(raw_args, dict):
+        raw_number = raw_args.get({confirmation["product_number_field"]!r})
+product_number = str(raw_number or '')
 attempt_key = 'promise_attempts_' + product_number
 try:
     attempts = int(vars.get(attempt_key) or 0)
 except Exception:
     attempts = 0
 ok_value = vars.get('promise_result_ok')
+if ok_value is None:
+    ok_value = vars.get('create_promise_response.data.ok')
+if ok_value is None:
+    response = vars.get('create_promise_response')
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except Exception:
+            response = None
+    if isinstance(response, dict):
+        data = response.get('data')
+        if isinstance(data, dict):
+            ok_value = data.get('ok')
 ok = ok_value is True or str(ok_value).lower() == 'true'
 if ok:
     recorded_count += 1
@@ -1059,8 +1075,14 @@ def build_spec_workflow(
                 "condition": {"logic": "or", "conditions": [{"logic": "and", "conditions": [
                     {"variable": OFFER_DATE, "operator": "is_set"},
                     _condition(OFFER_DATE, "not_equals", ""),
-                    {"variable": OFFER_AMOUNT, "operator": "is_set"},
-                    _condition(OFFER_AMOUNT, "not_equals", ""),
+                    {"logic": "or", "conditions": [
+                        {"logic": "and", "conditions": [
+                            {"variable": OFFER_AMOUNT, "operator": "is_set"},
+                            _condition(OFFER_AMOUNT, "not_equals", ""),
+                        ]},
+                        _condition(OFFER_AMOUNT_KIND, "equals", "full"),
+                        _condition(OFFER_AMOUNT_KIND, "equals", "minimum"),
+                    ]},
                 ]}]},
             },
             *(
@@ -1110,6 +1132,9 @@ def build_spec_workflow(
         ]),
         "closing_say": {
             **_code_node("closing_say", "vars['closing_said'] = 'yes'\n", [
+                _transition("end_call", "The closing result was already recorded", [
+                    _condition("close_call_ok", "equals", value) for value in ("true", "True")
+                ]),
                 {"target_node": "close_attempt", "description": "Goodbye said", "condition": {"operator": "always"}},
             ]),
             "on_enter": {"type": "tts", "text": "{{closing_sentence}}"},
@@ -1171,12 +1196,17 @@ def build_spec_workflow(
         "min_confidence": 0.8,
     }]
     nodes["negotiate"]["extraction_schema"] = [{
-        "name": OFFER_DATE, "type": "date",
-        "description": "The payment date the customer proposes or accepts in their last message. Empty if none.",
+        "name": OFFER_DATE, "type": "string",
+        "description": "Copy the payment date phrase from the customer's last message unchanged. Do not resolve relative dates with the system clock. Empty if none.",
         "min_confidence": 0.7,
     }, {
         "name": OFFER_AMOUNT, "type": "float",
         "description": "The payment amount the customer proposes or accepts in their last message. Empty if none.",
+        "min_confidence": 0.7,
+    }, {
+        "name": OFFER_AMOUNT_KIND, "type": "string",
+        "description": "Meaning of the offered amount: full for the full or entire amount; minimum for the minimum, required instalment, or instalment amount; other for a numeric or different amount. Empty if no amount is offered.",
+        "enum_values": ["full", "minimum", "other"],
         "min_confidence": 0.7,
     }, {
         "name": OFFER_PRODUCT, "type": "integer",
@@ -1184,7 +1214,11 @@ def build_spec_workflow(
         "min_confidence": 0.7,
     }, {
         "name": negotiation["intent_variable"], "type": "string",
-        "description": "The customer's negotiation intent", "enum_values": negotiation["intent_values"],
+        "description": (
+            "The customer's negotiation intent. Values " + ", ".join(negotiation["close_values"])
+            + " mean the customer refuses any payment or arrangement after being asked for alternatives. "
+            + "Not today, not now, uncertainty about a date, or inability to pay on one proposed date are not refusal; keep negotiating."
+        ), "enum_values": negotiation["intent_values"],
         "min_confidence": 0.8,
     }, {
         "name": confirmation["expected_count_variable"], "type": "integer",

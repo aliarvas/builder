@@ -237,6 +237,70 @@ class OfferCheckTests(unittest.TestCase):
         accepted = json.loads(second["offers_accepted"])
         self.assertEqual({"product_id": "p-loan", "date": "2026-10-20", "amount": 150.0}, accepted["2"])
 
+    def test_flattened_account_products_work_for_one_two_and_three_products(self):
+        spec = load_spec(FIXTURES[1])
+        nodes = build_spec_workflow(spec, kit_tools())["nodes"]
+        products = [CARD, LOAN, dict(CARD, product_id="p-other", card_last4="9981")]
+        for prefix in ("account_response", "get_account_response"):
+            for count in (1, 2, 3):
+                with self.subTest(prefix=prefix, count=count):
+                    variables = {"now": "2026-10-14T11:00"}
+                    for index, product in enumerate(products[:count]):
+                        for field, value in product.items():
+                            variables[f"{prefix}.data.products.{index}.{field}"] = value
+                    exec(code_of(nodes["offer_setup"]), {"vars": variables})
+                    self.assertEqual(count, variables["products_facts"].count("Product "))
+                    self.assertNotIn("p-card", variables["products_facts"])
+                    variables.update({"offer_date": "today", "offer_amount_kind": "full"})
+                    if count > 1:
+                        variables["offer_product_number"] = count
+                    exec(code_of(nodes["check_offer"]), {"vars": variables})
+                    accepted = json.loads(variables["offers_accepted"])
+                    self.assertEqual(products[count - 1]["product_id"], accepted[str(count)]["product_id"])
+
+    def test_relative_date_phrases_resolve_from_call_now(self):
+        cases = {
+            "today": ("ok", "2026-10-14"),
+            "tomorrow": ("ok", "2026-10-15"),
+            "this Friday": ("ok", "2026-10-16"),
+            "next Monday": ("ok", "2026-10-19"),
+            "Friday next week": ("ok", "2026-10-23"),
+            "next week Friday": ("ok", "2026-10-23"),
+            "Monday the week after next": ("date_not_business_day", "2026-10-27"),
+            "Monday the 26th": ("date_not_business_day", "2026-10-27"),
+            "October 20, 2026": ("ok", "2026-10-20"),
+            "Oct 20": ("ok", "2026-10-20"),
+            "the 20th": ("ok", "2026-10-20"),
+            "the day after tomorrow": ("ok", "2026-10-16"),
+            "2026-10-26": ("date_not_business_day", "2026-10-27"),
+        }
+        for phrase, (verdict, resolved) in cases.items():
+            with self.subTest(phrase=phrase):
+                result = self.run_offer(0, [CARD], "2026-10-14T11:00", phrase, 95)
+                self.assertEqual(verdict, result["offer_verdict"])
+                if verdict == "ok":
+                    self.assertEqual(resolved, json.loads(result["offers_accepted"])["1"]["date"])
+                else:
+                    self.assertEqual(resolved, result["offer_suggested_date"])
+
+        ambiguous = self.run_offer(0, [CARD], "2026-10-14T11:00", "next Friday", 95)
+        self.assertEqual("date_ambiguous", ambiguous["offer_verdict"])
+        self.assertEqual("Do you mean Friday 16 October?", ambiguous["offer_message"])
+        self.assertEqual({}, json.loads(ambiguous["offers_accepted"]))
+        self.assertVerdict(
+            self.run_offer(0, [CARD], "2026-10-14T11:00", "next week", 95), "missing"
+        )
+
+    def test_amount_kinds_use_spec_derived_limits(self):
+        cases = ((CARD, "full", 95.0), (CARD, "minimum", 28.5), (LOAN, "minimum", 150.0))
+        for product, kind, expected in cases:
+            with self.subTest(product=product["type"], kind=kind):
+                result = self.run_offer(
+                    0, [product], "2026-10-14T11:00", "tomorrow", "",
+                    state={"offer_amount_kind": kind},
+                )
+                self.assertEqual(expected, json.loads(result["offers_accepted"])["1"]["amount"])
+
     def test_ready_needs_every_product_handled_not_an_extracted_count(self):
         now = "2026-10-14T11:00"
         # The extractor said 1, but the customer has two products: not ready after one.
@@ -314,9 +378,13 @@ class OfferCheckTests(unittest.TestCase):
         rendered = json.dumps(first)
         self.assertIn('"variable": "offer_date", "operator": "is_set"', rendered)
         self.assertIn('"variable": "offer_amount", "operator": "not_equals", "operand": ""', rendered)
+        self.assertIn('"variable": "offer_amount_kind", "operator": "equals", "operand": "full"', rendered)
         types = {item["name"]: item["type"] for item in nodes["negotiate"]["extraction_schema"]}
-        self.assertEqual("date", types["offer_date"])
+        self.assertEqual("string", types["offer_date"])
         self.assertEqual("float", types["offer_amount"])
+        self.assertEqual("string", types["offer_amount_kind"])
+        date_field = next(item for item in nodes["negotiate"]["extraction_schema"] if item["name"] == "offer_date")
+        self.assertNotIn("{{today_text}}", date_field["description"])
         self.assertIn("{{products_facts}}", nodes["negotiate"]["task_message"])
         self.assertIn("{{offer_message}}", nodes["negotiate"]["task_message"])
         self.assertIn("{{offers_summary}}", nodes["confirm_record"]["task_message"])
@@ -381,7 +449,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 terminals = [key for key, node in nodes.items() if node["node_type"] == "end_call"]
                 self.assertEqual(["end_call"], terminals)
                 incoming_end = [source for source, targets in successors.items() if "end_call" in targets]
-                self.assertEqual(["close_record"], incoming_end)
+                self.assertEqual(["closing_say", "close_record"], incoming_end)
                 for node in [*nodes.values(), *workflow["global_nodes"].values()]:
                     if node["node_type"] in {"api_request", "code"} or node.get("passthrough"):
                         self.assertEqual("always", node["transitions"][-1]["condition"]["operator"])
@@ -403,7 +471,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
                             pending.append(target)
                 self.assertNotIn("end_call", reached)
                 self.assertEqual(["closing_say"], edges(nodes["closing"]))
-                self.assertEqual(["close_attempt"], edges(nodes["closing_say"]))
+                self.assertEqual(["end_call", "close_attempt"], edges(nodes["closing_say"]))
                 self.assertEqual(["close_record"], edges(nodes["close_attempt"]))
                 # Tagging steps (states no variable identifies) only write their state.
                 for key, targets in successors.items():
@@ -614,6 +682,8 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertIn("post_process_code", tool)
         self.assertEqual([{"path": "data.ok", "variable": "close_call_ok"}], record["response_mapping"])
         self.assertEqual(["end_call", "close_attempt"], edges(record))
+        self.assertEqual(["end_call", "close_attempt"], edges(nodes["closing_say"]))
+        self.assertTrue(engine_holds(nodes["closing_say"]["transitions"][0]["condition"], {"close_call_ok": "true"}))
         success_or_given_up = json.dumps(record["transitions"][0])
         self.assertIn('"variable": "close_call_ok"', success_or_given_up)
         self.assertIn('"variable": "close_attempts", "operator": "greater_than", "operand": 1', success_or_given_up)
@@ -626,6 +696,21 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertEqual(0, tool["config"]["maxRetries"])
         for key, node in nodes.items():
             self.assertNotIn("close_call", tool_names(node), key)
+
+    def test_negotiation_prompt_and_extraction_enforce_honesty_and_refusal_meaning(self):
+        workflow = self.render()
+        task = workflow["nodes"]["negotiate"]["task_message"]
+        self.assertIn("say the last offer check message", task)
+        self.assertIn("never say a payment or promise was recorded", task)
+        self.assertIn("Never read an internal id", task)
+        self.assertIn("cannot pay on one date", task)
+        self.assertIn("create_promise returned ok true", workflow["system_prompt"])
+        intent = next(
+            item for item in workflow["nodes"]["negotiate"]["extraction_schema"]
+            if item["name"] == load_spec(FIXTURES[0]).negotiation.data["intent_variable"]
+        )
+        self.assertIn("refuses any payment or arrangement after being asked for alternatives", intent["description"])
+        self.assertIn("Not today, not now", intent["description"])
 
     def test_opening_addresses_customer_with_spec_call_variables(self):
         for index in range(len(FIXTURES)):
@@ -700,10 +785,20 @@ class MultiStepWorkflowTests(unittest.TestCase):
             {"product_id": "id-a"}, {"product_id": "id-b"},
             {"product_id": "id-c"}, {"product_id": "id-d"},
         ]
+        account_flattened = {
+            f"account_response.data.products.{index}.product_id": product["product_id"]
+            for index, product in enumerate(products)
+        }
+        tool_flattened = {
+            key.replace("account_response", "get_account_response"): value
+            for key, value in account_flattened.items()
+        }
         sources = (
             {"late_products": products},
             {"late_products": json.dumps(products)},
             {"get_account_response.data.products": products},
+            account_flattened,
+            tool_flattened,
         )
         for source in sources:
             config = {"body": {"selected_product_number": 4}}
@@ -755,6 +850,14 @@ class MultiStepWorkflowTests(unittest.TestCase):
         variables["promise_result_ok"] = False
         exec(code, {"vars": variables})
         self.assertEqual("exhausted", variables["promise_progress_state"])
+
+        variables = {
+            "offers_accepted_count": 1,
+            "create_promise_args": json.dumps({"selected_product_number": 1}),
+            "create_promise_response.data.ok": "true",
+        }
+        exec(code, {"vars": variables})
+        self.assertEqual("complete", variables["promise_progress_state"])
 
     def test_opening_unclear_counter_close_and_stay_routes(self):
         nodes = self.render()["nodes"]
@@ -1056,6 +1159,16 @@ class MultiStepWorkflowTests(unittest.TestCase):
         exec(code_of(nodes["special_product_dispute_done"]), {"vars": variables})
         self.assertEqual([2], json.loads(variables["offers_noted"]))
         self.assertEqual("ready", variables["offer_progress"])
+        for prefix in ("account_response", "get_account_response"):
+            flattened = {
+                "offers_accepted": accepted, "offers_noted": "[]",
+                "special_result_product_dispute": "True", "add_note_args.selected_product_number": 2,
+            }
+            for index, product in enumerate((CARD, LOAN)):
+                for field, value in product.items():
+                    flattened[f"{prefix}.data.products.{index}.{field}"] = value
+            exec(code_of(nodes["special_product_dispute_done"]), {"vars": flattened})
+            self.assertEqual("ready", flattened["offer_progress"])
         # A failed note does not count; nothing accepted yet is never ready.
         variables = {"late_products": products, "offers_accepted": "{}", "offers_noted": "[]",
                      "special_result_product_dispute": "False", "add_note_args.selected_product_number": 2}

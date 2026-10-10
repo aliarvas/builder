@@ -30,6 +30,42 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-034: Relative “next week” dates could resolve to the current week
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-005e code review, offline date table
+- **Run:** `reviews/T-005e-review.md`; local generated-code execution
+- **Symptom:** A weekday combined with “next week” could resolve to the upcoming weekday in the current week and be accepted silently. Several common phrases were left unresolved, and ambiguous `next <weekday>` phrases were accepted without confirmation.
+- **Root cause:** The deterministic parser handled `next <weekday>` and `week after next`, but had no separate `next week` branch or ambiguity state.
+- **Category:** date-logic
+- **Fix / lesson:** Resolve `next week` from next Monday, return missing when it has no weekday, request confirmation when `next <weekday>` lands in the current week, and support day-after-tomorrow, abbreviated months, and day-only ordinals.
+- **Status:** fixed (T-005e review fix, not committed)
+- **Retest:** Fixed-`now` offline table passes, including both `Friday next week` orders and the exact ambiguity question; full suite 104/104.
+
+### F-033: Flattened product reader assumed the account tool name
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-005e code review of F-028
+- **Run:** `reviews/T-005e-review.md`; local generated-code execution
+- **Symptom:** `get_account_response.data.products.0.*` worked, but the observed `account_response.data.products.0.*` shape returned no products.
+- **Root cause:** The first F-028 fix hardcoded the fixed tool name in the flattened-key prefix, while Freya used the workflow node name for this engine-run result.
+- **Category:** platform
+- **Fix / lesson:** Match any `<name>_response.data.<products_field>.<index>.<field>` prefix. Generate one shared reader for offer code, product-number hooks and product special-path progress; retain mapped-list and JSON fallbacks.
+- **Status:** fixed (T-005e review fix, not committed)
+- **Retest:** Both observed node-name and tool-name prefixes pass for one, two and three products, product-id hooks and special-path progress; full suite 104/104.
+
+### F-032: T-005e closing guard made graph assertions and prompt documentation stale
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-005e full offline suite
+- **Run:** local `python3 -m unittest discover -s tests -v`; no Freya request
+- **Symptom:** The first full run had seven failures: six graph assertions still required every path to enter `close_record`, and the generated prompt document did not yet contain the new honesty wording.
+- **Root cause:** F-031 deliberately adds a guarded `closing_say → end_call` edge when `close_call_ok` is already true. The old assertions described the pre-guard graph, and the prompt mirror had not yet been regenerated after source prompt edits.
+- **Category:** other
+- **Fix / lesson:** Update graph assertions to allow only the guarded already-recorded edge, regenerate `docs/PROMPTS.md` immediately after prompt edits, then rerun the complete suite.
+- **Status:** fixed (T-005e, not committed)
+- **Retest:** Full offline suite passes, 104/104.
+
 ### F-031: Closing chain runs again when the conversation resumes after the call ended
 
 - **Date:** 2026-10-10
@@ -39,8 +75,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** In chat, `end_call` is "deferred" and a later message resumes the conversation at the last speaking step. The closing chain does not check whether the close was already recorded. In a real call the line is gone after `end_call`, so this is mostly a chat-route effect, but a judge or simulation could still send a last line.
 - **Category:** tool-call
 - **Fix / lesson:** The closing chain must skip `close_call` when a close was already recorded (`close_call_ok` true), as the hang-up hook already does, and go straight to `end_call`. The test driver must stop sending after the agent ends the call.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-005e, not committed); Freya chat retest pending
+- **Retest:** Offline graph and condition tests prove `close_call_ok` true routes from `closing_say` directly to `end_call`; full suite 104/104.
 
 ### F-030: Agent said the payment was recorded when nothing was recorded
 
@@ -51,8 +87,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The `negotiate` prompt does not forbid claiming a recording, and the check's message ("ask which product") was not voiced. The model filled the gap with a success sentence.
 - **Category:** honesty
 - **Fix / lesson:** Generic rule in every step without the promise tool: never say a payment, promise, note or callback was recorded; only the step that ran the tool and got `ok` true may say so. `negotiate` must voice the check result (`offer_message`) when the verdict is not `ok`.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-005e, not committed); Freya chat retest pending
+- **Retest:** Offline prompt tests require the global success-evidence rule, require `negotiate` to voice `offer_message` for a non-ok verdict, and forbid a recording claim there; full suite 104/104.
 
 ### F-029: "I can't pay today" was treated as a refusal and the call was closed
 
@@ -63,8 +99,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The `refusal` value has no clear description. "Not today" is a reason to ask for another date, not a refusal to pay.
 - **Category:** extraction
 - **Fix / lesson:** Describe the intent values precisely: `refusal` only when the customer refuses any payment or arrangement after being asked for alternatives. "Not today", "not now" and "I don't know when" are not refusals. Consider requiring at least one counter-question before a refusal can close.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-005e, not committed); Freya chat retest pending
+- **Retest:** Offline extraction-schema tests require close values to mean refusal of any arrangement only after alternatives, and explicitly keep date-specific inability or uncertainty in negotiation; full suite 104/104.
 
 ### F-028: Offer setup did not find the products (flattened account variables)
 
@@ -75,8 +111,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** Answered TO-CONFIRM: the engine stores the account result in code `vars` as flattened keys (`account_response.data.products.0.product_id`, `.past_due`, ...), not as a list. The setup code looked for a list or JSON string.
 - **Category:** tool-call
 - **Fix / lesson:** Rebuild the product list from the flattened `<node>_response.data.<list>.<i>.<field>` keys (keep the list and JSON-string forms as fallbacks). Check every other code step that reads a tool result the same way (product-number hook, promise progress). With one product, the product choice must default to it.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-005e, not committed); Freya chat retest pending
+- **Retest:** Flattened observed-style variables for one, two and three products produce facts and the correct selected internal id. The product-number hook and product-note progress use the same shape; full suite 104/104.
 
 ### F-027: Spoken amount words ("the full amount") not turned into a number
 
@@ -87,8 +123,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The extractor only takes numbers. "The full amount", "the minimum", "half" refer to account values the extractor does not see.
 - **Category:** extraction
 - **Fix / lesson:** Add an amount-kind value (full, minimum, other) to the extraction, and let the offer code turn it into the number from the account facts. Or give the extractor the per-product amounts in its prompt.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-005e, not committed); Freya chat retest pending
+- **Retest:** Offline cases map full amount and the spec-derived minimum/instalment amount to the correct number for different product fixtures; full suite 104/104.
 
 ### F-026: "Today" extracted as the real date instead of the call's date
 
@@ -99,8 +135,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The extractor resolves relative dates with the engine's real clock (`{{date.today}}`, `system.*`), not with the call variable `now`. The kit warns that the system dates are the real clock.
 - **Category:** date-logic
 - **Fix / lesson:** Give the extractor the call's date (the `now` call variable, named in the spec or detected) and the computed `today_text` in the extraction description, or extract a relative phrase plus weekday and resolve it in the offer code from `now`. Never trust the engine's date for business logic.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-005e, not committed); Freya chat retest pending
+- **Retest:** With fixed `now`, offline cases cover today, tomorrow, this Friday, next Monday, a weekday in the week after next, weekday plus day number, an explicit date and a holiday; full suite 104/104.
 
 ### F-025: Internal product id read aloud to the customer
 
@@ -111,8 +147,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The model read the raw account result because `products_facts` was empty (F-028). The facts text for the customer should never contain internal ids.
 - **Category:** policy
 - **Fix / lesson:** Fixed by F-028 plus a generic rule: never say internal ids; refer to products by type and the spec's customer-facing label (e.g. last digits).
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed in code (T-005e, not committed); Freya chat retest pending
+- **Retest:** Flattened-product facts exclude the configured internal product-id field for one, two and three products, and the negotiation prompt forbids reading raw results or internal ids; full suite 104/104.
 
 Verified in the same tests: greeting "Hello?" and "Hello? Who is this?" did not consume an unclear attempt and the introduction was said once (T-005d). Identity passed with two tool calls and `get_account` only after `all_verified` (F-009 retest pass). Hang-up close worked (F-012): ending the PUB-01 call mid-negotiation produced exactly one `close_call` with the default row, sent by the end-of-call tool.
 

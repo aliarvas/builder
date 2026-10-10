@@ -16,6 +16,7 @@ from .spec import PhoneAgentSpec
 # Workflow variables owned by the offer steps (framework names, not brief data).
 OFFER_DATE = "offer_date"
 OFFER_AMOUNT = "offer_amount"
+OFFER_AMOUNT_KIND = "offer_amount_kind"
 OFFER_PRODUCT = "offer_product_number"
 OFFER_PROGRESS = "offer_progress"
 OFFERS_ACCEPTED = "offers_accepted"
@@ -42,19 +43,17 @@ def _config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, Any]:
     return {
         "offer": {key: value for key, value in offer.items() if key != "rules"},
         "products_variable": spec.account.data["products_variable"],
-        "products_flat": "get_account_response.data." + spec.account.data["products_field"],
+        "products_field": spec.account.data["products_field"],
         "product_id_field": spec.account.data["product_id_field"],
         "reset": reset_variables,
         "messages": _verdict_messages(),
     }
 
 
-PRELUDE = """import datetime
-import json
-import re
-CONFIG = __CONFIG__
-OFFER = CONFIG['offer']
-WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+def product_reader_code(products_variable: str, products_field: str) -> str:
+    """Return the one product reader used by offer code, hooks, and special paths."""
+    return f"""PRODUCTS_VARIABLE = {products_variable!r}
+PRODUCTS_FIELD = {products_field!r}
 
 
 def as_list(value):
@@ -66,11 +65,56 @@ def as_list(value):
     return value if isinstance(value, list) else []
 
 
+def put_path(target, path, value):
+    current = target
+    for part in path[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = dict()
+            current[part] = child
+        current = child
+    if path:
+        current[path[-1]] = value
+
+
 def load_products():
-    products = as_list(vars.get(CONFIG['products_variable']))
-    if not products:
-        products = as_list(vars.get(CONFIG['products_flat']))
-    return [item for item in products if isinstance(item, dict)]
+    products = as_list(vars.get(PRODUCTS_VARIABLE))
+    if products:
+        return [item for item in products if isinstance(item, dict)]
+    exact = re.compile(r'^[A-Za-z0-9_]+_response\\.data\\.' + re.escape(PRODUCTS_FIELD) + r'$')
+    for key, value in vars.items():
+        if exact.fullmatch(str(key)):
+            products = as_list(value)
+            if products:
+                return [item for item in products if isinstance(item, dict)]
+    flat = re.compile(r'^([A-Za-z0-9_]+_response\\.data\\.' + re.escape(PRODUCTS_FIELD) + r')\\.(\\d+)\\.(.+)$')
+    rebuilt_by_source = dict()
+    for key, value in vars.items():
+        match = flat.fullmatch(str(key))
+        if not match:
+            continue
+        source = match.group(1)
+        index = int(match.group(2))
+        path = match.group(3).split('.')
+        item = rebuilt_by_source.setdefault(source, dict()).setdefault(index, dict())
+        put_path(item, path, value)
+    for rebuilt in rebuilt_by_source.values():
+        products = [rebuilt[index] for index in sorted(rebuilt)]
+        if products:
+            return products
+    return []
+"""
+
+
+PRELUDE = """import datetime
+import json
+import re
+CONFIG = __CONFIG__
+OFFER = CONFIG['offer']
+WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+__PRODUCT_READER__
 
 
 def parse_day(value):
@@ -82,6 +126,109 @@ def parse_day(value):
         return datetime.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     except Exception:
         return None
+
+
+def normalized_date_text(value):
+    text = str(value or '').strip().lower()
+    text = re.sub(r'(?<=\\d)(st|nd|rd|th)\\b', '', text)
+    text = re.sub(r'[^a-z0-9 ]+', ' ', text)
+    return re.sub(r'\\s+', ' ', text).strip()
+
+
+def first_day_number(start, wanted):
+    for month_offset in range(13):
+        year = start.year + (start.month - 1 + month_offset) // 12
+        month = (start.month - 1 + month_offset) % 12 + 1
+        try:
+            candidate = datetime.date(year, month, wanted)
+        except Exception:
+            continue
+        if candidate >= start:
+            return candidate
+    return None
+
+
+def resolve_offer_day(value):
+    direct = parse_day(value)
+    if direct is not None:
+        return direct
+    text = normalized_date_text(value)
+    if not text:
+        return None
+    start = today()
+    if text == 'today':
+        return start
+    if text == 'tomorrow':
+        return start + datetime.timedelta(days=1)
+    if text in ('day after tomorrow', 'the day after tomorrow'):
+        return start + datetime.timedelta(days=2)
+    weekday_names = [name.lower() for name in WEEKDAYS]
+    weekday = next((index for index, name in enumerate(weekday_names) if re.search(r'\\b' + name + r'\\b', text)), None)
+    if weekday is not None and 'week after next' in text:
+        next_monday = start + datetime.timedelta(days=(7 - start.weekday()))
+        return next_monday + datetime.timedelta(days=7 + weekday)
+    if 'next week' in text and 'week after next' not in text:
+        if weekday is None:
+            return None
+        next_monday = start + datetime.timedelta(days=(7 - start.weekday()))
+        return next_monday + datetime.timedelta(days=weekday)
+    if weekday is not None:
+        numbered = re.search(r'\\b(\\d{1,2})\\b', text)
+        if numbered:
+            wanted = int(numbered.group(1))
+            for month_offset in range(13):
+                year = start.year + (start.month - 1 + month_offset) // 12
+                month = (start.month - 1 + month_offset) % 12 + 1
+                try:
+                    candidate = datetime.date(year, month, wanted)
+                except Exception:
+                    continue
+                if candidate >= start and candidate.weekday() == weekday:
+                    return candidate
+        delta = (weekday - start.weekday()) % 7
+        if 'next ' + weekday_names[weekday] in text:
+            delta = delta or 7
+        elif 'this ' + weekday_names[weekday] in text:
+            delta = delta if delta else 0
+        else:
+            delta = delta or 7
+        return start + datetime.timedelta(days=delta)
+    month_aliases = dict()
+    for index, name in enumerate(MONTHS):
+        month_aliases[name.lower()] = index + 1
+        month_aliases[name[:3].lower()] = index + 1
+    month = next((number for name, number in month_aliases.items() if re.search(r'\\b' + name + r'\\b', text)), None)
+    numbered = re.search(r'\\b(\\d{1,2})\\b', text)
+    if month is not None and numbered:
+        year_match = re.search(r'\\b(\\d{4})\\b', text)
+        year = int(year_match.group(1)) if year_match else start.year
+        try:
+            candidate = datetime.date(year, month, int(numbered.group(1)))
+            if not year_match and candidate < start:
+                candidate = datetime.date(year + 1, month, int(numbered.group(1)))
+            return candidate
+        except Exception:
+            return None
+    only_day = re.fullmatch(r'(?:(?:on )?(?:the )?)?(\\d{1,2})', text)
+    if only_day:
+        wanted = int(only_day.group(1))
+        if 1 <= wanted <= 31:
+            return first_day_number(start, wanted)
+    return None
+
+
+def ambiguous_next_weekday(value, day):
+    if day is None:
+        return False
+    text = normalized_date_text(value)
+    if 'next week' in text or 'week after next' in text:
+        return False
+    weekday_names = [name.lower() for name in WEEKDAYS]
+    weekday = next((index for index, name in enumerate(weekday_names) if re.search(r'\\bnext ' + name + r'\\b', text)), None)
+    if weekday is None:
+        return False
+    start = today()
+    return day <= start + datetime.timedelta(days=(6 - start.weekday()))
 
 
 def parse_amount(value):
@@ -202,6 +349,10 @@ def say_day(day):
     return WEEKDAYS[day.weekday()] + ' ' + day.isoformat() if day else 'none'
 
 
+def say_confirmation_day(day):
+    return WEEKDAYS[day.weekday()] + ' ' + str(day.day) + ' ' + MONTHS[day.month - 1] if day else 'none'
+
+
 def say_amount(amount):
     return ('%.2f' % amount) if amount is not None else 'none'
 
@@ -280,6 +431,7 @@ vars['offer_message'] = 'No offer has been checked yet.'
 vars['offer_verdict'] = 'none'
 vars['offer_rejections'] = 0
 vars['offer_last_signature'] = ''
+vars[CONFIG['amount_kind_var']] = ''
 vars[CONFIG['progress']] = 'none'
 """
 
@@ -296,16 +448,27 @@ try:
         number = int(str(raw_number).strip())
     except Exception:
         number = 1 if len(products) == 1 else None
-    day = parse_day(vars.get(CONFIG['date_var']))
+    raw_day = vars.get(CONFIG['date_var'])
+    day = resolve_offer_day(raw_day)
     amount = parse_amount(vars.get(CONFIG['amount_var']))
     if number is None or not (1 <= number <= len(products)):
         verdict = 'product_unknown'
-    elif day is None or amount is None or amount <= 0:
+    elif day is None:
         verdict = 'missing'
+    elif ambiguous_next_weekday(raw_day, day):
+        verdict = 'date_ambiguous'
+        suggest_day = day
     else:
         product = products[number - 1]
         earliest, latest, low, high = limits(product)
-        if day < earliest:
+        amount_kind = str(vars.get(CONFIG['amount_kind_var']) or '').strip().lower()
+        if amount is None and amount_kind == 'full':
+            amount = high
+        elif amount is None and amount_kind == 'minimum':
+            amount = low
+        if amount is None or amount <= 0:
+            verdict = 'missing'
+        elif day < earliest:
             # Before the counted earliest date: too early. On or after it, the date was only
             # moved because it is not a business day (for example today is a holiday).
             verdict = 'date_not_business_day' if day >= earliest_counted() else 'date_too_early'
@@ -335,8 +498,8 @@ try:
             vars['offers_summary'] = summary(accepted)
             # Ready when every returned product has an accepted offer or a note.
             progress = 'ready' if len(handled_numbers(accepted)) >= len(products) else 'more'
-    signature = str(number) + '|' + str(vars.get(CONFIG['date_var'])) + '|' + str(vars.get(CONFIG['amount_var']))
-    if verdict not in ('ok', 'missing', 'product_unknown'):
+    signature = str(number) + '|' + str(vars.get(CONFIG['date_var'])) + '|' + str(vars.get(CONFIG['amount_var'])) + '|' + str(vars.get(CONFIG['amount_kind_var']))
+    if verdict not in ('ok', 'missing', 'product_unknown', 'date_ambiguous'):
         try:
             rejections = int(vars.get('offer_rejections') or 0)
         except Exception:
@@ -351,7 +514,8 @@ except Exception:
     verdict = 'missing'
     progress = 'rejected'
 message = CONFIG['messages'].get(verdict, CONFIG['messages'].get('missing', ''))
-message = message.replace('[date]', say_day(suggest_day)).replace('[amount]', say_amount(suggest_amount))
+shown_day = say_confirmation_day(suggest_day) if verdict == 'date_ambiguous' else say_day(suggest_day)
+message = message.replace('[date]', shown_day).replace('[amount]', say_amount(suggest_amount))
 message = message.replace('[product]', str(number) if number is not None else 'unknown')
 if progress == 'more':
     message = message + ' ' + CONFIG['messages'].get('more', '')
@@ -362,6 +526,7 @@ vars['offer_suggested_amount'] = suggest_amount if suggest_amount is not None el
 vars[CONFIG['progress']] = progress
 vars[CONFIG['date_var']] = ''
 vars[CONFIG['amount_var']] = ''
+vars[CONFIG['amount_kind_var']] = ''
 for name in CONFIG['reset']:
     vars[name] = ''
 """
@@ -422,7 +587,7 @@ def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, 
     config.update({
         "accepted": OFFERS_ACCEPTED, "accepted_count": OFFERS_ACCEPTED_COUNT, "noted": OFFERS_NOTED,
         "progress": OFFER_PROGRESS, "product_var": OFFER_PRODUCT, "date_var": OFFER_DATE,
-        "amount_var": OFFER_AMOUNT,
+        "amount_var": OFFER_AMOUNT, "amount_kind_var": OFFER_AMOUNT_KIND,
         "number_field": spec.confirmation.data["product_number_field"],
         "id_field": spec.confirmation.data["promise_product_id_field"],
         "date_field": spec.confirmation.data["promise_date_field"],
@@ -432,7 +597,14 @@ def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, 
 
 
 def _code(spec: PhoneAgentSpec, body: str, reset_variables: list[str]) -> str:
-    return PRELUDE.replace("__CONFIG__", _py_literal(_full_config(spec, reset_variables))) + body
+    reader = product_reader_code(
+        spec.account.data["products_variable"], spec.account.data["products_field"]
+    )
+    return (
+        PRELUDE.replace("__CONFIG__", _py_literal(_full_config(spec, reset_variables)))
+        .replace("__PRODUCT_READER__", reader)
+        + body
+    )
 
 
 def offer_setup_code(spec: PhoneAgentSpec) -> str:
@@ -454,7 +626,14 @@ def special_noted_code(spec: PhoneAgentSpec, result_variable: str, tool_name: st
         "number_arg": tool_name + "_args." + number_field if has_number else "",
         "args_var": tool_name + "_args",
     })
-    return PRELUDE.replace("__CONFIG__", _py_literal(config)) + NOTED_BODY
+    reader = product_reader_code(
+        spec.account.data["products_variable"], spec.account.data["products_field"]
+    )
+    return (
+        PRELUDE.replace("__CONFIG__", _py_literal(config))
+        .replace("__PRODUCT_READER__", reader)
+        + NOTED_BODY
+    )
 
 
 def promise_values_hook(spec: PhoneAgentSpec) -> str:

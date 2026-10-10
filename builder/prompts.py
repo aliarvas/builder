@@ -125,6 +125,8 @@ MULTI_STEP_SYSTEM_PROMPT_TEMPLATE = PromptDefinition(
     text=(
         "You are {agent_name}. Speak {language}. Keep every turn concise and truthful. "
         "Call at most one tool per message. Never claim an action succeeded unless its tool result says so.\n"
+        "Never say a payment or promise was recorded unless create_promise returned ok true. "
+        "Never say a note or callback was recorded unless its tool returned ok true.\n"
         "If you have not yet given this introduction in this call, give it first in your next message, "
         "whatever the customer said: {introduction}\n"
         "Global rules:\n{rules}"
@@ -183,10 +185,15 @@ NEGOTIATION_TASK_TEMPLATE = PromptDefinition(
     "builder/workflow.py — negotiate",
     "Today is {{today_text}}. Account facts, computed by the bank system:\n{{products_facts}}\n"
     "Use only these dates and amounts; never compute a deadline or a minimum yourself. "
-    "Refer to a product by its number when there are several.\n"
-    "Last offer check: {{offer_message}}\nOffers accepted so far: {{offers_summary}}\n"
+    "Never read an internal id or the raw account result aloud; use the product type, customer-facing label, "
+    "and list number. Refer to a product by its number when there are several.\n"
+    "Last offer verdict: {{offer_verdict}}. Last offer check: {{offer_message}}\n"
+    "Offers accepted so far: {{offers_summary}}\n"
+    "If the last offer verdict is not ok, say the last offer check message before asking anything else. "
+    "A checked or accepted offer is not recorded: never say a payment or promise was recorded here.\n"
     "Get a concrete date and amount from the customer. When the last offer check names a date or "
-    "an amount, offer exactly that.\nRules:\n{rules}",
+    "an amount, offer exactly that. If they cannot pay on one date, ask for another date; that alone is not "
+    "a refusal.\nRules:\n{rules}",
     ("{rules}",),
 )
 OFFER_VERDICT_MESSAGES = PromptDefinition(
@@ -199,6 +206,7 @@ OFFER_VERDICT_MESSAGES = PromptDefinition(
     "date_too_early: That date is before the earliest allowed date. Offer [date] instead.\n"
     "date_too_late: That date is after the latest date that can be recorded for this product. Offer [date], the latest possible date.\n"
     "date_not_business_day: That date is not a business day. Offer [date], the next possible business day.\n"
+    "date_ambiguous: Do you mean [date]?\n"
     "amount_too_low: That amount is below the minimum for this product. Offer [amount] instead.\n"
     "amount_too_high: That amount is more than the amount due. Offer [amount].",
 )
@@ -218,9 +226,10 @@ SPECIAL_PATH_TASK_TEMPLATE = PromptDefinition(
     "SPECIAL_PATH_TASK_TEMPLATE",
     "Handles a spec-defined special path whose tool needs a value only the conversation can give.",
     "phone agent", "builder/workflow.py — global special_<id> (model-filled tool only)",
-    "The customer said: {when}\nSay exactly: {say}\n"
-    "Then call the available tool once. Fill only the fields it asks for, from this call. "
-    "Do not say anything was recorded unless the tool result says so.",
+    "The customer said: {when}\nCall the available tool once before claiming any action. "
+    "Fill only the fields it asks for, from this call. "
+    "Only if the tool result says ok true, say exactly: {say}\n"
+    "If it did not return ok true, do not say anything was recorded or completed.",
     ("{when}", "{say}"),
 )
 SPECIAL_ASK_TASK_TEMPLATE = PromptDefinition(
