@@ -15,7 +15,7 @@ from builder.spec import (
     CLOSE_STATE_NAMES, HANGUP_CLOSE_STATES, OFFER_ADJUST, OFFER_UNITS, OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
 )
 from builder.tools_from_openapi import CALL_VARIABLES, tools_from_openapi
-from builder.workflow import build_spec_workflow, close_table, workflow_prompt_estimates
+from builder.workflow import build_spec_workflow, close_table, source_steps, workflow_prompt_estimates
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +61,46 @@ def graph(workflow):
 
 def tool_names(node):
     return [tool["function"]["name"] for tool in node.get("tools", [])]
+
+
+def engine_holds(condition, variables):
+    """Test-side reading of a transition condition (written independently of the builder)."""
+    operator = condition.get("operator")
+    if operator == "always":
+        return True
+    if "conditions" in condition:
+        results = [engine_holds(item, variables) for item in condition["conditions"]]
+        return all(results) if condition.get("logic") == "and" else any(results)
+    value = variables.get(condition.get("variable"))
+    present = value not in (None, "")
+    if operator == "is_set":
+        return present
+    if operator == "equals":
+        return present and str(value) == str(condition["operand"])
+    if operator == "not_equals":
+        return not (present and str(value) == str(condition["operand"]))
+    if operator in ("greater_than", "less_than") and present:
+        return float(value) > condition["operand"] if operator == "greater_than" else float(value) < condition["operand"]
+    return False
+
+
+def walk(workflow, key, variables, limit=20):
+    """Follow deterministic routing from ``key``: run code steps, take the first matching
+    transition, stop at ``closing`` or where a step waits (no match)."""
+    every = {**workflow["nodes"], **workflow["global_nodes"]}
+    for _ in range(limit):
+        if key == "closing":
+            return key
+        node = every[key]
+        if node["node_type"] == "code":
+            exec(code_of(node), {"vars": variables})
+        for transition in node.get("transitions", []):
+            if not transition.get("is_tool_call") and engine_holds(transition["condition"], variables):
+                key = transition["target_node"]
+                break
+        else:
+            return key
+    raise AssertionError("routing loop")
 
 
 class SpecTests(unittest.TestCase):
@@ -268,7 +308,7 @@ class OfferCheckTests(unittest.TestCase):
         nodes = build_spec_workflow(load_spec(FIXTURES[0]), kit_tools())["nodes"]
         self.assertEqual("offer_setup", nodes["account"]["passthrough_default_transition"])
         self.assertEqual(["negotiate"], edges(nodes["offer_setup"]))
-        self.assertEqual(["confirm_record", "close_offer_limit", "negotiate"], edges(nodes["check_offer"]))
+        self.assertEqual(["confirm_record", "closing", "negotiate"], edges(nodes["check_offer"]))
         first = nodes["negotiate"]["transitions"][0]
         self.assertEqual("check_offer", first["target_node"])
         rendered = json.dumps(first)
@@ -365,10 +405,9 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 self.assertEqual(["closing_say"], edges(nodes["closing"]))
                 self.assertEqual(["close_attempt"], edges(nodes["closing_say"]))
                 self.assertEqual(["close_record"], edges(nodes["close_attempt"]))
-                # Every node that leads into the close path is a state marker.
+                # Tagging steps (states no variable identifies) only write their state.
                 for key, targets in successors.items():
-                    if "closing" in targets:
-                        self.assertTrue(key.startswith("close_"), key)
+                    if "closing" in targets and key.startswith("close_"):
                         self.assertEqual("code", nodes[key]["node_type"])
                         self.assertIn("vars['close_state'] = ", code_of(nodes[key]))
 
@@ -385,37 +424,127 @@ class MultiStepWorkflowTests(unittest.TestCase):
                         key,
                     )
 
-    def test_closing_code_computes_outcome_for_each_call_end_state(self):
+    def terminal_scenarios(self, index):
+        """(expected state, [(start step, variables to add before walking)]) for every
+        call-end path, built from the spec only. Verified-stage scenarios carry leftovers of
+        earlier stages (who answered, identity attempts at 0) that must not win."""
+        spec = load_spec(FIXTURES[index])
+        opening, third = spec.opening.data, spec.third_party.data
+        negotiation, confirmation = spec.negotiation.data, spec.confirmation.data
+        who = opening["who_answered_variable"]
+        verified = {who: opening["identity_values"][0], "identity_verified": "true", "identity_attempts_left": 0}
+        caller = {who: opening["third_party_values"][0]}
+        scenarios = [
+            *((f"opening:{value}", [("opening", {who: value})]) for value in opening["close_values"]),
+            ("opening_unclear", [("opening", {
+                who: opening["stay_values"][0], opening["unclear_count_variable"]: opening["max_unclear_asks"] - 1,
+            })]),
+            ("opening_unclear", [("opening_reask", {
+                who: opening["stay_values"][0], opening["unclear_count_variable"]: opening["max_unclear_asks"] - 1,
+            })]),
+            ("callback_scheduled", [("third_party", {**caller, "callback_ok": "True"})]),
+            ("callback_failed", [("third_party", {**caller, "schedule_callback_response.data.ok": "false"})]),
+            ("callback_failed", [("third_party", {**caller, "schedule_callback_failure_count": 1})]),
+            *((f"third_party:{value}", [("third_party", {**caller, third["intent_variable"]: value})])
+              for value in third["close_values"]),
+            ("identity_failed", [("identity", {who: opening["identity_values"][0],
+                                               "identity_verified": "false", "identity_attempts_left": 0})]),
+            ("account_failed", [("account", {**verified, "account_failure_count": 1})]),
+            *((f"negotiation:{value}", [("negotiate", {**verified, negotiation["intent_variable"]: value,
+                                                        "offers_accepted_count": 0})])
+              for value in negotiation["close_values"]),
+            ("promise_recorded", [("confirmation_progress", {**verified, "promise_result_ok": "true",
+                                                             "offers_accepted_count": 1})]),
+            ("promise_failed", [("confirmation_progress", {
+                **verified, "promise_result_ok": "false", "offers_accepted_count": 1,
+                "create_promise_args." + confirmation["product_number_field"]: 1,
+                "promise_attempts_1": confirmation["max_attempts_per_product"] - 1,
+            })]),
+            ("turn_limit", [(self.render(index)["nodes"]["negotiate"]["max_turn_transition"], dict(verified))]),
+        ]
+        # Too many rejected offers: distinct invalid offers until check_offer gives up.
+        products = {spec.account.data["products_variable"]: json.dumps([CARD]), "now": "2026-10-14T11:00"}
+        offers = [("check_offer", {"offer_date": "2000-01-01", "offer_amount": amount}) for amount in range(1, 10)]
+        scenarios.append(("offer_limit", [("offer_setup", {**verified, **products}), *offers]))
+        for path in spec.special_paths:
+            if path.then != "close":
+                continue
+            key = "special_" + path.id
+            result = "special_result_" + path.id
+            start = [(key, {result + "_choice": "proceed"})] if path.ask else [(key, {})]
+            if path.tool:
+                scenarios.append(("special:" + path.id, [(start[0][0], {**verified, **start[0][1], result: "True"})]))
+                scenarios.append(("special_tool_failed", [(start[0][0], {**verified, **start[0][1], result: "false"})]))
+            else:
+                scenarios.append(("special:" + path.id, [(start[0][0], {**verified, **start[0][1]})]))
+        return spec, scenarios
+
+    def run_scenario(self, workflow, steps):
+        """Start at the first step; later entries add what the customer says where the
+        call is waiting."""
+        variables, key = {}, steps[0][0]
+        for _, added in steps:
+            variables.update(added)
+            key = walk(workflow, key, variables)
+            if key == "closing":
+                break
+        return key, variables
+
+    def test_every_call_end_path_derives_its_state_and_outcome(self):
         for index in range(len(FIXTURES)):
-            spec = load_spec(FIXTURES[index])
-            nodes = self.render(index)["nodes"]
-            code = code_of(nodes["closing"])
+            spec, scenarios = self.terminal_scenarios(index)
+            workflow = self.render(index)
+            code = code_of(workflow["nodes"]["closing"])
             compile(code, "<closing>", "exec")
             self.assertNotIn("{{", code)
             self.assertNotIn("}}", code)
-            markers = {
-                code_of(node).split("= ", 1)[1].strip(): key
-                for key, node in nodes.items()
-                if key.startswith("close_") and node["node_type"] == "code" and key != "close_attempt"
-            }
             states = set(required_close_states(spec)) - {"default"}
             states |= set(OPTIONAL_CLOSE_STATES) - set(HANGUP_CLOSE_STATES)
+            states -= {"special_tool_failed"} if not any(p.tool and p.then == "close" for p in spec.special_paths) else set()
             states |= {"special:" + path.id for path in spec.special_paths if path.then == "close"}
-            self.assertEqual(states, {json.loads(value) for value in markers})
+            self.assertEqual(states, {state for state, _ in scenarios})
             table = {row[0]: row for row in close_table(spec)}
-            for state in states:
-                variables = {}
-                exec(code_of(nodes[markers[json.dumps(state)]]), {"vars": variables})
-                exec(code, {"vars": variables})
-                expected = table.get(state, table["default"])
-                with self.subTest(fixture=FIXTURES[index].name, state=state):
+            for state, steps in scenarios:
+                with self.subTest(fixture=FIXTURES[index].name, state=state, start=steps[0][0]):
+                    key, variables = self.run_scenario(workflow, steps)
+                    self.assertEqual("closing", key)
+                    before = dict(variables)
+                    exec(code, {"vars": variables})
+                    expected = table.get(state, table["default"])
+                    self.assertEqual(expected[0], variables["close_resolved_state"])
                     self.assertEqual(expected[1], variables["close_outcome"])
                     self.assertEqual(expected[2], variables.get("close_reason", ""))
                     self.assertTrue(variables["closing_sentence"])
-            for bad in ({}, {"close_state": None, "promise_recorded_count": "x"}, {"close_state": "nope"}):
+                    # The end-of-call close derives the same row from the same variables.
+                    if not before.get("promise_recorded_count"):
+                        config = self.run_hangup(before, index)
+                        self.assertEqual(expected[1], config["body"]["outcome"])
+            for bad in ({}, {"close_state": None, "promise_recorded_count": "x"}, {"close_state": "nope"},
+                        {"identity_attempts_left": "x", "account_failure_count": None}):
                 variables = dict(bad)
                 exec(code, {"vars": variables})
                 self.assertEqual(table["default"][1], variables["close_outcome"])
+
+    def test_close_state_tagging_steps_are_only_for_underivable_states(self):
+        from builder.workflow import TAGGED_CLOSE_STATES
+        for index in range(len(FIXTURES)):
+            nodes = self.render(index)["nodes"]
+            tags = {key for key in nodes if key.startswith("close_") and key not in {"close_attempt", "close_record"}}
+            self.assertTrue(tags <= {"close_" + state for state in TAGGED_CLOSE_STATES}, tags)
+            self.assertIn("close_turn_limit", tags)
+
+    def test_explicit_state_wins_and_stale_variables_do_not(self):
+        workflow = self.render()
+        code = code_of(workflow["nodes"]["closing"])
+        # Verified customer with leftover zero attempts and an earlier refusal that was
+        # followed by an accepted offer: the transfer result decides.
+        variables = {"who_answered": "customer", "identity_verified": "True", "identity_attempts_left": 0,
+                     "negotiation_intent": "refusal", "offers_accepted_count": 1, "special_result_human": "true"}
+        exec(code, {"vars": variables})
+        self.assertEqual("special:human", variables["close_resolved_state"])
+        variables = {"close_state": "promise_failed", "identity_attempts_left": 0, "identity_verified": "false"}
+        exec(code, {"vars": variables})
+        self.assertEqual("promise_failed", variables["close_resolved_state"])
 
     def test_brief_a_closing_states_match_its_outcome_table(self):
         spec = load_spec(FIXTURES[0])
@@ -631,17 +760,67 @@ class MultiStepWorkflowTests(unittest.TestCase):
         nodes = self.render()["nodes"]
         opening = json.dumps(nodes["opening"]["transitions"])
         self.assertIn('"target_node": "opening_unclear"', opening)
-        self.assertIn('"target_node": "close_opening_declined"', opening)
-        self.assertIn("close_opening_unclear", edges(nodes["opening_unclear"]))
+        self.assertIn('"target_node": "closing"', opening)
+        self.assertEqual(["closing", "opening_reask"], edges(nodes["opening_unclear"]))
         code = nodes["opening_unclear"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]["default"]
         variables = {"who_answered": "unclear"}
         exec(code, {"vars": variables})
         self.assertEqual(1, variables["opening_unclear_count"])
         self.assertEqual("", variables["who_answered"])
+        self.assertNotIn("close_state", variables)
         exec(code, {"vars": variables})
         self.assertEqual(2, variables["opening_unclear_count"])
+        self.assertEqual("opening_unclear", variables["close_state"])
         synthetic_transitions = self.render(2)["nodes"]["opening_unclear"]["transitions"]
         self.assertIn('"operand": 2', json.dumps(synthetic_transitions))
+
+    def test_greeting_is_its_own_value_and_never_counts_as_unclear(self):
+        from builder.spec import OPENING_GREETING_VALUE
+        for index in range(len(FIXTURES)):
+            spec = load_spec(FIXTURES[index])
+            opening = spec.opening.data
+            workflow = self.render(index)
+            for key in ("opening", "opening_reask"):
+                node = workflow["nodes"][key]
+                field = node["extraction_schema"][0]
+                with self.subTest(fixture=FIXTURES[index].name, step=key):
+                    self.assertEqual(opening["who_answered_variable"], field["name"])
+                    self.assertEqual([*opening["who_answered_options"], OPENING_GREETING_VALUE], field["enum_values"])
+                    self.assertIn(OPENING_GREETING_VALUE + ":", field["description"])
+                    self.assertNotIn(f'"operand": "{OPENING_GREETING_VALUE}"', json.dumps(node["transitions"]))
+                    variables = {opening["who_answered_variable"]: OPENING_GREETING_VALUE}
+                    self.assertEqual(key, walk(workflow, key, variables))
+                    self.assertNotIn(opening["unclear_count_variable"], variables)
+        value = json.loads(FIXTURES[0].read_text(encoding="utf-8"))
+        value["opening"]["who_answered_options"].append(OPENING_GREETING_VALUE)
+        with self.assertRaisesRegex(SpecError, "must not contain 'greeting'"):
+            parse_spec(value)
+
+    def test_introduction_is_spoken_once_and_disclosure_comes_first(self):
+        for index in range(len(FIXTURES)):
+            spec = load_spec(FIXTURES[index])
+            workflow = self.render(index)
+            nodes = workflow["nodes"]
+            introduction = spec.agent.introduction.text
+            with self.subTest(fixture=FIXTURES[index].name):
+                self.assertTrue(nodes["opening"]["on_enter_first_entry_only"])
+                self.assertIn(introduction, nodes["opening"]["task_message"])
+                # Asking again happens in its own step, which never repeats the introduction
+                # and still speaks on entry (default llm entry, not silent).
+                reask = nodes["opening_reask"]
+                self.assertNotIn(introduction, reask["task_message"])
+                self.assertNotIn("on_enter", reask)
+                self.assertNotIn("on_enter_first_entry_only", reask)
+                self.assertEqual(nodes["opening"]["transitions"], reask["transitions"])
+                self.assertEqual(["closing", "opening_reask"], edges(nodes["opening_unclear"]))
+                into_opening = [
+                    key for key, node in {**nodes, **workflow["global_nodes"]}.items()
+                    if "opening" in edges(node)
+                ]
+                self.assertEqual([], into_opening)
+                # Disclosure first, from any step the call can reach first.
+                self.assertIn("give it first in your next message, whatever the customer said: " + introduction,
+                              workflow["system_prompt"])
 
     def test_model_product_field_is_never_written_as_a_workflow_variable(self):
         workflow = self.render(1)
@@ -672,8 +851,8 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 key = "special_" + path.id
                 per_source = key not in globals_
                 entries = (
-                    {f"{key}_at_{source}": {source} for source in path.available_in}
-                    if per_source else {key: set(path.available_in)}
+                    {f"{key}_at_{source}": {source} for source in source_steps(path)}
+                    if per_source else {key: set(source_steps(path))}
                 )
                 with self.subTest(fixture=FIXTURES[index].name, path=path.id):
                     for entry_key, sources in entries.items():
@@ -699,9 +878,47 @@ class MultiStepWorkflowTests(unittest.TestCase):
                     if path.then == "return":
                         self.assertEqual({"__previous__"}, set(targets))
                     else:
-                        self.assertIn("close_special_" + path.id, targets)
+                        self.assertIn("closing", targets)
                         if path.ask:
                             self.assertIn("__previous__", edges(node))
+
+    def test_special_path_available_in_opening_also_fires_in_opening_reask(self):
+        for index, path_id in ((0, "human"), (0, "already_paid"), (1, "product_dispute")):
+            value = json.loads(FIXTURES[index].read_text(encoding="utf-8"))
+            item = next(entry for entry in value["special_paths"] if entry["id"] == path_id)
+            item["available_in"] = ["opening", *item["available_in"]]
+            spec = parse_spec(value)
+            path = next(entry for entry in spec.special_paths if entry.id == path_id)
+            self.assertEqual(("opening", "opening_reask"), source_steps(path)[:2])
+            workflow = build_spec_workflow(spec, kit_tools())
+            nodes, globals_ = workflow["nodes"], workflow["global_nodes"]
+            key = "special_" + path_id
+            entries = [name for name in globals_ if name == key or name.startswith(key + "_at_")]
+            with self.subTest(path=path_id):
+                fires_in = {
+                    step for name in entries for step in nodes if step not in globals_[name]["excluded_nodes"]
+                }
+                self.assertEqual(set(source_steps(path)), fires_in)
+                if path.then == "return" and key + "_done" in nodes:
+                    self.assertIn(key + "_at_opening_reask", globals_)
+                    self.assertIn("opening_reask", edges(nodes[key + "_done"]))
+        # Without opening in available_in, neither opening step is a source.
+        for path in load_spec(FIXTURES[0]).special_paths:
+            self.assertNotIn("opening_reask", source_steps(path))
+
+    def test_identity_failed_needs_an_explicit_unverified_result(self):
+        workflow = self.render()
+        code = code_of(workflow["nodes"]["closing"])
+        for verified, expected in (("false", "identity_failed"), ("False", "identity_failed"),
+                                   (None, "default"), ("true", "default"), ("True", "default")):
+            variables = {"identity_attempts_left": 0}
+            if verified is not None:
+                variables["identity_verified"] = verified
+            with self.subTest(verified=verified):
+                self.assertEqual(expected == "identity_failed",
+                                 walk(workflow, "identity", dict(variables)) == "closing")
+                exec(code, {"vars": variables})
+                self.assertEqual(expected, variables["close_resolved_state"])
 
     def test_model_tool_special_path_clears_stale_result_and_returns_to_its_source(self):
         workflow = self.render(1)
@@ -912,7 +1129,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
     def test_account_and_closing_have_bounded_retries_and_confirm_can_revise(self):
         nodes = self.render()["nodes"]
         self.assertEqual(1, nodes["account"]["pre_actions"][0]["config"]["maxRetries"])
-        self.assertEqual("close_account_failed", nodes["account"]["transitions"][0]["target_node"])
+        self.assertEqual("closing", nodes["account"]["transitions"][0]["target_node"])
         self.assertEqual("negotiate", nodes["confirm_record"]["transitions"][0]["target_node"])
         for key, node in nodes.items():
             if node["node_type"] == "conversation":

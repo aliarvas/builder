@@ -30,6 +30,18 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-024: Generic step text was passed through a dict whose key equals a spec value
+
+- **Date:** 2026-10-10
+- **Brief / case:** `tests/test_multi_step.py` leakage scan, during T-005d
+- **Run:** local `python3 -m unittest`, no Freya
+- **Symptom:** The leakage scan failed on the word `unclear`: it appeared as a string literal in `builder/workflow.py` and as a who-answered value in a fixture.
+- **Root cause:** The shared opening prompt values (for the first ask and the re-ask) were collected in a dict with string keys. One key, the prompt placeholder name for the "if unclear" instruction, happened to equal a who-answered value in Brief A. It was a placeholder name, not brief data, but the scan cannot tell.
+- **Category:** other
+- **Fix / lesson:** Pass shared prompt values as keyword arguments (`dict(name=...)`), which are not string literals. When a placeholder name is also a likely spec word, keep it out of string literals.
+- **Status:** fixed (T-005d, not committed)
+- **Retest:** leakage scan green; 98 tests pass.
+
 ### F-023: Freya staging returned 503/504 on several chat turns
 
 - **Date:** 2026-10-10

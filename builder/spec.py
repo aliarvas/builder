@@ -224,6 +224,11 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
     _string_list(stages["opening"].data, "close_values", "opening")
     _string_list(stages["opening"].data, "stay_values", "opening")
     _string_list(stages["opening"].data, "forbidden_before_verification", "opening")
+    if OPENING_GREETING_VALUE in stages["opening"].data["who_answered_options"]:
+        raise SpecError(
+            f"opening.who_answered_options must not contain {OPENING_GREETING_VALUE!r}; "
+            "the builder adds it for a bare greeting"
+        )
     _string_list(stages["third_party"].data, "intent_values", "third_party")
     _string_list(stages["third_party"].data, "close_values", "third_party")
     _string_list(stages["negotiation"].data, "intent_values", "negotiation")
@@ -273,6 +278,10 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
 
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Who-answered value the builder adds for a bare greeting or a line check ("Hello?").
+# It routes nowhere: the opening step stays and asks again, and it never counts as unclear.
+OPENING_GREETING_VALUE = "greeting"
 
 # Terminal call states the skeleton can produce. Brief-independent; the spec maps each
 # to an outcome-table row through ``outcomes[].on``.

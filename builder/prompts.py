@@ -125,17 +125,38 @@ MULTI_STEP_SYSTEM_PROMPT_TEMPLATE = PromptDefinition(
     text=(
         "You are {agent_name}. Speak {language}. Keep every turn concise and truthful. "
         "Call at most one tool per message. Never claim an action succeeded unless its tool result says so.\n"
+        "If you have not yet given this introduction in this call, give it first in your next message, "
+        "whatever the customer said: {introduction}\n"
         "Global rules:\n{rules}"
     ),
-    runtime_placeholders=("{agent_name}", "{language}", "{rules}"),
+    runtime_placeholders=("{agent_name}", "{language}", "{introduction}", "{rules}"),
 )
 
 OPENING_TASK_TEMPLATE = PromptDefinition(
     "OPENING_TASK_TEMPLATE", "Opens the call and identifies who answered.", "phone agent",
     "builder/workflow.py — opening",
-    "Say: {introduction}\nThe person to ask for is {address}. Use these words when you address them.\n"
-    "Ask: {question}\nIf unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
+    "Start the call with this, once: {introduction}\nThe person to ask for is {address}. Use these words when you address them.\n"
+    "Ask: {question}\n"
+    "If they only greet you or check the line (for example \"Hello?\"), that is not an answer: reply briefly and ask the question again.\n"
+    "If unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
     ("{introduction}", "{address}", "{question}", "{unclear}", "{forbidden}", "{rules}"),
+)
+OPENING_REASK_TASK_TEMPLATE = PromptDefinition(
+    "OPENING_REASK_TASK_TEMPLATE", "Asks the opening question again after an unclear answer, without a second introduction.",
+    "phone agent", "builder/workflow.py — opening_reask",
+    "You already gave the introduction earlier in this call. Do not repeat it unless they ask who is calling.\n"
+    "The person to ask for is {address}. Use these words when you address them.\n"
+    "Ask again, briefly: {question}\n"
+    "If they only greet you or check the line, reply briefly and ask the question again.\n"
+    "If unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
+    ("{address}", "{question}", "{unclear}", "{forbidden}", "{rules}"),
+)
+WHO_ANSWERED_DESCRIPTION = PromptDefinition(
+    "WHO_ANSWERED_DESCRIPTION", "Extraction description of the who-answered variable in the opening steps.",
+    "extraction model", "builder/workflow.py — opening and opening_reask extraction_schema",
+    "Who answered the call. {greeting}: the person only greets or checks the line "
+    "(for example \"Hello?\" or \"Who is this?\") and has not answered the question yet.",
+    ("{greeting}",),
 )
 THIRD_PARTY_TASK_TEMPLATE = PromptDefinition(
     "THIRD_PARTY_TASK_TEMPLATE", "Handles a person other than the customer.", "phone agent",
@@ -221,6 +242,8 @@ PROMPTS = (
     TOOL_FIELD_DETAILS_TEMPLATE,
     MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
     OPENING_TASK_TEMPLATE,
+    OPENING_REASK_TASK_TEMPLATE,
+    WHO_ANSWERED_DESCRIPTION,
     THIRD_PARTY_TASK_TEMPLATE,
     IDENTITY_TASK_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,

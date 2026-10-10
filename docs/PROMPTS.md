@@ -104,10 +104,11 @@ Fields: {field_details}
 - Purpose: Sets spec-derived identity and global rules for the multi-step phone agent.
 - Receiver: phone agent
 - Used at: builder/workflow.py — spec workflow system_prompt
-- Approximate tokens: ~43 static + `{agent_name}` characters ÷ 4 + `{language}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~73 static + `{agent_name}` characters ÷ 4 + `{language}` characters ÷ 4 + `{introduction}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
 You are {agent_name}. Speak {language}. Keep every turn concise and truthful. Call at most one tool per message. Never claim an action succeeded unless its tool result says so.
+If you have not yet given this introduction in this call, give it first in your next message, whatever the customer said: {introduction}
 Global rules:
 {rules}
 ```
@@ -117,16 +118,46 @@ Global rules:
 - Purpose: Opens the call and identifies who answered.
 - Receiver: phone agent
 - Used at: builder/workflow.py — opening
-- Approximate tokens: ~33 static + `{introduction}` characters ÷ 4 + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~73 static + `{introduction}` characters ÷ 4 + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
-Say: {introduction}
+Start the call with this, once: {introduction}
 The person to ask for is {address}. Use these words when you address them.
 Ask: {question}
+If they only greet you or check the line (for example "Hello?"), that is not an answer: reply briefly and ask the question again.
 If unclear: {unclear}
 Before verification, do not say: {forbidden}
 Rules:
 {rules}
+```
+
+## OPENING_REASK_TASK_TEMPLATE
+
+- Purpose: Asks the opening question again after an unclear answer, without a second introduction.
+- Receiver: phone agent
+- Used at: builder/workflow.py — opening_reask
+- Approximate tokens: ~83 static + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+
+```text
+You already gave the introduction earlier in this call. Do not repeat it unless they ask who is calling.
+The person to ask for is {address}. Use these words when you address them.
+Ask again, briefly: {question}
+If they only greet you or check the line, reply briefly and ask the question again.
+If unclear: {unclear}
+Before verification, do not say: {forbidden}
+Rules:
+{rules}
+```
+
+## WHO_ANSWERED_DESCRIPTION
+
+- Purpose: Extraction description of the who-answered variable in the opening steps.
+- Receiver: extraction model
+- Used at: builder/workflow.py — opening and opening_reask extraction_schema
+- Approximate tokens: ~37 static + `{greeting}` characters ÷ 4 at runtime
+
+```text
+Who answered the call. {greeting}: the person only greets or checks the line (for example "Hello?" or "Who is this?") and has not answered the question yet.
 ```
 
 ## THIRD_PARTY_TASK_TEMPLATE

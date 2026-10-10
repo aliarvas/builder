@@ -14,19 +14,21 @@ from .prompts import (
     IDENTITY_TASK_TEMPLATE,
     MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
+    OPENING_REASK_TASK_TEMPLATE,
     OPENING_TASK_TEMPLATE,
     SPECIAL_ASK_TASK_TEMPLATE,
     SPECIAL_PATH_TASK_TEMPLATE,
     THIRD_PARTY_TASK_TEMPLATE,
+    WHO_ANSWERED_DESCRIPTION,
     render_phone_agent_system_prompt,
     render_phone_agent_task_message,
     render_prompt,
 )
 from .offer_check import (
     OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED_COUNT,
-    check_offer_code, offer_setup_code, promise_values_hook, special_noted_code,
+    _py_literal, check_offer_code, offer_setup_code, promise_values_hook, special_noted_code,
 )
-from .spec import PhoneAgentSpec, Rule, SpecError, SpecialPath, required_close_states
+from .spec import OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
 from .tools_from_openapi import CALL_VARIABLES
 
 
@@ -299,19 +301,32 @@ def _model_fields(tool: dict[str, Any]) -> list[str]:
 
 SPECIAL_RESULT_PREFIX = "special_result_"
 
+# Steps that stand for one spec step name. ``opening_reask`` asks the opening question
+# again, so whatever is available in ``opening`` is available there too.
+STEP_ALIASES = {"opening": ("opening", "opening_reask")}
+
+
+def source_steps(path: SpecialPath) -> tuple[str, ...]:
+    """The rendered steps a special path may fire in (its spec ``available_in``, expanded)."""
+    return tuple(dict.fromkeys(
+        step for name in path.available_in for step in STEP_ALIASES.get(name, (name,))
+    ))
+
 
 def _special_nodes(
     spec: PhoneAgentSpec, path: SpecialPath, key: str, by_name: dict[str, dict[str, Any]],
-    close_via: Any,
+    tag_close: Any,
 ) -> tuple[dict[str, tuple[dict[str, Any], tuple[str, ...]]], dict[str, Any]]:
     """Return ({global key: (node, steps it may fire in)}, extra regular nodes) for one path.
 
     The path never asks the model whether it is finished: it speaks a fixed line, the
     engine (or, if a value is needed from the conversation, the model) runs the tool,
-    and the exit routes on the tool result.
+    and the exit routes on the tool result. A closing path goes straight to ``closing``,
+    which derives ``special:<id>`` from the tool result (see close_rules); a path without
+    a tool writes its state itself.
     """
-    success = close_via("special:" + path.id) if path.then == "close" else "__previous__"
-    failure = close_via("special_tool_failed") if path.then == "close" else "__previous__"
+    success = "closing" if path.then == "close" else "__previous__"
+    failure = tag_close("special_tool_failed") if path.then == "close" else "__previous__"
     tool = None
     if path.tool:
         if path.tool not in by_name:
@@ -332,6 +347,12 @@ def _special_nodes(
         ]
 
     def action(node_key: str) -> dict[str, Any]:
+        if tool is None and path.then == "close":
+            node = _code_node(node_key, _write_close_state([("True", "special:" + path.id)]), [
+                {"target_node": success, "description": "Line spoken", "condition": {"operator": "always"}},
+            ])
+            node["on_enter"] = {"type": "tts", "text": path.say.text}
+            return node
         if tool is None:
             return {
                 "name": node_key, "node_type": "conversation", "task_message": path.say.text,
@@ -377,7 +398,7 @@ def _special_nodes(
         }]
     node["description"] = path.when.text
     node["condition"] = {"operator": "matches_intent", "description": path.when.text}
-    return {key: (node, path.available_in)}, extra
+    return {key: (node, source_steps(path))}, extra
 
 
 def _done_transitions(source_variable: str, sources: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -426,7 +447,7 @@ def _model_tool_special(
     done_key = key + "_done"
     returns = path.then == "return"
     globals_: dict[str, tuple[dict[str, Any], tuple[str, ...]]] = {}
-    for source in path.available_in:
+    for source in source_steps(path):
         entry_key = f"{key}_at_{source}"
         entry = _code_node(entry_key, (
             f"vars[{result_variable!r}] = ''\n"
@@ -455,7 +476,7 @@ def _model_tool_special(
         extra[done_key] = _code_node(done_key, special_noted_code(
             spec, result_variable, path.tool, number_field in body
         ), [
-            *_done_transitions(source_variable, path.available_in),
+            *_done_transitions(source_variable, source_steps(path)),
         ])
     return globals_, extra
 
@@ -565,8 +586,127 @@ def _py_str(value: str) -> str:
     return json.dumps(value).replace("{", "\\u007b").replace("}", "\\u007d")
 
 
-def _close_state_code(state: str) -> str:
-    return f"vars['close_state'] = {_py_str(state)}\n"
+# Call-end states that no existing variable identifies; each keeps a one-line tagging step.
+# turn_limit: the engine's max_turn_transition sets no variable. special_tool_failed: the
+# "no usable result" fallback of an engine tool step (HTTP error, or no ok field) sets no
+# variable that is reliable in every failure mode.
+TAGGED_CLOSE_STATES = ("turn_limit", "special_tool_failed")
+
+
+def _is_true(variable: str) -> list[dict[str, Any]]:
+    return [_condition(variable, "equals", value) for value in ("true", "True")]
+
+
+def _is_false(variable: str) -> list[dict[str, Any]]:
+    return [_condition(variable, "equals", value) for value in ("false", "False")]
+
+
+def _all(*conditions: dict[str, Any]) -> dict[str, Any]:
+    return {"logic": "and", "conditions": list(conditions)}
+
+
+def close_rules(spec: PhoneAgentSpec) -> list[tuple[str, list[dict[str, Any]]]]:
+    """The one priority order for call-end states derived from existing variables.
+
+    Each entry is (state, OR-conditions). The same conditions route the source step to
+    ``closing``, and ``closing`` (and the end-of-call close) re-evaluates them in this
+    order; the first that holds names the state. Later call stages come first, so a
+    variable left over from an earlier stage never wins. A ``close_state`` written by a
+    code step (opening_unclear, offer_limit, promise_recorded, promise_failed, a special
+    path without a tool, the tagged states) wins over every rule.
+    """
+    opening = spec.opening.data
+    third = spec.third_party.data
+    negotiation = spec.negotiation.data
+    callback_results = ("callback_ok", "schedule_callback_response.data.ok")
+    return [
+        *(
+            ("special:" + path.id, _is_true(special_result_variable(path)))
+            for path in spec.special_paths if path.then == "close" and path.tool
+        ),
+        *(
+            ("negotiation:" + value, [_all(
+                _condition(negotiation["intent_variable"], "equals", value),
+                _condition(OFFERS_ACCEPTED_COUNT, "less_than", 1),
+            )])
+            for value in negotiation["close_values"]
+        ),
+        ("account_failed", [_condition("account_failure_count", "greater_than", 0)]),
+        ("identity_failed", [
+            _all(_condition("identity_attempts_left", "less_than", 1), _condition("identity_verified", "equals", value))
+            for value in ("false", "False")
+        ]),
+        ("callback_scheduled", [item for variable in callback_results for item in _is_true(variable)]),
+        ("callback_failed", [
+            *(item for variable in callback_results for item in _is_false(variable)),
+            _condition("schedule_callback_failure_count", "greater_than", 0),
+        ]),
+        *(
+            ("third_party:" + value, [_condition(third["intent_variable"], "equals", value)])
+            for value in third["close_values"]
+        ),
+        *(
+            ("opening:" + value, [_condition(opening["who_answered_variable"], "equals", value)])
+            for value in opening["close_values"]
+        ),
+    ]
+
+
+def _write_close_state(cases: list[tuple[str, str]]) -> str:
+    """Code that writes ``close_state`` on the branch that routes to ``closing``.
+
+    ``cases`` are (Python test, state) pairs, checked in order.
+    """
+    body = "".join(
+        f"    {'if' if index == 0 else 'elif'} {test}:\n        vars['close_state'] = {_py_str(state)}\n"
+        for index, (test, state) in enumerate(cases)
+    )
+    return "try:\n" + body + "except Exception:\n    pass\n"
+
+
+def _close_state_derivation_code(spec: PhoneAgentSpec) -> str:
+    """Shared snippet: ``derive_close_state()`` evaluates close_rules like the router does."""
+    rules = [[state, {"logic": "or", "conditions": conditions}] for state, conditions in close_rules(spec)]
+    return f"""import json
+RULES = {_py_literal(rules)}
+
+
+def holds(condition):
+    try:
+        if 'conditions' in condition:
+            results = [holds(item) for item in condition['conditions']]
+            return all(results) if condition.get('logic') == 'and' else any(results)
+        name = condition.get('variable')
+        operator = condition.get('operator')
+        value = vars.get(name)
+        present = value is not None and value != ''
+        if operator == 'is_set':
+            return present
+        if operator == 'equals':
+            return present and str(value) == str(condition.get('operand'))
+        if operator == 'not_equals':
+            return not (present and str(value) == str(condition.get('operand')))
+        if operator in ('greater_than', 'less_than') and present:
+            number = float(value)
+            limit = float(condition.get('operand'))
+            return number > limit if operator == 'greater_than' else number < limit
+    except Exception:
+        return False
+    return False
+
+
+def derive_close_state():
+    try:
+        written = vars.get('close_state')
+        if written:
+            return str(written)
+        for state, condition in RULES:
+            if holds(condition):
+                return state
+    except Exception:
+        pass
+    return ''
+"""
 
 
 def close_table(spec: PhoneAgentSpec) -> list[tuple[str, str, str, str, bool]]:
@@ -629,8 +769,8 @@ def choose(candidates):
 
 def _closing_code(spec: PhoneAgentSpec) -> str:
     """Pick outcome, reason and the closing sentence from call state; never raises."""
-    return _outcome_choice_code(spec) + f"""
-chosen = choose([str(vars.get('close_state') or '')])
+    return _close_state_derivation_code(spec) + _outcome_choice_code(spec) + f"""
+chosen = choose([derive_close_state()])
 vars['close_resolved_state'] = chosen[0]
 vars['close_outcome'] = chosen[1]
 if chosen[2]:
@@ -644,7 +784,7 @@ def _hangup_hook_code(spec: PhoneAgentSpec, url: str) -> str:
     send branch writes the real ``url`` (as its last step). Skip if the closing chain
     already ran, else fill outcome and reason from call state. Never raises."""
     closing = spec.closing.data
-    return _outcome_choice_code(spec) + f"""
+    return _close_state_derivation_code(spec) + _outcome_choice_code(spec) + f"""
 try:
     ok_value = str(vars.get('close_call_ok') or '').lower()
     try:
@@ -658,7 +798,7 @@ try:
         vars['hangup_close'] = 'skipped'
     else:
         verified = str(vars.get('identity_verified') or '').lower() == 'true'
-        candidates = [str(vars.get('close_state') or '')]
+        candidates = [derive_close_state()]
         if not verified:
             candidates.append('hangup_unverified')
         candidates.append('hangup')
@@ -776,15 +916,22 @@ def build_spec_workflow(
         special_result_variable(path) for path in spec.special_paths
     ] + [negotiation["intent_variable"], confirmation["intent_variable"]]
     used = {
-        "opening", "opening_unclear", "third_party", "identity", "account", "negotiate",
+        "opening", "opening_reask", "opening_unclear", "third_party", "identity", "account", "negotiate",
         "confirm_record", "confirmation_progress", "closing", "closing_say", "close_attempt",
         "offer_setup", "check_offer",
         "close_record", "end_call",
     }
     close_nodes: dict[str, str] = {}
+    rules = dict(close_rules(spec))
 
-    def close_via(state: str) -> str:
-        """Node that records why the call ends, then runs the shared closing path."""
+    def to_closing(state: str, description: str) -> dict[str, Any]:
+        """Route to ``closing`` on the rule that also derives ``state`` there."""
+        return _transition("closing", description, rules[state])
+
+    def tag_close(state: str) -> str:
+        """Tagging step for a state no variable identifies (TAGGED_CLOSE_STATES)."""
+        if state not in TAGGED_CLOSE_STATES:
+            raise ValueError(f"internal: {state!r} is derived, not tagged")
         if state not in close_nodes:
             key = "close_" + re.sub(r"[^A-Za-z0-9_]+", "_", state).strip("_")
             base, suffix = key, 2
@@ -795,16 +942,11 @@ def build_spec_workflow(
             close_nodes[state] = key
         return close_nodes[state]
 
-    close_via("turn_limit")
+    tag_close("turn_limit")
     special_keys = [(path, _special_key(path.id, used)) for path in spec.special_paths]
 
     opening_transitions = [
-        *(
-            _transition(close_via("opening:" + value), "Opening path must close", [
-                _condition(opening["who_answered_variable"], "equals", value)
-            ])
-            for value in opening["close_values"]
-        ),
+        *(to_closing("opening:" + value, "Opening path must close") for value in opening["close_values"]),
         _transition("identity", "Customer answered", [
             _condition(opening["who_answered_variable"], "equals", value)
             for value in opening["identity_values"]
@@ -832,50 +974,42 @@ def build_spec_workflow(
         for index, question in enumerate(spec.identity_questions, start=1)
     )
     callback_tool = _response_mapping(by_name["schedule_callback"], {"data.ok": "callback_ok"})
+    opening_values = dict(
+        address=" ".join("{{" + name + "}}" for name in opening["address_with"]),
+        question=opening["confirmation_question"]["text"],
+        unclear=opening["unclear_instruction"]["text"],
+        forbidden=", ".join(opening["forbidden_before_verification"]),
+        rules=_rule_lines(spec.opening.rules),
+    )
+    unclear_limit = opening["max_unclear_asks"] - 1
     nodes: dict[str, Any] = {
-        "opening": _conversation("opening", render_prompt(
-            OPENING_TASK_TEMPLATE,
-            introduction=spec.agent.introduction.text,
-            address=" ".join("{{" + name + "}}" for name in opening["address_with"]),
-            question=opening["confirmation_question"]["text"],
-            unclear=opening["unclear_instruction"]["text"],
-            forbidden=", ".join(opening["forbidden_before_verification"]),
-            rules=_rule_lines(spec.opening.rules),
-        ), [], opening_transitions),
+        "opening": {
+            **_conversation("opening", render_prompt(
+                OPENING_TASK_TEMPLATE, introduction=spec.agent.introduction.text, **opening_values
+            ), [], opening_transitions),
+            # The introduction is spoken once; asking again happens in opening_reask.
+            "on_enter_first_entry_only": True,
+        },
+        "opening_reask": _conversation("opening_reask", render_prompt(
+            OPENING_REASK_TASK_TEMPLATE, **opening_values
+        ), [], copy.deepcopy(opening_transitions)),
         "opening_unclear": _code_node("opening_unclear", _increment_code(
             opening["unclear_count_variable"], opening["who_answered_variable"]
-        ), [
-            _transition(close_via("opening_unclear"), "Opening uncertainty limit reached", [
-                _condition(
-                    opening["unclear_count_variable"], "greater_than",
-                    opening["max_unclear_asks"] - 1,
-                )
+        ) + _write_close_state([
+            (f"int(vars.get({opening['unclear_count_variable']!r}) or 0) > {unclear_limit!r}", "opening_unclear"),
+        ]), [
+            _transition("closing", "Opening uncertainty limit reached", [
+                _condition(opening["unclear_count_variable"], "greater_than", unclear_limit)
             ]),
-            {"target_node": "opening", "description": "Ask once more", "condition": {"operator": "always"}},
+            {"target_node": "opening_reask", "description": "Ask once more", "condition": {"operator": "always"}},
         ]),
         "third_party": _conversation("third_party", render_prompt(
             THIRD_PARTY_TASK_TEMPLATE, rules=_rule_lines(spec.third_party.rules)
         ), [callback_tool], [
-            _transition(close_via("callback_scheduled"), "Callback was scheduled", [
-                _condition(variable, "equals", value)
-                for variable in ("callback_ok", "schedule_callback_response.data.ok")
-                for value in ("true", "True")
-            ]),
-            _transition(close_via("callback_failed"), "Callback could not be scheduled", [
-                *(
-                    _condition(variable, "equals", value)
-                    for variable in ("callback_ok", "schedule_callback_response.data.ok")
-                    for value in ("false", "False")
-                ),
-                _condition("schedule_callback_failure_count", "greater_than", 0),
-            ]),
-            *(
-                _transition(close_via("third_party:" + value), "Third-party path is complete", [
-                    _condition(third["intent_variable"], "equals", value)
-                ])
-                for value in third["close_values"]
-            ),
-            ]),
+            to_closing("callback_scheduled", "Callback was scheduled"),
+            to_closing("callback_failed", "Callback could not be scheduled"),
+            *(to_closing("third_party:" + value, "Third-party path is complete") for value in third["close_values"]),
+        ]),
         "identity": _conversation("identity", render_prompt(
             IDENTITY_TASK_TEMPLATE, questions=questions,
             answer_verified=identity["answer_verified_field"],
@@ -887,10 +1021,8 @@ def build_spec_workflow(
             _transition("account", "Identity verified", [
                 _condition("identity_verified", "equals", value) for value in ("true", "True")
             ]),
-            _transition(close_via("identity_failed"), "No identity attempts remain", [
-                _condition("identity_attempts_left", "less_than", 1)
-            ]),
-            ]),
+            to_closing("identity_failed", "No identity attempts remain"),
+        ]),
         "account": {
             "name": "account", "node_type": "api_request", "on_enter": {"type": "silent"},
             "passthrough": True, "passthrough_default_transition": "offer_setup",
@@ -900,20 +1032,20 @@ def build_spec_workflow(
                 "variable": spec.account.data["products_variable"],
             }],
             "transitions": [
-                _transition(close_via("account_failed"), "Account retrieval failed after retry", [
-                    _condition("account_failure_count", "greater_than", 0)
-                ]),
+                to_closing("account_failed", "Account retrieval failed after retry"),
                 {"target_node": "offer_setup", "description": "Account loaded", "condition": {"operator": "always"}},
             ],
         },
         "offer_setup": _code_node("offer_setup", offer_setup_code(spec), [
             {"target_node": "negotiate", "description": "Product facts computed", "condition": {"operator": "always"}},
         ]),
-        "check_offer": _code_node("check_offer", check_offer_code(spec, reset_variables), [
+        "check_offer": _code_node("check_offer", check_offer_code(spec, reset_variables) + _write_close_state([
+            (f"vars.get({OFFER_PROGRESS!r}) == 'limit'", "offer_limit"),
+        ]), [
             _transition("confirm_record", "Every agreed offer passed the check", [
                 _condition(OFFER_PROGRESS, "equals", "ready")
             ]),
-            _transition(close_via("offer_limit"), "Too many rejected offers", [
+            _transition("closing", "Too many rejected offers", [
                 _condition(OFFER_PROGRESS, "equals", "limit")
             ]),
             {"target_node": "negotiate", "description": "Discuss the check result", "condition": {"operator": "always"}},
@@ -943,14 +1075,7 @@ def build_spec_workflow(
                 for value in [*negotiation["confirm_values"], *negotiation["close_values"]]
             ),
             *(
-                {
-                    "target_node": close_via("negotiation:" + value),
-                    "description": "Negotiation ends without an accepted offer",
-                    "condition": {"logic": "or", "conditions": [{"logic": "and", "conditions": [
-                        _condition(negotiation["intent_variable"], "equals", value),
-                        _condition(OFFERS_ACCEPTED_COUNT, "less_than", 1),
-                    ]}]},
-                }
+                to_closing("negotiation:" + value, "Negotiation ends without an accepted offer")
                 for value in negotiation["close_values"]
             ),
         ]),
@@ -965,13 +1090,16 @@ def build_spec_workflow(
                 _condition("promise_result_ok", "equals", value)
                 for value in ("true", "True", "false", "False")
             ]),
-            ]),
+        ]),
         "confirmation_progress": _code_node(
-            "confirmation_progress", _confirmation_progress_code(spec), [
-                _transition(close_via("promise_recorded"), "All agreed products were recorded", [
+            "confirmation_progress", _confirmation_progress_code(spec) + _write_close_state([
+                ("vars.get('promise_progress_state') == 'complete'", "promise_recorded"),
+                ("vars.get('promise_progress_state') == 'exhausted'", "promise_failed"),
+            ]), [
+                _transition("closing", "All agreed products were recorded", [
                     _condition("promise_progress_state", "equals", "complete")
                 ]),
-                _transition(close_via("promise_failed"), "A product exhausted its recording attempts", [
+                _transition("closing", "A product exhausted its recording attempts", [
                     _condition("promise_progress_state", "equals", "exhausted")
                 ]),
                 {"target_node": "confirm_record", "description": "Record the next product or retry once", "condition": {"operator": "always"}},
@@ -1014,7 +1142,7 @@ def build_spec_workflow(
     global_nodes: dict[str, Any] = {}
     global_sources: dict[str, tuple[str, ...]] = {}
     for path, key in special_keys:
-        made, extra = _special_nodes(spec, path, key, by_name, close_via)
+        made, extra = _special_nodes(spec, path, key, by_name, tag_close)
         for global_key, (node, sources) in made.items():
             if global_key in nodes or global_key in global_nodes:
                 raise SpecError(f"special path step name collision: {global_key!r}")
@@ -1023,16 +1151,20 @@ def build_spec_workflow(
         nodes.update(extra)
 
     for state, key in close_nodes.items():
-        nodes[key] = _code_node(key, _close_state_code(state), [
+        nodes[key] = _code_node(key, _write_close_state([("True", state)]), [
             {"target_node": "closing", "description": "Compute the closing outcome", "condition": {"operator": "always"}},
         ])
 
     # Extraction is restricted to categorical routing signals supplied by the spec.
-    nodes["opening"]["extraction_schema"] = [{
-        "name": opening["who_answered_variable"], "type": "string",
-        "description": "Who answered the call", "enum_values": opening["who_answered_options"],
-        "min_confidence": 0.8,
-    }]
+    # A bare greeting gets its own value: it routes nowhere, so the step stays and asks
+    # again, and it never counts toward the unclear limit.
+    for key in ("opening", "opening_reask"):
+        nodes[key]["extraction_schema"] = [{
+            "name": opening["who_answered_variable"], "type": "string",
+            "description": render_prompt(WHO_ANSWERED_DESCRIPTION, greeting=OPENING_GREETING_VALUE),
+            "enum_values": [*opening["who_answered_options"], OPENING_GREETING_VALUE],
+            "min_confidence": 0.8,
+        }]
     nodes["third_party"]["extraction_schema"] = [{
         "name": third["intent_variable"], "type": "string",
         "description": "The third party's current intent", "enum_values": third["intent_values"],
@@ -1080,6 +1212,7 @@ def build_spec_workflow(
             MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
             agent_name=spec.agent.name,
             language=spec.agent.language,
+            introduction=spec.agent.introduction.text,
             rules=_rule_lines(spec.global_rules),
         ),
         "nodes": nodes,
