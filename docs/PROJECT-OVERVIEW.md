@@ -3,6 +3,15 @@
 **Owner:** Product scope and external behavior  
 **Read when:** Changing the builder's purpose, input, output or top-level workflow
 
+## Positioning `[VERIFIED: project owner, 2026-10-10]`
+
+**Policy-aware banking collections voice-agent builder for Freya.**
+
+- Vertical: financial services → banking → collections (late-payment phone agent). Not general-purpose, not insurance.
+- The phone agent: confirms it is talking to the right customer, fetches the late accounts, negotiates date and amount, records payment promises, handles already-paid, dispute and hardship, schedules callbacks, transfers to a human when needed, records the call outcome in the bank's system.
+- The builder is not tied to one bank: each collections brief (Bank A, Bank B, hidden brief) produces its own workflow.
+- Out of scope now: a universal builder for every sector. Other verticals (insurance, customer service, sales) are a possible later extension (see [`REFERENCE-NOTES.md`](REFERENCE-NOTES.md)).
+
 ## Definition
 
 Agent Factory is a policy-aware collections agent compiler. It reads a bank brief and an OpenAPI tool file, and creates a phone agent (a Freya workflow) with no human edits. Verified contract and limits: [`STARTER-KIT-FACTS.md`](STARTER-KIT-FACTS.md).

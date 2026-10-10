@@ -97,6 +97,12 @@ Sat 10 Oct 10:00 kit and keys. Sun 17:00 hidden briefs open. Sun 20:00 submissio
 - Lifecycle tools in top-level `tools` with `config.alwaysRunsAt` (`start_of_call`, `end_of_call`) are engine-fired and hidden from the model.
 - `max_node_turns` default 10; set `max_turn_transition`.
 
+## Prompt size guidance `[VERIFIED: Freya guidance relayed by the user, 2026-10-10]`
+
+- For chat, a prompt of **500 to 1,500 tokens** is ideal.
+- `[TO-CONFIRM]` Scope: assumed to mean the dialogue prompt of one step (`system_prompt` + `role_message` + `task_message`), not the whole workflow and not the tool schemas.
+- Measured: our T-001 agent has one step whose `task_message` is about 2,600 tokens (whole Brief A pasted in) plus about 1,600 tokens of tool schemas. Over the limit.
+
 ## Practice material
 
 - `[VERIFIED]` `public-test-set.json`: 13 cases (PUB-01..10 for Brief A, PUB-11..13 for Brief B), all with `now` = `2026-10-14T11:00`. Each has identity answers, products, a customer script, `expected` bank records and `checks` for the judge. PUB-10 injects a fault (`create_promise` fails the first time).

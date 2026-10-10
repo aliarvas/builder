@@ -30,6 +30,150 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-018: Leakage test treated required routing vocabulary as brief data
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-004-fix offline source-leakage test
+- **Run:** Local `python3 -m unittest discover -s tests -v`; no Freya request
+- **Symptom:** One of 48 tests failed after fixtures gained `available_in` and `then`, reporting mandated step names and the `close`/`return` routing enum as leaked brief values.
+- **Root cause:** The leakage allowlist had not been extended for the new spec's framework-level routing vocabulary.
+- **Category:** other
+- **Fix / lesson:** Explicitly distinguish task-mandated graph/schema vocabulary from fixture policy content while retaining the numeric product-limit regression assertion.
+- **Status:** fixed (pending CTO commit)
+- **Retest:** Enhanced leakage checks and full offline suite passed (48/48).
+
+### F-017: Prompt documentation was stale during T-003-fix test run
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-003-fix offline prompt documentation test
+- **Run:** Local `python3 -m unittest discover -s tests -v`; no Freya request
+- **Symptom:** One of 44 tests failed because the checked-in prompt catalog did not yet include the newly extracted hook and tool-description messages.
+- **Root cause:** The test suite was run after changing `builder/prompts.py` but before running its deterministic documentation generator.
+- **Category:** other
+- **Fix / lesson:** Regenerate `docs/PROMPTS.md` immediately after prompt catalog changes, before the full suite.
+- **Status:** fixed (pending CTO commit)
+- **Retest:** Prompt documentation regenerated; full offline suite passed (44/44).
+
+### F-016: Generated post-hook failed to compile after prompt extraction
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-003-fix offline compile check
+- **Run:** Local `python3 -m py_compile builder/*.py tests/*.py`; no Freya request
+- **Symptom:** The generated generic post-hook caused a Python syntax error before the test suite could start.
+- **Root cause:** Prompt text was inserted with an outer f-string while the hook source itself contained a literal empty dictionary; its braces were interpreted as an empty f-string expression.
+- **Category:** other
+- **Fix / lesson:** Generate hook source with token replacement rather than an outer f-string, so hook syntax and Freya placeholders cannot be reinterpreted.
+- **Status:** fixed (pending CTO commit)
+- **Retest:** Hook and all builder modules compile; full offline suite passed (44/44).
+
+### F-015: Literal leakage scan confused framework words with brief constants
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-004 offline source leakage test
+- **Run:** Local `python3 -m unittest discover -s tests -v`; no Freya request
+- **Symptom:** The new leakage test reported two embedded brief values even though one was a task-mandated workflow step name and the other was the builder trace's failure status.
+- **Root cause:** The first scanner compared literal text without distinguishing required framework vocabulary from brief-derived policy values.
+- **Category:** other
+- **Fix / lesson:** Keep the scan strict for fixture content while explicitly exempting only task-mandated graph and trace vocabulary in addition to OpenAPI values and fixed tool names.
+- **Status:** fixed (pending CTO commit)
+- **Retest:** Literal scan and full offline suite passed (42/42); no Freya request was made.
+
+### F-014: Multi-step renderer used three invalid workflow field shapes
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-004 offline format audit against the kit workflow documentation
+- **Run:** Local source/fixture inspection; no Freya request
+- **Symptom:** The first rendered skeleton represented extraction as an object instead of an array, placed an entry API response mapping inside its pre-action instead of on the node, and encoded a tool-call transition as a condition operator.
+- **Root cause:** The renderer followed generic JSON-schema conventions and shorthand assumptions instead of the exact Freya shapes documented for extraction, pre-actions, and tool-call transitions.
+- **Category:** platform
+- **Fix / lesson:** Assert the exact documented wire shapes offline: extraction entries use `name` and `enum_values`, entry-call mappings live on the node, passthrough metadata is explicit, and `is_tool_call` is a transition flag.
+- **Status:** fixed (pending CTO commit)
+- **Retest:** Exact wire-shape assertions and the full offline suite passed (41/41); no Freya request was made.
+
+### F-013: Prompt catalog expansion made the documentation tests stale
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-004 offline unit suite, prompt documentation tests
+- **Run:** Local `python3 -m unittest discover -s tests -v`; no Freya request
+- **Symptom:** Two prompt documentation tests failed after the multi-step prompt templates were added: the generated document no longer matched the checked-in file, and an old test still expected exactly two prompt sections.
+- **Root cause:** The prompt catalog was expanded without regenerating its deterministic Markdown mirror or updating the count assertion to reflect a variable-size catalog.
+- **Category:** other
+- **Fix / lesson:** Regenerate the prompt documentation whenever the catalog changes and test the catalog entries rather than a historical fixed count.
+- **Status:** fixed (pending CTO commit)
+- **Retest:** Prompt documentation was regenerated; catalog-aware assertion and full offline suite passed (41/41).
+
+### F-012: No closing record when the customer hangs up
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-07, CTO chat test (call ended from the customer side)
+- **Run:** T-001 builder, workflow `b0bdd6e6-3b68-48ae-a319-ac7dc1cf06f9`, customer `c_7b974eed-824`
+- **Symptom:** The ledger has no outcome at all: the closing tool never ran because the customer ended the call before the agent closed it.
+- **Root cause:** The closing tool is only a model tool inside the conversation step. Nothing runs it when the call ends another way.
+- **Category:** tool-call
+- **Fix / lesson:** Make sure an outcome is recorded on every path, including customer hang-up (for example an end-of-call lifecycle step with an outcome computed from call state). Must not double-record when the agent already closed.
+- **Status:** open
+- **Retest:** -
+
+### F-011: Deadline computed with the wrong band; holiday rule not applied
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-07 (vague period, then a holiday), CTO chat test
+- **Run:** T-001 builder, workflow `b0bdd6e6-3b68-48ae-a319-ac7dc1cf06f9`, customer `c_7b974eed-824`
+- **Symptom:** The customer was in the early band, but the agent applied the late band's shorter deadline. When the customer named a day that is a bank holiday, the agent did not offer the next business day; it insisted on the wrong "latest date" twice. No promise recorded. Same failure family as F-003, seen again with the T-001 builder.
+- **Root cause:** The model chose the band and counted business days from prose rules. It picked the wrong row of the band table and skipped the holiday logic.
+- **Category:** date-logic
+- **Fix / lesson:** Band, deadline, holiday and "next business day" must come from code using the account result and the extracted calendar; the prompt only receives the finished dates (T-005).
+- **Status:** open
+- **Retest:** -
+
+### F-010: Identity check replayed a wrong answer, blamed a "technical issue" and read the account early
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-03 (three wrong answers), CTO chat test
+- **Run:** T-001 builder, workflow `b0bdd6e6-3b68-48ae-a319-ac7dc1cf06f9`, customer `c_e53e8ad2-b07`
+- **Symptom:** After a wrong date of birth the agent moved on to the next question as if it had passed. It then sent the same wrong answer again on its own, without the customer saying it, which burned an attempt. It told the customer there was "a technical issue" (untrue: the answer was wrong). It called the account tool twice before verification (bank refused). The call ended after the customer's second wrong answer instead of the third. Ledger failed: account tool called before verification.
+- **Root cause:** The model ignored negative tool results (known platform behavior with bare results), had the account tool available during identity, and tracked attempts from memory.
+- **Category:** routing / honesty
+- **Fix / lesson:** Identity step with only the identity tool; a post-hook that states plainly "answer wrong, N attempts left, ask again / end"; leave the step on the tool's verified or no-attempts-left result; never let the model resend an answer the customer did not give in this turn.
+- **Status:** open (post-hook part in T-003, step structure in T-004)
+- **Retest:** -
+
+### F-009: Identity tool called again after identity was already verified
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-01 (happy path), CTO chat test via `/api/v2/chat/message`
+- **Run:** T-001 builder, workflow `b0bdd6e6-3b68-48ae-a319-ac7dc1cf06f9`, customer `c_d25a971b-5c4`
+- **Symptom:** After both answers were verified (`all_verified` true) the agent called the identity tool a third time with the date of birth. No visible harm in this case, but it wastes a turn and, with a wrong answer, could burn an attempt.
+- **Root cause:** One step holds all tools; nothing removes the identity tool once verification is complete. The model repeated the call on its own.
+- **Category:** routing
+- **Fix / lesson:** Separate identity step that is left on `all_verified` from the tool result, so the identity tool is no longer available afterwards (T-004).
+- **Status:** open
+- **Retest:** -
+
+### F-008: Promise tool first called with an invented product id
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-01 (happy path), CTO chat test
+- **Run:** T-001 builder, workflow `b0bdd6e6-3b68-48ae-a319-ac7dc1cf06f9`, customer `c_d25a971b-5c4`
+- **Symptom:** The first promise call sent the product's spoken name ("credit card ending ...") as the product id and the bank answered `unknown product_id`. The agent silently called the account tool again and retried with the right id; the second call succeeded. The ledger passed, but the practice check "promise tool called exactly once" would fail in a judged run, and in the tool-failure case (first promise call fails on purpose) the wasted call changes the retry logic.
+- **Root cause:** The product id is a free, model-filled string. The kit warns about exactly this: ids come from the account result and must be given to the model or filled by code.
+- **Category:** tool-call
+- **Fix / lesson:** Fill the product id deterministically: map the account result to variables and offer the model a choice by index or an enum of the returned ids, or set the id in a pre-hook. Never let the model type an id.
+- **Status:** open
+- **Retest:** -
+
+### F-007: Moved string constraint was rendered with JSON quotes
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-003 offline tests (`test_kit_openapi_produces_seven_tools_with_schema_details`, `test_local_ref_is_resolved`)
+- **Run:** Local `python3 -m unittest`; no Freya run
+- **Symptom:** Two tests failed because a string-valued OpenAPI constraint moved into a field description appeared with JSON quotes instead of plain readable text.
+- **Root cause:** The generic constraint formatter serialized every value as JSON, including simple strings.
+- **Category:** other
+- **Fix / lesson:** Render scalar strings directly while retaining deterministic JSON rendering for structured constraint values.
+- **Status:** fixed (pending CTO commit)
+- **Retest:** Full offline suite passed (29/29); both affected OpenAPI description tests passed.
+
 ### F-006: Builder entry point failed when imported as a package
 
 - **Date:** 2026-10-10

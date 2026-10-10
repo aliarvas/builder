@@ -1,0 +1,95 @@
+{
+  "spec_version": 1,
+  "agent": {
+    "name": "Freya Bank digital assistant",
+    "language": "English",
+    "introduction": {"text": "Say you are a digital assistant calling from Freya Bank and that the call is recorded.", "source": "Opening rule 1"}
+  },
+  "opening": {
+    "rules": [
+      {"text": "Do not disclose collections, debt, payment, or product information before verification.", "source": "Opening rule 1"}
+    ],
+    "confirmation_question": {"text": "Ask whether you are speaking with the named customer.", "source": "Opening rule 2"},
+    "unclear_instruction": {"text": "Ask once more, then close without disclosure if still unclear.", "source": "Opening rule 3"},
+    "who_answered_variable": "who_answered",
+    "forbidden_before_verification": ["collections", "debt", "payment", "product"],
+    "who_answered_options": ["customer", "third_party", "unclear", "declined"],
+    "identity_values": ["customer"],
+    "third_party_values": ["third_party"],
+    "stay_values": ["unclear"],
+    "close_values": ["declined"],
+    "unclear_count_variable": "opening_unclear_count",
+    "max_unclear_asks": 2
+  },
+  "third_party": {
+    "rules": [
+      {"text": "Do not reveal why the bank called; ask only when the customer can be reached.", "source": "Someone else answers rules 5-10"}
+    ],
+    "intent_variable": "third_party_intent",
+    "intent_values": ["callback", "no_callback", "wrong_number", "deceased"],
+    "close_values": ["no_callback", "wrong_number", "deceased"]
+  },
+  "identity": {
+    "rules": [
+      {"text": "Ask one security question at a time and never retrieve the account before all questions pass.", "source": "Identity rules 11-15"}
+    ],
+    "questions": [
+      {"field": "date_of_birth", "ask": {"text": "Ask for date of birth.", "source": "Identity rule 11"}, "answer_format": {"text": "Send it as YYYY-MM-DD.", "source": "Identity rule 11"}},
+      {"field": "phone_last4", "ask": {"text": "Ask for the last four phone digits.", "source": "Identity rule 11"}, "answer_format": {"text": "Send four digits.", "source": "Identity rule 11"}}
+    ],
+    "verified_field": "all_verified",
+    "attempts_left_field": "wrong_answers_left"
+  },
+  "account": {
+    "rules": [
+      {"text": "State the late product, amount, and days late only after successful verification.", "source": "Stating the debt rules 16-17"}
+    ],
+    "products_field": "products",
+    "products_variable": "account_products",
+    "product_id_field": "product_id"
+  },
+  "negotiation": {
+    "rules": [
+      {"text": "Ask for the full past-due amount first and apply the brief's date, floor, and refusal rules.", "source": "Dates, amounts, and getting the promise rules 18-33"}
+    ],
+    "intent_variable": "negotiation_intent",
+    "intent_values": ["proposal", "refusal", "continue"],
+    "confirm_values": ["proposal"],
+    "close_values": ["refusal"]
+  },
+  "confirmation": {
+    "rules": [
+      {"text": "Read back product, amount, and date and call the tool only after clear confirmation.", "source": "Confirming rules 34-38"},
+      {"text": "Do not say it was recorded unless the tool succeeds.", "source": "Confirming rule 37"}
+    ],
+    "product_number_field": "product_number",
+    "promise_product_id_field": "product_id",
+    "expected_count_variable": "agreed_product_count",
+    "intent_variable": "confirmation_intent",
+    "intent_values": ["confirmed", "revise"],
+    "revise_values": ["revise"],
+    "max_attempts_per_product": 2
+  },
+  "special_paths": [
+    {"id": "already_paid", "when": {"text": "The customer says the late amount was already paid.", "source": "Rule 39"}, "say": {"text": "Explain that payments may take one business day to appear.", "source": "Rule 39"}, "tool": "", "tool_args": {}, "outcome": "paid", "reason": "", "available_in": ["negotiate", "confirm_record"], "then": "close"},
+    {"id": "dispute", "when": {"text": "The customer disputes the debt or product.", "source": "Rule 40"}, "say": {"text": "Do not argue or take a promise.", "source": "Rule 40"}, "tool": "", "tool_args": {}, "outcome": "no_promise", "reason": "dispute", "available_in": ["negotiate", "confirm_record"], "then": "close"},
+    {"id": "human", "when": {"text": "The customer insists on speaking to a human.", "source": "Rule 42"}, "say": {"text": "Transfer to the specified human queue.", "source": "Rule 42"}, "tool": "transfer_to_agent", "tool_args": {"queue": "general"}, "outcome": "transferred", "reason": "human", "available_in": ["identity", "negotiate", "confirm_record"], "then": "close"}
+  ],
+  "outcomes": [
+    {"outcome": "promise", "reason": "", "when": {"text": "At least one promise was recorded.", "source": "Closing table"}},
+    {"outcome": "paid", "reason": "", "when": {"text": "The customer says the late amount was paid.", "source": "Closing table"}},
+    {"outcome": "transferred", "reason": "human", "when": {"text": "The call was transferred for a human request.", "source": "Closing table"}},
+    {"outcome": "no_promise", "reason": "dispute", "when": {"text": "The customer disputes the debt.", "source": "Closing table"}},
+    {"outcome": "no_promise", "reason": "refused", "when": {"text": "Negotiation ended after permitted attempts.", "source": "Closing table"}},
+    {"outcome": "not_verified", "reason": "failed", "when": {"text": "Identity attempts were exhausted.", "source": "Closing table"}},
+    {"outcome": "not_reached", "reason": "callback", "when": {"text": "A callback was scheduled.", "source": "Closing table"}},
+    {"outcome": "not_reached", "reason": "no_callback", "when": {"text": "No callback was scheduled.", "source": "Closing table"}},
+    {"outcome": "not_reached", "reason": "wrong_number", "when": {"text": "The number is wrong.", "source": "Closing table"}},
+    {"outcome": "not_reached", "reason": "deceased", "when": {"text": "The customer is deceased.", "source": "Closing table"}},
+    {"outcome": "not_reached", "reason": "unclear", "when": {"text": "Who answered remained unclear.", "source": "Closing table"}}
+  ],
+  "global_rules": [
+    {"text": "Use only facts from call variables, this spec, and successful tool results.", "source": "Global honesty rule"},
+    {"text": "Thank the customer and say goodbye before closing the call.", "source": "Closing rule 47"}
+  ]
+}

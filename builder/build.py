@@ -14,14 +14,16 @@ from typing import Any
 if __package__:
     from . import freya
     from .run_trace import FREYA_KEY_PATTERN, TraceWriter
-    from .tools_from_openapi import OpenAPIError, tools_from_openapi
-    from .workflow import build_workflow
+    from .spec import SpecError, load_spec, spec_entry_variables
+    from .tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
+    from .workflow import build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
 else:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import freya
-    from run_trace import FREYA_KEY_PATTERN, TraceWriter
-    from tools_from_openapi import OpenAPIError, tools_from_openapi
-    from workflow import build_workflow
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from builder import freya
+    from builder.run_trace import FREYA_KEY_PATTERN, TraceWriter
+    from builder.spec import SpecError, load_spec, spec_entry_variables
+    from builder.tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
+    from builder.workflow import build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
 
 
 class BuilderInputError(ValueError):
@@ -36,6 +38,7 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--print", dest="print_only", action="store_true", help="print JSON without network calls")
     mode.add_argument("--validate", action="store_true", help="run only Freya's dry-run validation")
     parser.add_argument("--slot", help="stable workflow slot name")
+    parser.add_argument("--spec", dest="spec_path", help="validated versioned agent spec JSON")
     parser.add_argument(
         "inputs",
         nargs="+",
@@ -130,10 +133,36 @@ def main(argv: list[str] | None = None) -> int:
             trace.add_input(path)
         trace.add("model_calls", "none")
         trace.add("self_tests", "none")
-        tools = tools_from_openapi(document)
-        workflow = build_workflow(brief_text, tools)
+        spec = None
+        known_entry_variables = CALL_VARIABLES
+        if args.spec_path:
+            spec_path = Path(args.spec_path)
+            spec = load_spec(spec_path)
+            trace.add_input(spec_path)
+            known_entry_variables = CALL_VARIABLES | spec_entry_variables(spec)
+        openapi_warnings: list[str] = []
+        tools = tools_from_openapi(
+            document,
+            warnings=openapi_warnings,
+            known_entry_variables=known_entry_variables,
+        )
+        for warning in openapi_warnings:
+            trace.add("warning", warning)
+        if args.spec_path:
+            assert spec is not None
+            workflow = build_spec_workflow(spec, tools)
+            trace.add("renderer", "multi-step spec_version=1")
+        else:
+            workflow = build_workflow(brief_text, tools)
+            trace.add("renderer", "single-step fallback (no --spec supplied)")
         trace.add("nodes", len(workflow["nodes"]))
         trace.add("tools", len(tools))
+        for step, step_tools in workflow_tools_by_step(workflow).items():
+            trace.add("step", f"{step}: tools={','.join(step_tools) if step_tools else 'none'}")
+        for step, estimate in workflow_prompt_estimates(workflow).items():
+            trace.add("prompt_estimate", f"{step}: ~{estimate} tokens")
+            if estimate > 1500:
+                trace.add("warning", f"{step}: prompt estimate ~{estimate} tokens; OVER BUDGET")
 
         if args.print_only:
             print(json.dumps(workflow, indent=2, ensure_ascii=False))
@@ -167,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"published_version={published_version}, export={output_path}, trace={trace.path})"
             )
         status = "ok"
-    except (BuilderInputError, OpenAPIError) as exc:
+    except (BuilderInputError, OpenAPIError, SpecError) as exc:
         error = _error_text(exc)
         trace.add("error", f"{type(exc).__name__}: {error}")
         trace.path = Path("traces") / f"{slot}.failed.log"

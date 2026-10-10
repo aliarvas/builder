@@ -19,6 +19,7 @@ Mark an item only with a test result, artifact or verified official rule. This i
 - [ ] Works on a brief with a different layout and a different tool API (synthetic tests).
 - [ ] Handles an override memo, a code list and tables without crashing.
 - [ ] Tool field names and enums come from the OpenAPI file.
+- [ ] Every step's dialogue prompt is within 500 to 1,500 tokens (builder check, reported in the trace).
 
 ## Safety and honesty
 

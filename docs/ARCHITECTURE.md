@@ -35,6 +35,50 @@ Prompts alone are unreliable (the phone-agent model is fixed and sometimes incon
 
 The minimal sample builder (one node, brief pasted as prompt) scores about half; the above is where the remaining points are. Start simple and add structure only when a failure label justifies it.
 
+## Phone agent template `[VERIFIED decision, 2026-10-10; node set refined by evidence]`
+
+The builder renders a fixed, domain-generic skeleton of steps. The skeleton is code; every value, rule text, outcome code and calendar inside it is data extracted from the brief. A brief that lacks a stage simply leaves that branch unused.
+
+```text
+setup (code)           now + calendar data -> today, business days, deadlines
+  -> opening           who answered: customer / third party / wrong number / deceased / unclear
+       -> third_party  callback window checked by code -> schedule_callback -> close
+  -> identity          only the identity tool; leave on the tool result, count attempts from results
+  -> account (api)     account tool runs on entry; code turns products into short facts per product
+  -> negotiate         state the debt, ask for date/amount; extraction of proposal and intent
+  -> check_offer (code) date and amount against the brief's rules -> verdict + suggested alternative
+  -> confirm_record    read-back, explicit yes, promise tool; honest result handling
+  -> close (code + api) outcome/reason computed from call state, closing tool called with baked values
+  -> end_call
+special paths (from any step): dispute, already paid, hardship, restructuring, human, scam, robot question
+```
+
+Responsibilities:
+
+| Work | Owner |
+|---|---|
+| Speech, understanding, empathy, wording | phone-agent model |
+| Attempt counters, date and amount checks, outcome selection | code steps and hooks |
+| Which tool is available when; that the closing tool always runs | workflow graph |
+
+Each step's prompt follows the prompt budget below.
+
+## Messy inputs `[VERIFIED decision, 2026-10-10]`
+
+Both inputs can be messy: the brief (raw mail, memo that changes a policy, code list, tables) and the bank's tool responses during a call.
+
+**Brief (builder time).** Extraction is an agent loop, not one model call:
+
+1. Extract rules and tables with a source excerpt for each.
+2. Check with code: values against the OpenAPI enums, outcome table complete, dates valid, superseded rules marked, numbers parsed.
+3. Coverage check: every brief sentence is linked to a rule or marked irrelevant.
+4. Ask the model again only about gaps or conflicts.
+5. Arithmetic (business-day counts, windows) is computed by code, never guessed by the model.
+
+**Fallback tiers, so no rule is lost:** (1) structured data enforced by code; (2) a short rule in the prompt of the step it belongs to; (3) a global rule in `system_prompt`. The trace lists each rule's tier, so it is visible which rules are guaranteed and which are only instructions.
+
+**Tool responses (call time).** The agent never guesses a customer fact; it gets it from a tool or says it does not have it. A post-hook on each tool turns the raw response into short plain facts and a `what_to_do_next` line, and tolerates missing or extra fields. The phone agent may call only the bank's tools, so all interpretation that needs extra help happens at builder time.
+
 ## Components
 
 - **Entry** (`builder/build.py`): parses the arguments, runs the pipeline, prints the result. No policy logic.
@@ -74,6 +118,8 @@ The kit folder `build-the-builder-v2/` is reference material. Copy the parts the
 - Temperature 0, structured JSON output validated against the IR schema; one retry on invalid JSON, then fail the build with a clear error.
 
 ## Constraints that shape the design
+
+- **Prompt budget:** each step's dialogue prompt (`system_prompt` + `role_message` + `task_message`) stays within 500 to 1,500 tokens (Freya guidance, see [`STARTER-KIT-FACTS.md`](STARTER-KIT-FACTS.md)). The whole brief is never pasted into one step. Each step gets only the rules for its stage, rewritten short, with computed facts (dates, amounts) filled in by code. The builder measures every step and fails or splits when a step is over budget.
 
 - 30 minutes per brief including self-tests; a ten-case simulation takes 3 to 11 minutes, and simulations queue one at a time. Budget at most one or two self-test runs.
 - Build time is a tie-breaker: few model calls, parallel where independent.

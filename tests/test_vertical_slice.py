@@ -10,8 +10,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from builder import build
+from builder.prompts import PROMPTS, generate_prompt_doc, prompt_doc_path
 from builder.run_trace import TraceWriter
-from builder.tools_from_openapi import OpenAPIError, tools_from_openapi
+from builder.tools_from_openapi import (
+    ALLOWED_SCHEMA_KEYS,
+    CALL_VARIABLES,
+    POST_PROCESS_CODE,
+    OpenAPIError,
+    tools_from_openapi,
+)
 from builder.workflow import build_workflow
 
 
@@ -110,7 +117,7 @@ class OpenAPIToolTests(unittest.TestCase):
             ["client_ref", "choice_v2", "extra_count"], body["required"]
         )
 
-    def test_nested_array_object_and_constraints_are_preserved(self):
+    def test_nested_array_object_constraints_move_to_descriptions(self):
         document = {
             "servers": [{"url": "https://example.invalid"}],
             "paths": {
@@ -143,15 +150,19 @@ class OpenAPIToolTests(unittest.TestCase):
                 }
             },
         }
-        body = tool_body(tools_from_openapi(document)[0])
-        self.assertEqual(1, body["properties"]["values"]["minItems"])
-        self.assertEqual(2, body["properties"]["values"]["items"]["minimum"])
-        self.assertEqual(
-            "^[A-Z]+$", body["properties"]["metadata"]["properties"]["code"]["pattern"]
-        )
+        warnings = []
+        body = tool_body(tools_from_openapi(document, warnings=warnings)[0])
+        values = body["properties"]["values"]
+        code = body["properties"]["metadata"]["properties"]["code"]
+        self.assertNotIn("minItems", values)
+        self.assertIn("minItems: 1", values["description"])
+        self.assertIn("minimum: 2", values["items"]["description"])
+        self.assertNotIn("pattern", code)
+        self.assertIn("pattern:", code["description"])
         self.assertEqual(["code"], body["properties"]["metadata"]["required"])
+        self.assertTrue(warnings)
 
-    def test_tool_names_are_sanitized_and_collisions_fail(self):
+    def test_tool_names_are_sanitized_and_collisions_are_renamed(self):
         document = {
             "servers": [{"url": "https://example.invalid"}],
             "paths": {
@@ -159,10 +170,12 @@ class OpenAPIToolTests(unittest.TestCase):
                 "/v1-verify-id": {"post": {}},
             },
         }
-        with self.assertRaisesRegex(OpenAPIError, "duplicate tool name"):
-            tools_from_openapi(document)
+        warnings = []
+        tools = tools_from_openapi(document, warnings=warnings)
+        self.assertEqual(["v1_verify_id", "v1_verify_id_2"], [tool["function"]["name"] for tool in tools])
+        self.assertTrue(any("duplicate tool name" in warning for warning in warnings))
 
-    def test_path_item_parameters_fail_explicitly(self):
+    def test_path_item_parameters_warn_and_are_ignored(self):
         document = {
             "servers": [{"url": "https://example.invalid"}],
             "paths": {
@@ -172,8 +185,10 @@ class OpenAPIToolTests(unittest.TestCase):
                 }
             },
         }
-        with self.assertRaisesRegex(OpenAPIError, "path-item parameters"):
-            tools_from_openapi(document)
+        warnings = []
+        tools = tools_from_openapi(document, warnings=warnings)
+        self.assertEqual(1, len(tools))
+        self.assertTrue(any("parameters" in warning for warning in warnings))
 
     def test_local_ref_is_resolved(self):
         document = {
@@ -203,7 +218,7 @@ class OpenAPIToolTests(unittest.TestCase):
         self.assertEqual(["renamed"], body["required"])
         self.assertIn("format: date", body["properties"]["renamed"]["description"])
 
-    def test_missing_server_and_unknown_type_fail(self):
+    def test_only_missing_server_is_fatal_and_unknown_type_falls_back(self):
         with self.assertRaisesRegex(OpenAPIError, "servers"):
             tools_from_openapi({"paths": {}})
         document = {
@@ -225,8 +240,180 @@ class OpenAPIToolTests(unittest.TestCase):
                 }
             },
         }
-        with self.assertRaisesRegex(OpenAPIError, "unsupported OpenAPI type"):
-            tools_from_openapi(document)
+        warnings = []
+        field = tool_body(tools_from_openapi(document, warnings=warnings)[0])["properties"]["field"]
+        self.assertEqual("string", field["type"])
+        self.assertTrue(any("unsupported type" in warning for warning in warnings))
+
+    def test_messy_schema_builds_with_warnings_and_only_allowed_keys(self):
+        document = {
+            "servers": [{"url": "https://example.invalid"}],
+            "paths": {
+                "/messy": {
+                    "parameters": [{"name": "ignored", "in": "query"}],
+                    "post": {
+                        "summary": "Handle a messy request.",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "nullable_name": {
+                                                "type": ["string", "null"],
+                                                "pattern": "^[A-Z]+$",
+                                                "x-unknown": "kept as words",
+                                            },
+                                            "count": {"enum": [1, 2]},
+                                            "composed": {
+                                                "allOf": [{"type": "string"}, {"maxLength": 8}]
+                                            },
+                                            "broken": "not-a-schema",
+                                        },
+                                        "required": ["nullable_name", "count", "composed", "broken"],
+                                    }
+                                }
+                            }
+                        },
+                    },
+                }
+            },
+        }
+        warnings = []
+        tool = tools_from_openapi(document, warnings=warnings)[0]
+        body = tool_body(tool)
+        self.assertEqual("string", body["properties"]["nullable_name"]["type"])
+        self.assertEqual("integer", body["properties"]["count"]["type"])
+        self.assertEqual("string", body["properties"]["composed"]["type"])
+        self.assertEqual("string", body["properties"]["broken"]["type"])
+        self.assertNotIn("nullable", body["properties"]["nullable_name"])
+        self.assertNotIn("allOf", body["properties"]["composed"])
+        self.assertIn("maxLength: 8", body["properties"]["composed"]["description"])
+        self.assertNotIn("x-unknown", body["properties"]["nullable_name"].get("description", ""))
+        self.assertGreaterEqual(len(warnings), 6)
+
+        def assert_allowed(schema):
+            self.assertLessEqual(set(schema), ALLOWED_SCHEMA_KEYS)
+            if isinstance(schema.get("items"), dict):
+                assert_allowed(schema["items"])
+            for child in schema.get("properties", {}).values():
+                assert_allowed(child)
+
+        assert_allowed(body)
+
+    def test_all_of_and_implicit_object_preserve_nested_fields(self):
+        document = {
+            "servers": [{"url": "https://example.invalid"}],
+            "paths": {
+                "/composed": {
+                    "post": {
+                        "requestBody": {"content": {"application/json": {"schema": {
+                            "allOf": [
+                                {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+                                {"properties": {"count": {"type": "integer"}}, "required": ["count"]},
+                            ]
+                        }}}}
+                    }
+                }
+            },
+        }
+        warnings = []
+        body = tool_body(tools_from_openapi(document, warnings=warnings)[0])
+        self.assertEqual({"q", "count"}, set(body["properties"]))
+        self.assertEqual(["q", "count"], body["required"])
+        self.assertEqual("integer", body["properties"]["count"]["type"])
+        self.assertTrue(any("merged allOf" in warning for warning in warnings))
+
+    def test_implicit_nested_properties_infer_object_and_nested_defaults_are_not_baked(self):
+        document = {
+            "servers": [{"url": "https://example.invalid"}],
+            "paths": {"/implicit": {"post": {"requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"payload": {
+                    "properties": {"z": {"type": "integer", "default": 7}}
+                }}}
+            }}}}}},
+        }
+        payload = tool_body(tools_from_openapi(document)[0])["properties"]["payload"]
+        self.assertEqual("object", payload["type"])
+        self.assertNotIn("default", payload["properties"]["z"])
+
+    def test_model_field_collision_uses_tool_prefixed_placeholder(self):
+        document = {
+            "servers": [{"url": "https://example.invalid"}],
+            "paths": {
+                "/collect_label": {
+                    "post": {
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {"title": {"type": "string"}},
+                                        "required": ["title"],
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+        warnings = []
+        tool = tools_from_openapi(
+            document,
+            warnings=warnings,
+            baked_fields={"customer_id"},
+            known_entry_variables=CALL_VARIABLES,
+        )[0]
+        title = tool_body(tool)["properties"]["title"]
+        self.assertEqual("{{collect_label_title}}", title["default"])
+        self.assertIn("title", tool_body(tool)["required"])
+        self.assertTrue(any("collision" in warning for warning in warnings))
+
+    def test_tool_descriptions_have_generic_call_trigger(self):
+        document = json.loads(
+            (ROOT / "build-the-builder-v2/tools/openapi.json").read_text(encoding="utf-8")
+        )
+        for tool in tools_from_openapi(document):
+            description = tool["function"]["description"]
+            self.assertIn("CALL this tool whenever the situation above applies", description)
+            self.assertIn("saying you did it is not enough.", description)
+            summary = document["paths"]["/" + tool["function"]["name"]]["post"]["summary"]
+            self.assertEqual(1, description.count(summary))
+        create_description = next(
+            tool["function"]["description"] for tool in tools_from_openapi(document)
+            if tool["function"]["name"] == "create_promise"
+        )
+        self.assertIn("Fields: format: date", create_description)
+        self.assertNotIn("date: format: date", create_description)
+
+    def test_post_hook_is_safe_and_writes_readable_next_step(self):
+        compile(POST_PROCESS_CODE, "<post_process_code>", "exec")
+        self.assertNotIn("{{", POST_PROCESS_CODE)
+        self.assertNotIn("}}", POST_PROCESS_CODE)
+        cases = [
+            ({"status_code": 200, "data": {"ok": True}, "header": {"secret": "x"}}, "returned ok"),
+            ({"status_code": 200, "data": {"ok": False}}, "NOT carried out"),
+            ({"status_code": 500, "data": {"ok": True}}, "NOT carried out"),
+            ({"status_code": 200, "data": {"ok": True, "verified": False}}, "verified"),
+            ({"status_code": 200, "data": {"value": 1}}, "NOT carried out"),
+            ({"status": "error", "data": {"ok": True}}, "NOT carried out"),
+            ({"status_code": 200, "data": {"error": "service unavailable"}}, "NOT carried out"),
+            ({"status_code": 200, "data": "unexpected"}, "NOT carried out"),
+        ]
+        for envelope, expected in cases:
+            namespace = {"result": envelope}
+            exec(POST_PROCESS_CODE, namespace, namespace)
+            self.assertNotIn("header", envelope)
+            self.assertIn(expected, envelope["data"]["what_to_do_next"])
+            if "ok" not in envelope.get("data", {}):
+                self.fail("post-hook must normalize data.ok")
+            if expected == "NOT carried out":
+                self.assertIs(False, envelope["data"]["ok"])
+        non_mapping = ["unexpected"]
+        namespace = {"result": non_mapping}
+        exec(POST_PROCESS_CODE, namespace, namespace)
+        self.assertEqual(["unexpected"], non_mapping)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -413,6 +600,21 @@ class CLITests(unittest.TestCase):
             trace = Path("traces/bad-input.failed.log").read_text(encoding="utf-8")
             self.assertIn("status: failed", trace)
 
+    def test_openapi_warnings_are_written_to_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            brief, spec = self._inputs(directory)
+            document = minimal_openapi()
+            document["paths"]["/close_call"]["post"]["requestBody"]["content"][
+                "application/json"
+            ]["schema"]["properties"]["outcome_v2"].pop("type")
+            spec.write_text(json.dumps(document), encoding="utf-8")
+            with working_directory(directory), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                result = build.main([str(brief), str(spec), "--print", "--slot", "warning-case"])
+            self.assertEqual(0, result)
+            trace = Path(directory, "traces/warning-case.print.log").read_text(encoding="utf-8")
+            self.assertIn("warning:", trace)
+            self.assertIn("type is missing", trace)
+
 
 class PublishTests(unittest.TestCase):
     def test_unpublished_newest_version_is_published_and_verified(self):
@@ -441,6 +643,26 @@ class PublishTests(unittest.TestCase):
             "builder.build.freya.api", side_effect=[response, {}, response]
         ), self.assertRaisesRegex(RuntimeError, "was not published"):
             build._ensure_published_version("wf")
+
+
+class PromptDocumentationTests(unittest.TestCase):
+    def test_generated_prompt_document_is_current(self):
+        self.assertEqual(
+            generate_prompt_doc(),
+            prompt_doc_path().read_text(encoding="utf-8"),
+            "docs/PROMPTS.md is stale; regenerate it with: python3 -m builder.prompts",
+        )
+
+    def test_prompt_document_exposes_token_budget(self):
+        document = generate_prompt_doc()
+        self.assertEqual(len(PROMPTS), document.count("- Approximate tokens:"))
+        self.assertIn("**OVER BUDGET**", document)
+        self.assertIn("`{brief_text}` characters ÷ 4", document)
+
+    def test_system_prompt_contains_generic_tool_honesty_rules(self):
+        document = generate_prompt_doc()
+        self.assertIn("Call at most one tool per message.", document)
+        self.assertIn("Never claim an action succeeded unless the tool result says it succeeded.", document)
 
 
 if __name__ == "__main__":

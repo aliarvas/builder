@@ -45,6 +45,7 @@ Status labels:
 ## Reading map
 
 - Facts from the competition and platform (read this first): [`docs/STARTER-KIT-FACTS.md`](docs/STARTER-KIT-FACTS.md)
+- All prompts, generated from `builder/prompts.py`: [`docs/PROMPTS.md`](docs/PROMPTS.md)
 - Scope and CLI behavior: [`docs/PROJECT-OVERVIEW.md`](docs/PROJECT-OVERVIEW.md)
 - Modules and repository structure: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - Schemas, provenance, validation: [`docs/IR-SPEC.md`](docs/IR-SPEC.md)
