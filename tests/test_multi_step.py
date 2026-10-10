@@ -159,8 +159,13 @@ LOAN = {"product_id": "p-loan", "type": "personal_loan", "past_due": 300.0, "day
 class OfferCheckTests(unittest.TestCase):
     """Expected values computed by hand from each fixture's offer rules."""
 
-    def run_offer(self, index, products, now, date, amount, number=None, state=None):
-        spec = load_spec(FIXTURES[index])
+    def run_offer(self, index, products, now, date, amount, number=None, state=None, offer=None):
+        if offer is None:
+            spec = load_spec(FIXTURES[index])
+        else:  # the fixture with some offer fields replaced
+            data = json.loads(FIXTURES[index].read_text(encoding="utf-8"))
+            data["offer"].update(offer)
+            spec = parse_spec(data)
         nodes = build_spec_workflow(spec, kit_tools(index))["nodes"]
         variables = {spec.account.data["products_variable"]: json.dumps(products), "now": now}
         exec(code_of(nodes["offer_setup"]), {"vars": variables})
@@ -353,15 +358,21 @@ class OfferCheckTests(unittest.TestCase):
         self.assertVerdict(variables, "date_too_early", "2026-10-27")
 
     def test_rejection_limit_is_selected_by_product_band(self):
+        # Brief A sets no invalid-offer limit (fixture: scalar 2, no product rules). The band
+        # rules here are synthetic, to test the per-product selection mechanism.
+        bands = {"max_rejected_offers_by_product": [
+            {"when": [{"field": "days_late", "min": 1, "max": 7}], "value": 2},
+            {"when": [{"field": "days_late", "min": 8, "max": 45}], "value": 3},
+        ]}
         now = "2026-10-14T11:00"
-        early = self.run_offer(0, [CARD], now, "2026-11-03", 95)
+        early = self.run_offer(0, [CARD], now, "2026-11-03", 95, offer=bands)
         self.assertEqual((1, "rejected"), (early["offer_rejections"], early["offer_progress"]))
         self.assertVerdict(early, "date_too_late", "2026-11-02")
 
         state = {}
         progress = []
         for date in ("2026-10-26", "2026-10-26", "2026-10-27", "2026-10-28"):
-            variables = self.run_offer(0, [LOAN], now, date, 150, state=state)
+            variables = self.run_offer(0, [LOAN], now, date, 150, state=state, offer=bands)
             state = {key: variables[key] for key in (
                 "offer_rejections", "offer_last_signature", "offer_rejections_by_product",
                 "offer_last_signatures_by_product", "offers_noted",
@@ -370,6 +381,19 @@ class OfferCheckTests(unittest.TestCase):
         self.assertEqual(
             [(1, "rejected"), (1, "rejected"), (2, "rejected"), (3, "limit")], progress
         )
+
+    def test_fixture_rejection_limit_is_the_scalar_two(self):
+        # Without product rules every product uses max_rejected_offers = 2.
+        now = "2026-10-14T11:00"
+        state, progress = {}, []
+        for date in ("2026-10-26", "2026-10-27"):
+            variables = self.run_offer(0, [LOAN], now, date, 150, state=state)
+            state = {key: variables[key] for key in (
+                "offer_rejections", "offer_last_signature", "offer_rejections_by_product",
+                "offer_last_signatures_by_product", "offers_noted",
+            )}
+            progress.append((variables["offer_rejections"], variables["offer_progress"]))
+        self.assertEqual([(1, "rejected"), (2, "limit")], progress)
 
     def test_rejections_are_counted_per_product(self):
         now = "2026-10-14T11:00"

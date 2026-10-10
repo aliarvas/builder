@@ -353,7 +353,7 @@ The program builds these steps; your data fills them: opening (introduction, fin
 - Purpose: Extracts the agent identity, opening, third-party handling, identity check and global rules.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'opening_identity'
-- Approximate tokens: ~789 (characters ÷ 4)
+- Approximate tokens: ~869 (characters ÷ 4)
 
 ```text
 Extract the sections agent, opening, third_party, identity and global_rules. RULE means {"text": "...", "source": "verbatim excerpt"}.
@@ -368,7 +368,7 @@ Return this JSON shape:
   "address_with": ["call variable names used to address the customer, in spoken order"],
   "max_unclear_asks": integer (how many times in total the confirmation question is asked, first ask included, before the call closes as unclear),
   "answers": [{"value": "snake_case code", "meaning": "...", "route": "verify | other_person | ask_again | end", "outcome": "...", "reason": "...", "source": "..."}]
-   (every kind of answer to the confirmation question. route verify: the customer confirmed, go to the identity check. other_person: someone else answered. ask_again: unclear, ask again. end: the call closes right away; outcome and reason are the closing-table values for it, reason "" when the table has none. Exactly one value with route ask_again. Do not add a value for a bare greeting; the program adds it.)
+   (every kind of answer to the confirmation question. route verify: the customer confirmed, go to the identity check. other_person: someone else answered. ask_again: unclear, ask again. end: the call closes right away; outcome and reason are the closing-table values for it, reason "" when the table has none. Exactly one value with route ask_again. Do not add a value for a bare greeting; the program adds it. Always include one value with route end for a person who refuses to talk or to confirm who they are; close it with the row the documents give for refusing before verification, or, if they name none, the closest row. If the documents do not name this case, its source is "derived: <why this row>" instead of an excerpt.)
  },
  "third_party": {"rules": [RULE], "intents": [{"value": "snake_case code", "meaning": "...", "route": "stay | end", "outcome": "...", "reason": "...", "source": "..."}]}
    (what the person who is not the customer may want. route end: the call closes with that outcome and reason, with no tool. A callback that is booked with a tool keeps route stay: the program closes it from the tool result.)
@@ -392,7 +392,7 @@ Return this JSON shape:
 - Purpose: Extracts the account, negotiation and confirmation sections.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'flow'
-- Approximate tokens: ~499 (characters ÷ 4)
+- Approximate tokens: ~577 (characters ÷ 4)
 
 ```text
 Extract the sections account, negotiation and confirmation. RULE means {"text": "...", "source": "verbatim excerpt"}.
@@ -402,7 +402,7 @@ Return this JSON shape:
  "account": {"rules": [RULE] (how to state the debt and the products, in which order), "products_field": "account tool response field (array) with the late products", "product_id_field": "field of one product item that identifies it for the promise tool"},
  "negotiation": {"rules": [RULE] (what to ask first, what counts as a refusal, persuasion attempts and what each proposes, what never to offer, per-product handling),
   "intents": [{"value": "snake_case code", "meaning": "...", "route": "readback | end | stay", "outcome": "...", "reason": "...", "source": "..."}]
-   (the customer's state after each turn. route readback: an agreed date and amount are ready to read back. end: the customer refuses any arrangement after the allowed attempts; give the closing-table outcome and reason. stay: keep negotiating. At least one readback and one end value.)},
+   (the customer's state after each turn. route readback: an agreed date and amount are ready to read back. end: the customer refuses any arrangement after the allowed attempts; give the closing-table outcome and reason. stay: keep negotiating. At least one readback and one end value. Only refusing to pay or to talk may use route end. Situations with their own sentence or tool (the payment was already made, the debt is denied, a transfer is requested, financial difficulty) are special paths, extracted elsewhere: never list them here, or the call would close without the sentence or the tool.)},
  "confirmation": {"rules": [RULE] (read-back, explicit confirmation, changes, one promise per product, what to say after a recorded promise, what to do when recording fails),
   "promise_product_id_field": "promise tool request field for the product id",
   "promise_date_field": "promise tool request field for the date",
@@ -420,7 +420,7 @@ Return this JSON shape:
 - Purpose: Extracts the date and amount rules that code uses to check every offer.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'offer'
-- Approximate tokens: ~500 (characters ÷ 4)
+- Approximate tokens: ~726 (characters ÷ 4)
 
 ```text
 Extract the section offer: the calendar, the date limits and the amount limits a promise must meet. Code evaluates them against the call's current date; you only copy the rule data. RULE means {"text": "...", "source": "verbatim excerpt"}.
@@ -437,7 +437,9 @@ Return this JSON shape:
   "latest_on_non_business_day": "previous | next | keep" (when a calendar-day latest date is not a business day),
   "min_amount": [{"when": [CONDITION], "field": "product field"} or {"when": [CONDITION], "value": number}, optional "share": fraction of the field or value],
   "max_amount": [same shape as min_amount],
-  "max_rejected_offers": integer (distinct customer offers that fail these checks before the call closes; use the brief's limit on attempts or proposals if it gives one)
+  "next_weekday": "following_week | upcoming | ask" (what "next <weekday>" means. following_week: that weekday in the following calendar week. upcoming: the nearest such weekday after today. Use one of these two only if the documents define "next <weekday>"; otherwise ask, and the agent asks which date is meant),
+  "max_rejected_offers": integer, at least 2 (an invalid-offer counter: how many distinct customer offers that fail the date or amount checks above a product may have before it is given up. It is NOT the number of persuasion attempts after a refusal: never copy a persuasion or attempt count here. Use 2 (one invalid offer, then the agent's counter-offer may be rejected once) unless the documents set a limit on invalid or out-of-policy offers; give the source "fallback: no invalid-offer limit in the documents"),
+  "max_rejected_offers_by_product": [{"when": [CONDITION], "value": integer, at least 2}] (only if the documents set different invalid-offer limits for different products; otherwise []. Persuasion attempts per band are not invalid-offer limits)
  },
  CONDITION is {"field": "product field", and one or more of "min": number, "max": number, "equals": value, "in": [values]} (min and max are inclusive). Product fields come from the account tool's product items in the tool contract.
  "sources": {"offer.<field>": "excerpt or fallback: why", one entry per field above},
@@ -450,7 +452,7 @@ Return this JSON shape:
 - Purpose: Extracts the closing table, the special paths and the closing tool fields.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'outcomes'
-- Approximate tokens: ~529 static + `{states}` characters ÷ 4 at runtime
+- Approximate tokens: ~837 static + `{states}` characters ÷ 4 at runtime
 
 ```text
 Extract the sections outcomes, special_paths and closing. RULE means {"text": "...", "source": "verbatim excerpt"}.
@@ -459,12 +461,20 @@ Return this JSON shape:
  "closing": {"rules": [RULE], "outcome_field": "closing tool request field for the outcome", "reason_field": "closing tool request field for the reason"},
  "outcomes": [{"outcome": "...", "reason": "... or \"\"", "when": RULE, "say": RULE (the goodbye sentence said before the closing tool; include every sentence the brief requires in that situation), "wins_over_promise": true or false (true only if this row is used even after a promise was recorded), "states": ["call-end state names below that close with this row"]}]
    (one row per outcome and reason pair the brief allows; every pair from the closing table.)
- "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (said word for word), "ask": RULE (optional: a question asked once before acting, for example whether the agent can help first), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]
+ "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (said word for word), "ask": RULE (optional; leave the key out unless the documents require one question before acting, for example whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer and waits for the answer, so it must be one question ending with "?", never an instruction), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]
    (situations that interrupt the normal flow, for example: the customer says the payment was already made, denies the debt, reports financial difficulty, asks for a different plan or for a person; or a note on one product. tool_args holds only values the brief fixes; fields the conversation must fill are left out. then close: the call closes with outcome and reason, which must be a row above. then return: the agent goes back to the step it came from (outcome and reason are still required; repeat a row's values). Do not use the identity, account, promise or closing tools here. available_in lists only steps where the situation may happen: never before identity is verified if it would disclose the account.)
+ "derived_states": {"state name": "why this row"} (every state below that the documents do not name, with the reason you chose its row; no excerpt needed),
  "sources": {},
  "overrides": [{"newer": "excerpt", "older": "excerpt", "effect": "..."}]
 }
-Call-end states (map each required state to exactly one row; an optional state left out uses the row of "default"):
+Code checks this reply; each failed check costs a repair round:
+- Every RULE (when, say, ask) has non-empty text and a source copied word for word from the documents; never "derived" or "fallback" in a rule source.
+- Each outcome and reason pair is written together in one row or sentence of the documents, copied exactly; reason is "" only when the documents give none. No pair appears twice.
+- Every special path's outcome and reason is one of the rows, also for then return.
+- tool_args keys are request fields of that tool; enum fields use an enum value from the tool contract.
+- Every state name below appears in exactly one row's states; every required state is mapped.
+- An ask is one question ending with "?" and only with then close; otherwise leave the key out.
+Call-end states. Map each required state to exactly one row. If the documents do not name a state, map it to the closest row and list it in derived_states. An optional state left out uses the row of "default":
 {states}
 ```
 
@@ -473,7 +483,7 @@ Call-end states (map each required state to exactly one row; an optional state l
 - Purpose: Meaning of each fixed call-end state, listed in the outcomes extraction call.
 - Receiver: builder model
 - Used at: builder/extract.py — {states} in EXTRACT_OUTCOMES_TASK
-- Approximate tokens: ~262 (characters ÷ 4)
+- Approximate tokens: ~287 (characters ÷ 4)
 
 ```text
 - opening_unclear (required): who answered stayed unclear after the allowed asks.
@@ -482,12 +492,12 @@ Call-end states (map each required state to exactly one row; an optional state l
 - identity_failed (required): no identity attempts are left.
 - promise_recorded (required): at least one promise was recorded.
 - promise_failed (required): recording a promise failed on every allowed attempt.
-- account_failed: the account could not be fetched.
-- offer_limit: too many offers failed the date and amount checks.
+- account_failed (required): the account could not be fetched (a technical failure).
+- offer_limit (required): a product's offers kept failing the date and amount checks; usually the refusal row.
 - turn_limit: the conversation ran too long without progress.
 - special_tool_failed: a special path's tool failed.
-- hangup: the verified customer ended the call before the closing step.
-- hangup_unverified: the call ended before identity was verified.
+- hangup (required): the verified customer ended the call before the closing step.
+- hangup_unverified (required): the call ended before identity was verified.
 - default (required): the call ends in a way no other state covers, usually no promise.
 Route values that end the call (opening answers, third-party intents, negotiation intents with route end) are mapped through their own outcome and reason; do not list them here.
 ```

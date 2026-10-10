@@ -23,6 +23,7 @@ A correct extraction lists both in `overrides`. No rule may cite the old 12th-bu
 - **Calendar:** business days Monday-Friday (`non_business_weekdays = [6, 7]`); holidays **2026-10-26, 2026-11-11, 2026-11-26, 2026-12-25, 2027-01-01** (the source writes them in five different non-ISO formats); promise date must be a business day; earliest = today (`{days: 0, unit: calendar}`).
 - **Bands:** days late 1-7: deadline **10th** business day, 1 attempt; 8-45: 7th business day, 2 attempts.
 - **"Next <weekday>"** = the following calendar week (`offer.next_weekday = "following_week"`).
+- **Invalid-offer limit:** the documents set none, so `offer.max_rejected_offers = 2` and `offer.max_rejected_offers_by_product = []`. The persuasion attempts (1 and 2) belong in `negotiation.rules`, not in this field (F-040).
 - **Amounts:** maximum = `past_due`; floor = `minimum_payment` for `credit_card`, `instalment_amount` for `personal_loan` and `car_loan`.
 - **Recording:** read back and "Do you confirm?"; create_promise retried once (`max_attempts_per_product = 2`), then `no_promise/service_error`; after a recorded promise the sentence "You will receive a text message confirming this promise."
 - **Outcome table (16 rows, from the CSV):** promise/-, paid/-, transferred/{restructuring, human, support}, no_promise/{refused, hardship, dispute, service_error}, not_verified/{failed, declined}, not_reached/{callback, no_callback, wrong_number, deceased, unclear}. A transfer after a recorded promise wins (`wins_over_promise` on the transferred rows).

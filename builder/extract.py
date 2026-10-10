@@ -50,6 +50,7 @@ from .spec import (
 from .tools_from_openapi import CALL_VARIABLES, contract_field_kind, tool_contract, tools_from_openapi
 
 MAX_REPAIR_ROUNDS = 2
+MAX_LOGGED_ISSUES = 60
 
 # Routes the intermediate JSON uses; the merge turns them into the spec's value lists.
 OPENING_ROUTES = ("verify", "other_person", "ask_again", "end")
@@ -72,6 +73,11 @@ FRAMEWORK_NAMES = dict(
 
 # Call-end states every outcome table must map; the others are optional.
 REQUIRED_FIXED_STATES = tuple(state for state in CLOSE_STATE_NAMES if state not in OPTIONAL_CLOSE_STATES)
+# Framework states briefs rarely name. Extraction must still map them, to the closest row,
+# recorded as derived (F-040); left out, they would silently fall to the default row.
+DERIVED_REQUIRED_STATES = ("account_failed", "offer_limit", "hangup", "hangup_unverified")
+REQUIRED_STATES = REQUIRED_FIXED_STATES + DERIVED_REQUIRED_STATES
+DERIVED_PREFIX = "derived"
 STAGE_NAMES = ("opening", "third_party", "identity", "account", "negotiation", "confirmation", "offer", "closing")
 
 
@@ -178,6 +184,13 @@ _MONTH_DAY = re.compile(r"(?<![A-Za-z0-9])" + _MONTH + r"\s+" + _DAY + _YEAR + r
 _ISO = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 _NUMERIC = re.compile(r"(?<![\d/.])(\d{1,2})[/.](\d{1,2})[/.](\d{4})(?![\d/.])")
 
+_WEEKDAY = r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekday|<\s*weekday\s*>)"
+_NEXT_WEEKDAY = re.compile(r"\bnext\W{0,3}" + _WEEKDAY, re.IGNORECASE)
+_NEXT_WEEKDAY_DIRECTION = {
+    "following_week": re.compile(r"\bfollowing\b|\bweek after\b|\bnext (?:calendar )?week\b|\bnext week'?s\b", re.IGNORECASE),
+    "upcoming": re.compile(r"\bnearest\b|\bupcoming\b|\bcoming\b|\bsoonest\b|\bfirst\b|\bnext such\b", re.IGNORECASE),
+}
+_PERSUASION = re.compile(r"persua|attempt", re.IGNORECASE)
 _ENDS_ITEM = re.compile(r"[.!?:|]\s*$")
 _STARTS_ITEM = re.compile(r"(\d+[.)]|[-*+|#])\s?")
 _LIST_NUMBER = re.compile(r"^\s*\d+[.)]\s", re.MULTILINE)
@@ -308,12 +321,19 @@ class _Checker:
     def known_value(self, value: str) -> bool:
         return value in self.openapi_strings or self.in_brief(value)
 
-    def excerpt(self, path: str, source: Any) -> None:
+    def excerpt(self, path: str, source: Any, *, derived_ok: bool = False) -> None:
+        """A verbatim excerpt. ``derived: <why>`` is accepted only where a call-end state is
+        derived (``derived_ok``); a rule source with a derived or fallback marker is an error."""
         if not isinstance(source, str) or not source.strip():
             self.error(path, "needs a source excerpt copied from the documents")
             return
         text = source.strip()
-        if text.lower().startswith("fallback"):
+        marker = text.lower()
+        if derived_ok and marker.startswith(DERIVED_PREFIX):
+            return
+        if marker.startswith((DERIVED_PREFIX, "fallback")):
+            self.error(path, "must be an excerpt copied from the documents; \"derived\" and \"fallback\" are "
+                       "only for derived call-end states and data sources, never for a rule")
             return
         if _normal(text) not in self.brief_normal:
             self.warn(path, f"source excerpt not found verbatim in the documents: {text[:80]!r}")
@@ -416,6 +436,7 @@ def _routed(entries: Any, routes: tuple[str, ...], path: str, check: _Checker, *
             continue
         if pairs and entry["route"] == "end":
             check.outcome_pair(where, entry.get("outcome"), entry.get("reason", ""))
+            check.excerpt(where + ".source", entry.get("source"), derived_ok=True)
         good.append(entry)
     return good
 
@@ -459,6 +480,9 @@ def _check_opening_identity(data: dict[str, Any], check: _Checker) -> None:
             check.error("opening.answers", "needs a value with route verify (the customer confirmed)")
         if answers and _count_route(answers, "ask_again") != 1:
             check.error("opening.answers", "needs exactly one value with route ask_again")
+        if answers and not _count_route(answers, "end"):
+            check.error("opening.answers", "needs a value with route end for a person who refuses to talk or to "
+                        "confirm who they are (closest row, source \"derived: ...\" if the documents name none)")
     third = data.get("third_party")
     if not isinstance(third, dict):
         check.error("third_party", "must be an object")
@@ -540,9 +564,19 @@ def _check_outcomes(data: dict[str, Any], check: _Checker) -> None:
                 check.error(where + ".states", f"state {state!r} is also mapped in outcomes[{seen[state]}]")
             else:
                 seen[state] = index
-    for state in REQUIRED_FIXED_STATES:
+    for state in REQUIRED_STATES:
         if rows and state not in seen:
-            check.error("outcomes", f"required state {state!r} is not mapped to a row")
+            check.error("outcomes", f"required state {state!r} is not mapped to a row; if the documents do not "
+                        "name it, map it to the closest row and list it in derived_states")
+    derived = data.get("derived_states", {})
+    if not isinstance(derived, dict):
+        check.error("derived_states", "must be an object {state: why}")
+    else:
+        for state, why in derived.items():
+            if state not in seen:
+                check.error(f"derived_states.{state}", "is not mapped to a row in outcomes[].states")
+            if not isinstance(why, str) or not why.strip():
+                check.error(f"derived_states.{state}", "needs a short reason for the chosen row")
     if not isinstance(data.get("special_paths"), list):
         check.error("special_paths", "must be an array (empty when the brief has none)")
 
@@ -666,8 +700,9 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
         path.setdefault("tool", "")
         path.setdefault("tool_args", {})
         path["reason"] = path.get("reason") or ""
-        if path.get("ask") in (None, {}, ""):
-            path.pop("ask", None)
+        ask = path.get("ask")
+        if not isinstance(ask, dict) or not str(ask.get("text") or "").strip():
+            path.pop("ask", None)  # an empty ask object means no question
         special_paths.append(path)
 
     provenance: dict[str, Any] = {}
@@ -677,6 +712,16 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
             provenance.update({str(key): value for key, value in reply["sources"].items()})
         if isinstance(reply.get("overrides"), list):
             overrides.extend(item for item in reply["overrides"] if isinstance(item, dict))
+    # Derived mappings carry a reason, not an excerpt (F-040).
+    for state, why in (ends.get("derived_states") or {}).items():
+        provenance[f"outcomes.state.{state}"] = f"{DERIVED_PREFIX}: {why}"
+    for prefix, entries in (
+        ("opening:", answers), ("third_party:", third_in["intents"]), ("negotiation:", negotiation_in["intents"]),
+    ):
+        for entry in entries:
+            source = str(entry.get("source") or "")
+            if entry.get("route") == "end" and source.lower().startswith(DERIVED_PREFIX):
+                provenance[f"outcomes.state.{prefix}{entry['value']}"] = source
     return {
         "spec_version": 1,
         "agent": first["agent"],
@@ -717,6 +762,20 @@ def _cross_group_checks(groups: dict[str, dict[str, Any]], check: _Checker) -> N
                     f"closes with {entry.get('outcome')}/{entry.get('reason') or '-'}, which is not a closing-table "
                     f"row; the rows are: {listed}",
                 )
+    # A negotiation value must not close a situation that needs a special path's tool:
+    # the call would close with that outcome without calling the tool.
+    tool_pairs = {
+        (path.get("outcome"), path.get("reason") or ""): path.get("id")
+        for path in groups["outcomes"].get("special_paths", []) if isinstance(path, dict) and path.get("tool")
+    }
+    for index, entry in enumerate(groups["flow"]["negotiation"]["intents"]):
+        pair = (entry.get("outcome"), entry.get("reason") or "")
+        if entry.get("route") == "end" and pair in tool_pairs:
+            check.error(
+                f"negotiation.intents[{index}]",
+                f"closes with {pair[0]}/{pair[1] or '-'}, which the special path {tool_pairs[pair]!r} closes after "
+                "calling its tool; remove this value (route end is only for refusing to pay or to talk)",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -763,6 +822,23 @@ def check_spec_data(spec: dict[str, Any], check: _Checker) -> None:
     offer = get("offer") or {}
     if isinstance(offer, dict):
         _call_variable(check, "offer.today_variable", offer.get("today_variable"))
+        # next_weekday: a definite reading only when the documents define "next <weekday>".
+        reading = offer.get("next_weekday", "ask")
+        if reading in _NEXT_WEEKDAY_DIRECTION:
+            definitions = [window for window in check.windows if _NEXT_WEEKDAY.search(window)]
+            if not definitions:
+                check.error("offer.next_weekday", "the documents do not define \"next <weekday>\"; use ask")
+            elif not any(_NEXT_WEEKDAY_DIRECTION[reading].search(window) for window in definitions):
+                check.error("offer.next_weekday", f"{reading} does not match how the documents define \"next "
+                            "<weekday>\" (following_week: the weekday in the following calendar week; upcoming: "
+                            "the nearest such weekday after today); use the reading they give, or ask")
+        # The invalid-offer limit is not the persuasion-attempt count (T-005g review, F-040).
+        provenance = get("provenance") or {}
+        for key in ("offer.max_rejected_offers", "offer.max_rejected_offers_by_product"):
+            source = str(provenance.get(key) or "")
+            if not source.lower().startswith(("fallback", DERIVED_PREFIX)) and _PERSUASION.search(source):
+                check.error(key, "cites persuasion attempts; this field counts invalid offers (failed date or amount "
+                            "checks), at least 2. Use 2 with a fallback source unless the documents limit invalid offers")
         for index, day in enumerate(offer.get("holidays") or []):
             if isinstance(day, str) and not check.date_written(day):
                 check.error(f"offer.holidays[{index}]", f"{day} is not a date written in the documents; "
@@ -827,6 +903,11 @@ def check_spec_data(spec: dict[str, Any], check: _Checker) -> None:
             check.rule(path.get(key), f"{where}.{key}")
         if "ask" in path:
             check.rule(path["ask"], where + ".ask")
+            # The skeleton speaks ``ask`` to the customer and waits for the answer.
+            ask_text = str((path["ask"] or {}).get("text") or "").strip() if isinstance(path["ask"], dict) else ""
+            if ask_text and not ask_text.endswith("?"):
+                check.error(where + ".ask", "is spoken to the customer as one question and the agent waits for the "
+                            "answer; write a question ending with '?', or leave ask out (instructions go in when/say)")
         steps = path.get("available_in")
         if not isinstance(steps, list) or not steps or any(step not in SPECIAL_STEPS for step in steps):
             check.error(where + ".available_in", f"must list steps from {list(SPECIAL_STEPS)}")
@@ -1010,6 +1091,12 @@ def extract_spec(
                     failing.setdefault(name, []).append(f"{path}: {message}")
         log("extract_round", f"round={round_number} failing_groups={','.join(sorted(failing)) or 'none'} "
             f"errors={sum(len(errors) for errors in failing.values())}")
+        # The errors themselves, so first-round failure types can be studied after a live run.
+        issues = [f"[{name}] {error}" for name, errors in sorted(failing.items()) for error in errors]
+        for issue in issues[:MAX_LOGGED_ISSUES]:
+            log("extract_issue", f"round={round_number} {issue}"[:300])
+        if len(issues) > MAX_LOGGED_ISSUES:
+            log("extract_issue", f"round={round_number} ... {len(issues) - MAX_LOGGED_ISSUES} more")
         if not failing and parsed is not None:
             break
         if round_number == MAX_REPAIR_ROUNDS:

@@ -30,6 +30,23 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-041: Repair rounds filled empty special-path questions with instructions
+
+- **Date:** 2026-10-10
+- **Brief / case:** live extraction of Brief A, Brief A+B, `tests/briefs/raw-a`, `tests/briefs/changed-a` (F-040 rerun)
+- **Run:** `traces/f040-a.print.log`, `traces/f040-raw.print.log` and the matching `.spec.json` files
+- **Symptom:** The first extraction round failed with 18 errors (Brief A) and 37 errors (raw-a), all in the outcomes group. Both runs used both repair rounds, the last allowed. In the final specs almost every closing special path had an `ask`, but the asks were instructions, not questions: "Take no promise.", "Do not describe a plan.", "Ask nothing else.". The skeleton speaks `ask` to the customer and waits for an answer. A customer who says they already paid would hear "Take no promise." and the agent would wait.
+- **Root cause:** Most likely the model returned an empty `ask` object (`text` and `source` empty) on paths without a question. Each one counted as two errors: Brief A has 9 special paths, which gives exactly 18. The repair message said only "must be a non-empty string", so the model filled the fields with an instruction instead of removing them. The trace held only error counts, not the errors, so the cause had to be inferred.
+- **Category:** extraction
+- **Fix / lesson:**
+  - The merge drops an `ask` whose text is empty, so it no longer counts as an error.
+  - A present `ask` must be one question ending with "?"; otherwise it goes to repair with the reason.
+  - The outcomes prompt says when to leave `ask` out and lists the checks the code applies.
+  - Every repair round now writes its errors to the trace (`extract_issue`, up to 60 lines).
+  - Lesson: a repair message must say how to fix an error, not only that a field is empty.
+- **Status:** fixed offline (F-040 fix)
+- **Retest:** pending (live rerun; expect few first-round errors and asks only as real questions)
+
 ### F-040: Extraction leaves internal call-end states and newer offer fields empty
 
 - **Date:** 2026-10-10
@@ -39,8 +56,13 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** The extraction prompts predate T-005g, and they do not ask the model to map framework states that have no wording in the brief.
 - **Category:** extraction
 - **Fix / lesson:** Extend the extraction prompts and validation for the T-005g fields. For framework states, ask the model to map each one to the closest brief row, and record that it was derived (provenance), not quoted. Then rerun the four comparisons.
-- **Status:** open
-- **Retest:** -
+- **Status:** fixed offline (F-040 task):
+  - The extraction prompts ask for `next_weekday` and explain that the invalid-offer limit is not the persuasion count.
+  - `account_failed`, `offer_limit`, `hangup` and `hangup_unverified` must be mapped and recorded in `derived_states`.
+  - The opening must have a decline value that closes the call.
+  - Code checks reject a `next_weekday` the documents do not define, an invalid-offer limit that cites persuasion attempts, and a negotiation value that closes a tool special path.
+  - Offline tests use recorded replies.
+- **Retest:** pending (CTO reruns A, A+B, raw-a, changed-a)
 
 ### F-039: Offer-schema fixture migration left extraction snapshots stale
 

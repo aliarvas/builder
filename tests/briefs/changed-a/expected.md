@@ -22,7 +22,8 @@ Same structure as Brief A, different values, run with `openapi-changed-a.json` (
 | Business days | Mon-Fri | **Mon-Sat** | `offer.non_business_weekdays = [7]` |
 | Holidays | 5 dates | **2026-11-30, 2026-12-24, 2026-12-26, 2027-01-04** | `offer.holidays` |
 | Earliest date | today | **tomorrow** | `offer.earliest = {days: 1, unit: calendar}` |
-| Bands (days overdue) | 1-7: 12th / 1 attempt; 8-45: 7th / 2 | **1-10: 8th / 2; 11-30: 5th / 1; 31-60: 3rd / 2** (business days) | `offer.latest`, `offer.max_rejected_offers_by_product` |
+| Bands (days overdue) | 1-7: 12th / 1 attempt; 8-45: 7th / 2 | **1-10: 8th / 2; 11-30: 5th / 1; 31-60: 3rd / 2** (business days) | `offer.latest`; attempts go to `negotiation.rules` |
+| Invalid-offer limit | not set by the brief | **not set: `max_rejected_offers = 2`, `max_rejected_offers_by_product = []`** (persuasion attempts are not copied here, F-040) | `offer.max_rejected_offers*` |
 | "Next <weekday>" | following week | **nearest after today** | `offer.next_weekday = "upcoming"` |
 | Floor | minimum_payment / instalment_amount | **min_due (card), monthly_payment (loan), 25% of arrears (overdraft)** | `offer.min_amount` (overdraft: `field: arrears, share: 0.25`) |
 | Maximum | past_due | **arrears** | `offer.max_amount` |

@@ -7,6 +7,7 @@ import json
 import threading
 from typing import Any
 
+from builder.extract import DERIVED_REQUIRED_STATES
 from builder.llm import LLMResult
 
 
@@ -60,7 +61,7 @@ def groups_from_spec(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
             "sources": {}, "overrides": [],
         },
         "offer": {"offer": s["offer"], "sources": {"offer.holidays": "recorded"}, "overrides": []},
-        "outcomes": {
+        "outcomes": _with_derived_states({
             "closing": s["closing"],
             "outcomes": [
                 {**{k: v for k, v in row.items() if k != "on"}, "states": [x for x in row["on"] if ":" not in x]}
@@ -68,8 +69,21 @@ def groups_from_spec(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
             ],
             "special_paths": s["special_paths"],
             "sources": {}, "overrides": [],
-        },
+        }),
     }
+
+
+def _with_derived_states(reply: dict[str, Any]) -> dict[str, Any]:
+    """Map framework states a written spec leaves to the default row explicitly, as the model
+    must (F-040). Same behavior: an unmapped optional state uses the default row at run time."""
+    mapped = {state for row in reply["outcomes"] for state in row["states"]}
+    default_row = next(row for row in reply["outcomes"] if "default" in row["states"])
+    reply["derived_states"] = {}
+    for state in DERIVED_REQUIRED_STATES:
+        if state not in mapped:
+            default_row["states"].append(state)
+            reply["derived_states"][state] = "not named in the spec; the default row applies"
+    return reply
 
 
 class FakeClient:

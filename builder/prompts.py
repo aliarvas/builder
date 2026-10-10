@@ -324,7 +324,10 @@ EXTRACT_OPENING_IDENTITY_TASK = PromptDefinition(
     "   (every kind of answer to the confirmation question. route verify: the customer confirmed, go to the identity "
     "check. other_person: someone else answered. ask_again: unclear, ask again. end: the call closes right away; "
     "outcome and reason are the closing-table values for it, reason \"\" when the table has none. "
-    "Exactly one value with route ask_again. Do not add a value for a bare greeting; the program adds it.)\n"
+    "Exactly one value with route ask_again. Do not add a value for a bare greeting; the program adds it. "
+    "Always include one value with route end for a person who refuses to talk or to confirm who they are; close "
+    "it with the row the documents give for refusing before verification, or, if they name none, the closest row. "
+    "If the documents do not name this case, its source is \"derived: <why this row>\" instead of an excerpt.)\n"
     " },\n"
     ' "third_party": {"rules": [RULE], "intents": [{"value": "snake_case code", "meaning": "...", '
     '"route": "stay | end", "outcome": "...", "reason": "...", "source": "..."}]}\n'
@@ -365,7 +368,10 @@ EXTRACT_FLOW_TASK = PromptDefinition(
     '"outcome": "...", "reason": "...", "source": "..."}]\n'
     "   (the customer's state after each turn. route readback: an agreed date and amount are ready to read back. "
     "end: the customer refuses any arrangement after the allowed attempts; give the closing-table outcome and reason. "
-    "stay: keep negotiating. At least one readback and one end value.)},\n"
+    "stay: keep negotiating. At least one readback and one end value. Only refusing to pay or to talk may use "
+    "route end. Situations with their own sentence or tool (the payment was already made, the debt is denied, "
+    "a transfer is requested, financial difficulty) are special paths, extracted elsewhere: never list them here, or the call would close without "
+    "the sentence or the tool.)},\n"
     ' "confirmation": {"rules": [RULE] (read-back, explicit confirmation, changes, one promise per product, '
     "what to say after a recorded promise, what to do when recording fails),\n"
     '  "promise_product_id_field": "promise tool request field for the product id",\n'
@@ -404,8 +410,17 @@ EXTRACT_OFFER_TASK = PromptDefinition(
     '  "min_amount": [{"when": [CONDITION], "field": "product field"} or {"when": [CONDITION], "value": number}, '
     'optional "share": fraction of the field or value],\n'
     '  "max_amount": [same shape as min_amount],\n'
-    '  "max_rejected_offers": integer (distinct customer offers that fail these checks before the call closes; use '
-    "the brief's limit on attempts or proposals if it gives one)\n"
+    '  "next_weekday": "following_week | upcoming | ask" (what "next <weekday>" means. following_week: that weekday '
+    "in the following calendar week. upcoming: the nearest such weekday after today. Use one of these two only if "
+    "the documents define \"next <weekday>\"; otherwise ask, and the agent asks which date is meant),\n"
+    '  "max_rejected_offers": integer, at least 2 (an invalid-offer counter: how many distinct customer offers that '
+    "fail the date or amount checks above a product may have before it is given up. It is NOT the number of "
+    "persuasion attempts after a refusal: never copy a persuasion or attempt count here. Use 2 (one invalid offer, "
+    "then the agent's counter-offer may be rejected once) unless the documents set a limit on invalid or "
+    "out-of-policy offers; give the source \"fallback: no invalid-offer limit in the documents\"),\n"
+    '  "max_rejected_offers_by_product": [{"when": [CONDITION], "value": integer, at least 2}] (only if the documents '
+    "set different invalid-offer limits for different products; otherwise []. Persuasion attempts per band are "
+    "not invalid-offer limits)\n"
     " },\n"
     " CONDITION is {\"field\": \"product field\", and one or more of \"min\": number, \"max\": number, "
     "\"equals\": value, \"in\": [values]} (min and max are inclusive). Product fields come from the account tool's "
@@ -430,7 +445,9 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     '"states": ["call-end state names below that close with this row"]}]\n'
     "   (one row per outcome and reason pair the brief allows; every pair from the closing table.)\n"
     ' "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (said word for word), '
-    '"ask": RULE (optional: a question asked once before acting, for example whether the agent can help first), '
+    '"ask": RULE (optional; leave the key out unless the documents require one question before acting, for example '
+    "whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer "
+    'and waits for the answer, so it must be one question ending with "?", never an instruction), '
     '"tool": "tool name or \\"\\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", '
     '"available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]\n'
     "   (situations that interrupt the normal flow, for example: the customer says the payment was already made, "
@@ -440,11 +457,22 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     "agent goes back to the step it came from (outcome and reason are still required; repeat a row's values). "
     "Do not use the identity, account, promise or closing tools here. available_in lists only steps where the "
     "situation may happen: never before identity is verified if it would disclose the account.)\n"
+    ' "derived_states": {"state name": "why this row"} (every state below that the documents do not name, with '
+    "the reason you chose its row; no excerpt needed),\n"
     ' "sources": {},\n'
     ' "overrides": [{"newer": "excerpt", "older": "excerpt", "effect": "..."}]\n'
     "}\n"
-    "Call-end states (map each required state to exactly one row; an optional state left out uses the row of "
-    "\"default\"):\n{states}",
+    "Code checks this reply; each failed check costs a repair round:\n"
+    "- Every RULE (when, say, ask) has non-empty text and a source copied word for word from the documents; never "
+    "\"derived\" or \"fallback\" in a rule source.\n"
+    "- Each outcome and reason pair is written together in one row or sentence of the documents, copied exactly; "
+    "reason is \"\" only when the documents give none. No pair appears twice.\n"
+    "- Every special path's outcome and reason is one of the rows, also for then return.\n"
+    "- tool_args keys are request fields of that tool; enum fields use an enum value from the tool contract.\n"
+    "- Every state name below appears in exactly one row's states; every required state is mapped.\n"
+    "- An ask is one question ending with \"?\" and only with then close; otherwise leave the key out.\n"
+    "Call-end states. Map each required state to exactly one row. If the documents do not name a state, map it to "
+    "the closest row and list it in derived_states. An optional state left out uses the row of \"default\":\n{states}",
     ("{states}",),
 )
 
@@ -458,12 +486,12 @@ CLOSE_STATE_GUIDE = PromptDefinition(
     "- identity_failed (required): no identity attempts are left.\n"
     "- promise_recorded (required): at least one promise was recorded.\n"
     "- promise_failed (required): recording a promise failed on every allowed attempt.\n"
-    "- account_failed: the account could not be fetched.\n"
-    "- offer_limit: too many offers failed the date and amount checks.\n"
+    "- account_failed (required): the account could not be fetched (a technical failure).\n"
+    "- offer_limit (required): a product's offers kept failing the date and amount checks; usually the refusal row.\n"
     "- turn_limit: the conversation ran too long without progress.\n"
     "- special_tool_failed: a special path's tool failed.\n"
-    "- hangup: the verified customer ended the call before the closing step.\n"
-    "- hangup_unverified: the call ended before identity was verified.\n"
+    "- hangup (required): the verified customer ended the call before the closing step.\n"
+    "- hangup_unverified (required): the call ended before identity was verified.\n"
     "- default (required): the call ends in a way no other state covers, usually no promise.\n"
     "Route values that end the call (opening answers, third-party intents, negotiation intents with route end) "
     "are mapped through their own outcome and reason; do not list them here.",

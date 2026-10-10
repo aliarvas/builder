@@ -312,31 +312,12 @@
    ],
    "next_weekday": "following_week",
    "max_rejected_offers": 2,
-   "max_rejected_offers_by_product": [
-    {
-     "when": [
-      {
-       "field": "days_late",
-       "min": 1,
-       "max": 7
-      }
-     ],
-     "value": 2
-    },
-    {
-     "when": [
-      {
-       "field": "days_late",
-       "min": 8,
-       "max": 45
-      }
-     ],
-     "value": 3
-    }
-   ]
+   "max_rejected_offers_by_product": []
   },
   "sources": {
-   "offer.holidays": "recorded"
+   "offer.holidays": "recorded",
+   "offer.next_weekday": "\"Next <weekday>\" means that weekday in the following calendar week.",
+   "offer.max_rejected_offers": "fallback: no invalid-offer limit in the documents"
   },
   "overrides": []
  },
@@ -414,7 +395,9 @@
      "source": "Rule 47"
     },
     "states": [
-     "default"
+     "default",
+     "offer_limit",
+     "hangup"
     ]
    },
    {
@@ -605,6 +588,12 @@
    }
   ],
   "sources": {},
-  "overrides": []
+  "overrides": [],
+  "derived_states": {
+   "offer_limit": "offers kept failing the checks: closest is the refusal row",
+   "hangup": "verified customer hung up without a promise: closest is the refusal row",
+   "account_failed": "a technical failure: closest is the service error row",
+   "hangup_unverified": "ended before verification: closest is declined before verification"
+  }
  }
 }

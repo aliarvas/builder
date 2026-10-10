@@ -18,6 +18,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from builder.spec import OPTIONAL_CLOSE_STATES  # noqa: E402
+
 
 def _sentences(text: str) -> list[str]:
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
@@ -43,6 +46,10 @@ def _state_pairs(spec: dict[str, Any]) -> dict[str, str]:
         for state in row.get("on", []):
             stage, routed, _ = state.partition(":")
             result[f"{stage} closes with {_pair(row)}" if routed else state] = _pair(row)
+    # At run time an unmapped optional state uses the default row; compare behavior, not spelling.
+    if "default" in result:
+        for state in OPTIONAL_CLOSE_STATES:
+            result.setdefault(state, result["default"])
     return result
 
 

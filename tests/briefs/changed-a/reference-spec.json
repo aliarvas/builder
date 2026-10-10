@@ -696,37 +696,9 @@
     ],
     "max_rejected_offers": 2,
     "next_weekday": "upcoming",
-    "max_rejected_offers_by_product": [
-      {
-        "when": [
-          {
-            "field": "days_overdue",
-            "min": 1,
-            "max": 10
-          }
-        ],
-        "value": 3
-      },
-      {
-        "when": [
-          {
-            "field": "days_overdue",
-            "min": 11,
-            "max": 30
-          }
-        ],
-        "value": 2
-      },
-      {
-        "when": [
-          {
-            "field": "days_overdue",
-            "min": 31,
-            "max": 60
-          }
-        ],
-        "value": 3
-      }
-    ]
+    "max_rejected_offers_by_product": []
+  },
+  "provenance": {
+    "offer.max_rejected_offers": "fallback: no invalid-offer limit in the documents"
   }
 }

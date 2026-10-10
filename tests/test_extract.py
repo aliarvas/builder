@@ -31,7 +31,7 @@ from builder.extract import (
     resolve_path,
 )
 from builder.llm import AnthropicClient, LLMError
-from builder.spec import CLOSE_STATE_NAMES
+from builder.spec import CLOSE_STATE_NAMES, OFFER_NEXT_WEEKDAY
 from builder.tools_from_openapi import tool_contract
 from tests.extract_helpers import FakeClient, as_text, groups_from_spec
 from tools.compare_spec import compare_specs
@@ -131,7 +131,9 @@ class ExtractionPipelineTests(unittest.TestCase):
     def test_routed_close_must_use_a_table_row(self):
         # The pair is written in the documents, but the outcomes call left its row out.
         outcomes = copy.deepcopy(RECORDED_A["outcomes"])
-        outcomes["outcomes"] = [row for row in outcomes["outcomes"] if (row["outcome"], row["reason"]) != ("not_verified", "declined")]
+        removed = next(row for row in outcomes["outcomes"] if (row["outcome"], row["reason"]) == ("not_verified", "declined"))
+        outcomes["outcomes"].remove(removed)
+        next(row for row in outcomes["outcomes"] if "default" in row["states"])["states"] += removed["states"]
         client = FakeClient(replies_for(RECORDED_A, BRIEF_A, outcomes=[as_text(outcomes)]))
         with self.assertRaises(ExtractionError):
             extract_spec(BRIEF_A, OPENAPI, client)
@@ -208,6 +210,144 @@ class ExtractionPipelineTests(unittest.TestCase):
         result = extract_spec(BRIEF_A, OPENAPI, client, log=lambda key, value: logs.append((key, str(value))))
         self.assertTrue(result.unmapped)
         self.assertTrue(any(key == "coverage_error" and "kind=model_call" in value for key, value in logs))
+
+
+class FrameworkStateAndOfferFieldTests(unittest.TestCase):
+    """F-040: unnamed framework states, next_weekday, and the invalid-offer limit."""
+
+    def repair_text(self, client, group):
+        return next(messages[-1]["content"] for purpose, messages in client.calls if purpose == f"repair1:{group}")
+
+    def test_derived_states_are_mapped_and_recorded_as_derived(self):
+        result, _, logs = run()
+        provenance = result.spec_data["provenance"]
+        for state in ("offer_limit", "hangup", "account_failed", "hangup_unverified"):
+            self.assertTrue(provenance[f"outcomes.state.{state}"].startswith("derived: "), state)
+        refused = next(row for row in result.spec_data["outcomes"] if row["reason"] == "refused")
+        self.assertIn("offer_limit", refused["on"])
+        self.assertFalse(any("derived" in value for key, value in logs if key == "extract_warning"))
+
+    def test_unmapped_framework_state_is_sent_back(self):
+        broken = copy.deepcopy(RECORDED_A["outcomes"])
+        for row in broken["outcomes"]:
+            row["states"] = [state for state in row["states"] if state != "offer_limit"]
+        broken["derived_states"].pop("offer_limit")
+        _, client, _ = run(outcomes=[as_text(broken), as_text(RECORDED_A["outcomes"])])
+        text = self.repair_text(client, "outcomes")
+        self.assertIn("required state 'offer_limit' is not mapped", text)
+        self.assertIn("derived_states", text)
+
+    def test_derived_state_must_be_mapped_to_a_row(self):
+        broken = copy.deepcopy(RECORDED_A["outcomes"])
+        broken["derived_states"]["turn_limit"] = "no row chosen"
+        _, client, _ = run(outcomes=[as_text(broken), as_text(RECORDED_A["outcomes"])])
+        self.assertIn("derived_states.turn_limit: is not mapped", self.repair_text(client, "outcomes"))
+
+    def test_opening_needs_a_decline_value_and_a_derived_source_is_kept(self):
+        broken = copy.deepcopy(RECORDED_A["opening_identity"])
+        broken["opening"]["answers"] = [a for a in broken["opening"]["answers"] if a["route"] != "end"]
+        fixed = copy.deepcopy(RECORDED_A["opening_identity"])
+        end = next(a for a in fixed["opening"]["answers"] if a["route"] == "end")
+        end["source"] = "derived: refusing before verification closes as declined"
+        result, client, _ = run(opening_identity=[as_text(broken), as_text(fixed)])
+        self.assertIn("needs a value with route end", self.repair_text(client, "opening_identity"))
+        self.assertEqual("derived: refusing before verification closes as declined",
+                         result.spec_data["provenance"][f"outcomes.state.opening:{end['value']}"])
+
+    def test_negotiation_value_may_not_close_a_tool_special_path(self):
+        broken = copy.deepcopy(RECORDED_A["flow"])
+        broken["negotiation"]["intents"].append({
+            "value": "insists_on_human", "meaning": "wants a person", "route": "end",
+            "outcome": "transferred", "reason": "human", "source": "recorded"})
+        _, client, _ = run(flow=[as_text(broken), as_text(RECORDED_A["flow"])])
+        self.assertIn("which the special path 'human' closes after calling its tool", self.repair_text(client, "flow"))
+
+    def check(self, brief, spec):
+        checker = _Checker(brief, tool_contract(OPENAPI), set())
+        check_spec_data(spec, checker)
+        return "\n".join(f"{path}: {message}" for path, message in checker.errors)
+
+    def test_next_weekday_needs_a_definition_in_the_documents(self):
+        brief = BRIEF_A[0][1]
+        without = re.sub(r'.*"Next <weekday>".*\n', "", brief)
+        self.assertNotEqual(brief, without)
+        spec = copy.deepcopy(FIXTURE_A)
+        self.assertNotIn("offer.next_weekday", self.check(brief, spec))
+        self.assertIn("offer.next_weekday", self.check(without, spec))
+        spec["offer"]["next_weekday"] = "ask"
+        self.assertNotIn("offer.next_weekday", self.check(without, spec))
+
+    def test_invalid_offer_limit_may_not_cite_persuasion_attempts(self):
+        spec = copy.deepcopy(FIXTURE_A)
+        spec["provenance"] = {"offer.max_rejected_offers_by_product": "| 1 to 7 | early | the 12th business day after today | 1 |  Persuasion attempts"}
+        self.assertIn("offer.max_rejected_offers_by_product: cites persuasion attempts", self.check(BRIEF_A[0][1], spec))
+        spec["provenance"] = {"offer.max_rejected_offers": "fallback: no invalid-offer limit in the documents"}
+        self.assertNotIn("max_rejected_offers", self.check(BRIEF_A[0][1], spec))
+
+    def test_invalid_offer_limit_below_two_is_repaired(self):
+        broken = copy.deepcopy(RECORDED_A["offer"])
+        broken["offer"]["max_rejected_offers_by_product"] = [{"value": 1}]
+        _, client, _ = run(offer=[as_text(broken), as_text(RECORDED_A["offer"])])
+        self.assertIn("max_rejected_offers_by_product[0].value", self.repair_text(client, "offer"))
+
+    def test_overrides_of_every_group_are_kept_once(self):
+        groups = copy.deepcopy(RECORDED_A)
+        for name in groups:
+            groups[name]["overrides"] = [{"newer": f"new {name}", "older": f"old {name}", "effect": name}]
+        result, _, _ = run(groups)
+        self.assertEqual(sorted(groups), sorted(item["effect"] for item in result.spec_data["overrides"]))
+
+    def test_derived_marker_only_for_derived_states(self):
+        spec = copy.deepcopy(FIXTURE_A)
+        spec["global_rules"].append({"text": "Always offer a discount.", "source": "derived: seems sensible"})
+        spec["opening"]["rules"].append({"text": "Be brief.", "source": "fallback: general practice"})
+        errors = self.check(BRIEF_A[0][1], spec)
+        self.assertIn("global_rules[2].source: must be an excerpt", errors)
+        self.assertIn("opening.rules[1].source: must be an excerpt", errors)
+        # Routed closing values may carry a derived source (tested through the pipeline).
+        fixed = copy.deepcopy(RECORDED_A["opening_identity"])
+        next(a for a in fixed["opening"]["answers"] if a["route"] == "end")["source"] = "derived: closest row"
+        broken = copy.deepcopy(fixed)
+        broken["global_rules"][0]["source"] = "derived: honesty"
+        _, client, _ = run(opening_identity=[as_text(broken), as_text(fixed)])
+        repair = self.repair_text(client, "opening_identity")
+        self.assertIn("global_rules[0].source: must be an excerpt", repair)
+        self.assertNotIn("answers", repair)
+
+    def test_next_weekday_reading_must_match_the_definition(self):
+        spec = copy.deepcopy(FIXTURE_A)
+        brief_a = BRIEF_A[0][1]
+        self.assertNotIn("offer.next_weekday", self.check(brief_a, spec))
+        spec["offer"]["next_weekday"] = "upcoming"
+        self.assertIn("upcoming does not match", self.check(brief_a, spec))
+        changed = (ROOT / "tests/briefs/changed-a/brief-changed-a.md").read_text(encoding="utf-8")
+        self.assertNotIn("offer.next_weekday", self.check(changed, spec))
+        spec["offer"]["next_weekday"] = "following_week"
+        self.assertIn("following_week does not match", self.check(changed, spec))
+        example_only = re.sub(r'.*"Next <weekday>".*\n', "Customers often say next Friday.\n", brief_a)
+        self.assertIn("following_week does not match", self.check(example_only, spec))
+
+    def test_empty_ask_is_dropped_and_an_instruction_ask_is_repaired(self):
+        outcomes = copy.deepcopy(RECORDED_A["outcomes"])
+        outcomes["special_paths"][0]["ask"] = {"text": "", "source": ""}
+        result, client, _ = run(outcomes=[as_text(outcomes)])
+        self.assertNotIn("repair1:outcomes", client.purposes())
+        self.assertIsNone(result.spec.special_paths[0].ask)
+        broken = copy.deepcopy(RECORDED_A["outcomes"])
+        broken["special_paths"][0]["ask"] = {"text": "Take no promise.", "source": "take no promise"}
+        _, client, logs = run(outcomes=[as_text(broken), as_text(RECORDED_A["outcomes"])])
+        self.assertIn("special_paths[0].ask: is spoken to the customer as one question", self.repair_text(client, "outcomes"))
+        issues = [value for key, value in logs if key == "extract_issue"]
+        self.assertTrue(any(value.startswith("round=0 [outcomes] special_paths[0].ask") for value in issues))
+
+    def test_compare_treats_an_unmapped_optional_state_as_the_default_row(self):
+        explicit = copy.deepcopy(FIXTURE_A)
+        refused = next(row for row in explicit["outcomes"] if "default" in row["on"])
+        refused["on"] += ["offer_limit", "hangup"]
+        self.assertEqual([], compare_specs(explicit, FIXTURE_A))
+        moved = copy.deepcopy(FIXTURE_A)
+        next(row for row in moved["outcomes"] if row["reason"] == "service_error")["on"].append("offer_limit")
+        self.assertTrue(any("offer_limit" in diff for diff in compare_specs(moved, FIXTURE_A)))
 
 
 class ValidationRuleTests(unittest.TestCase):
@@ -317,7 +457,7 @@ class ExtractionPromptTests(unittest.TestCase):
 
         # Codes from the practice fixtures and tool enums (skeleton step and state names excluded),
         # plus single-word outcome, reason and queue codes and practice-brief examples.
-        skeleton = {"third_party", "confirm_record", *CLOSE_STATE_NAMES}
+        skeleton = {"third_party", "confirm_record", *CLOSE_STATE_NAMES, *OFFER_NEXT_WEEKDAY}
         codes = {
             value for value in [*strings(FIXTURE_A), *strings(FIXTURE_B), *strings(OPENAPI)]
             if re.fullmatch(r"[a-z]+(_[a-z0-9]+)+", value) and value not in skeleton

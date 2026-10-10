@@ -641,28 +641,7 @@
     ],
     "max_rejected_offers": 2,
     "next_weekday": "following_week",
-    "max_rejected_offers_by_product": [
-      {
-        "when": [
-          {
-            "field": "days_late",
-            "min": 1,
-            "max": 7
-          }
-        ],
-        "value": 2
-      },
-      {
-        "when": [
-          {
-            "field": "days_late",
-            "min": 8,
-            "max": 45
-          }
-        ],
-        "value": 3
-      }
-    ]
+    "max_rejected_offers_by_product": []
   },
   "overrides": [
     {
@@ -677,6 +656,7 @@
     }
   ],
   "provenance": {
-    "offer.latest[0].days": "the deadline is now the 10th business day after today (was the 12th)"
+    "offer.latest[0].days": "the deadline is now the 10th business day after today (was the 12th)",
+    "offer.max_rejected_offers": "fallback: no invalid-offer limit in the documents"
   }
 }
