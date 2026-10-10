@@ -185,7 +185,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The model chose the band and counted business days from prose rules. It picked the wrong row of the band table and skipped the holiday logic.
 - **Category:** date-logic
 - **Fix / lesson:** Band, deadline, holiday and "next business day" must come from code using the account result and the extracted calendar; the prompt only receives the finished dates (T-005).
-- **Status:** open
+- **Status:** fixed offline (T-005b): a code step computes each product's earliest and latest date, business days, holidays and minimum/maximum amount from spec data and `now`; another code step checks every offer and suggests the next business day or the latest date. The prompt only receives finished dates. Retest pending (PUB-07).
 - **Retest:** -
 
 ### F-010: Identity check replayed a wrong answer, blamed a "technical issue" and read the account early
@@ -281,7 +281,7 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The model did calendar arithmetic itself from prose (business days, holidays, "next business day"). It got it wrong.
 - **Category:** date-logic
 - **Fix / lesson:** Compute dates in a code step from `now` and calendar data extracted from the brief; give the model finished facts (allowed dates, deadline, next business day).
-- **Status:** open
+- **Status:** fixed offline (T-005b): a code step computes each product's earliest and latest date, business days, holidays and minimum/maximum amount from spec data and `now`; another code step checks every offer and suggests the next business day or the latest date. The prompt only receives finished dates. Retest pending (PUB-07).
 - **Retest:** -
 
 ### F-002: Identity check ended early and account was read before verification

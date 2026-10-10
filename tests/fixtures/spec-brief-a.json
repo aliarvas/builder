@@ -171,7 +171,9 @@
     "revise_values": [
       "revise"
     ],
-    "max_attempts_per_product": 2
+    "max_attempts_per_product": 2,
+    "promise_date_field": "date",
+    "promise_amount_field": "amount"
   },
   "special_paths": [
     {
@@ -181,7 +183,7 @@
         "source": "Rule 39"
       },
       "say": {
-        "text": "Explain that payments may take one business day to appear.",
+        "text": "Thank you. Payments can take one business day to appear.",
         "source": "Rule 39"
       },
       "tool": "",
@@ -201,7 +203,7 @@
         "source": "Rule 40"
       },
       "say": {
-        "text": "Do not argue or take a promise.",
+        "text": "I understand. I will not ask you for a payment today.",
         "source": "Rule 40"
       },
       "tool": "",
@@ -221,7 +223,7 @@
         "source": "Rule 42"
       },
       "say": {
-        "text": "Transfer to the specified human queue.",
+        "text": "I am transferring you to a colleague now.",
         "source": "Rule 42"
       },
       "tool": "transfer_to_agent",
@@ -235,7 +237,11 @@
         "negotiate",
         "confirm_record"
       ],
-      "then": "close"
+      "then": "close",
+      "ask": {
+        "text": "Before I transfer you, is there anything I can help you with myself?",
+        "source": "Rule 42"
+      }
     }
   ],
   "outcomes": [
@@ -447,5 +453,81 @@
     "rules": [],
     "outcome_field": "outcome",
     "reason_field": "reason"
+  },
+  "offer": {
+    "rules": [],
+    "today_variable": "now",
+    "non_business_weekdays": [
+      6,
+      7
+    ],
+    "holidays": [
+      "2026-10-26",
+      "2026-11-11",
+      "2026-11-26",
+      "2026-12-25",
+      "2027-01-01"
+    ],
+    "promise_date_must_be_business_day": true,
+    "earliest": {
+      "days": 0,
+      "unit": "calendar"
+    },
+    "latest": [
+      {
+        "when": [
+          {
+            "field": "days_late",
+            "min": 1,
+            "max": 7
+          }
+        ],
+        "days": 12,
+        "unit": "business"
+      },
+      {
+        "when": [
+          {
+            "field": "days_late",
+            "min": 8,
+            "max": 45
+          }
+        ],
+        "days": 7,
+        "unit": "business"
+      }
+    ],
+    "latest_on_non_business_day": "previous",
+    "min_amount": [
+      {
+        "when": [
+          {
+            "field": "type",
+            "in": [
+              "credit_card"
+            ]
+          }
+        ],
+        "field": "minimum_payment"
+      },
+      {
+        "when": [
+          {
+            "field": "type",
+            "in": [
+              "personal_loan",
+              "car_loan"
+            ]
+          }
+        ],
+        "field": "instalment_amount"
+      }
+    ],
+    "max_amount": [
+      {
+        "field": "past_due"
+      }
+    ],
+    "max_rejected_offers": 3
   }
 }

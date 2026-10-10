@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ class IdentityQuestion:
 
 @dataclass(frozen=True)
 class SpecialPath:
+    """``say`` is spoken word for word; ``ask`` (optional) is a question asked first."""
+
     id: str
     when: Rule
     say: Rule
@@ -50,6 +53,7 @@ class SpecialPath:
     reason: str
     available_in: tuple[str, ...]
     then: str
+    ask: Rule | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,7 @@ class PhoneAgentSpec:
     outcomes: tuple[Outcome, ...]
     global_rules: tuple[Rule, ...]
     closing: StageSpec
+    offer: StageSpec
 
 
 def _object(value: Any, path: str) -> dict[str, Any]:
@@ -148,7 +153,8 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
         _rule(_required(agent_data, "introduction", "agent"), "agent.introduction"),
     )
     stages = {name: _stage(root, name) for name in (
-        "opening", "third_party", "identity", "account", "negotiation", "confirmation", "closing"
+        "opening", "third_party", "identity", "account", "negotiation", "confirmation", "closing",
+        "offer",
     )}
 
     questions = tuple(
@@ -194,6 +200,7 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
             _string(_required(obj, "reason", path), f"{path}.reason", empty=True),
             _string_list(obj, "available_in", path),
             _string(_required(obj, "then", path), f"{path}.then"),
+            _rule(obj["ask"], f"{path}.ask") if "ask" in obj else None,
         )
         allowed_steps = {"opening", "third_party", "identity", "negotiate", "confirm_record"}
         unknown_steps = set(special.available_in) - allowed_steps
@@ -201,6 +208,8 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
             raise SpecError(f"{path}.available_in contains unsupported steps: {sorted(unknown_steps)}")
         if special.then not in {"close", "return"}:
             raise SpecError(f"{path}.then must be 'close' or 'return'")
+        if special.ask is not None and special.then != "close":
+            raise SpecError(f"{path}.ask is supported only with then='close'")
         if special.then == "close" and (special.outcome, special.reason) not in known_outcomes:
             raise SpecError(
                 f"{path} references unknown outcome/reason: {special.outcome!r}/{special.reason!r}"
@@ -233,7 +242,7 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
         "negotiation": ("intent_variable",),
         "confirmation": (
             "product_number_field", "promise_product_id_field", "expected_count_variable",
-            "intent_variable",
+            "intent_variable", "promise_date_field", "promise_amount_field",
         ),
         "closing": ("outcome_field", "reason_field"),
     }.items():
@@ -256,9 +265,10 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
     spec = PhoneAgentSpec(
         1, agent, stages["opening"], stages["third_party"], stages["identity"], questions,
         stages["account"], stages["negotiation"], stages["confirmation"],
-        tuple(special_paths), outcomes, global_rules, stages["closing"],
+        tuple(special_paths), outcomes, global_rules, stages["closing"], stages["offer"],
     )
     _validate_close_states(spec)
+    _validate_offer(stages["offer"].data)
     return spec
 
 
@@ -266,7 +276,9 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Terminal call states the skeleton can produce. Brief-independent; the spec maps each
 # to an outcome-table row through ``outcomes[].on``.
-OPTIONAL_CLOSE_STATES = ("callback_failed", "account_failed", "turn_limit")
+OPTIONAL_CLOSE_STATES = (
+    "callback_failed", "account_failed", "turn_limit", "special_tool_failed", "offer_limit",
+)
 # Fixed call-end state names of the skeleton (state names built from spec values,
 # such as "opening:<value>", are not listed). The leakage test allows exactly these.
 CLOSE_STATE_NAMES = (
@@ -303,6 +315,99 @@ def _validate_close_states(spec: PhoneAgentSpec) -> None:
     missing = [state for state in required_close_states(spec) if state not in seen]
     if missing:
         raise SpecError("outcomes[].on does not map these call-end states: " + ", ".join(missing))
+
+
+# Offer rule vocabulary (brief-independent). See docs in _validate_offer.
+OFFER_UNITS = ("business", "calendar")
+OFFER_ADJUST = ("previous", "next", "keep")
+OFFER_WHEN_KEYS = ("field", "min", "max", "equals", "in")
+
+
+def _number(value: Any, path: str, *, minimum: float | None = None) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SpecError(f"{path} must be a number")
+    if minimum is not None and value < minimum:
+        raise SpecError(f"{path} must be at least {minimum}")
+    return float(value)
+
+
+def _int(value: Any, path: str, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise SpecError(f"{path} must be an integer of at least {minimum}")
+    return value
+
+
+def _validate_when(value: Any, path: str) -> None:
+    for index, item in enumerate(_list(value, path)):
+        where = f"{path}[{index}]"
+        obj = _object(item, where)
+        unknown = set(obj) - set(OFFER_WHEN_KEYS)
+        if unknown:
+            raise SpecError(f"{where} has unknown keys: {sorted(unknown)}")
+        _string(_required(obj, "field", where), f"{where}.field")
+        if not set(obj) & {"min", "max", "equals", "in"}:
+            raise SpecError(f"{where} needs one of min, max, equals, in")
+        for key in ("min", "max"):
+            if key in obj:
+                _number(obj[key], f"{where}.{key}")
+        if "in" in obj:
+            _list(obj["in"], f"{where}.in")
+
+
+def _validate_day_rule(obj: dict[str, Any], path: str) -> None:
+    _int(_required(obj, "days", path), f"{path}.days", minimum=0)
+    if _required(obj, "unit", path) not in OFFER_UNITS:
+        raise SpecError(f"{path}.unit must be one of {list(OFFER_UNITS)}")
+
+
+def _validate_offer(data: dict[str, Any]) -> None:
+    """Validate the offer rule format.
+
+    - today_variable: call variable holding the current date-time (ISO); system date if unset.
+    - non_business_weekdays: ISO weekday numbers (1 = Monday ... 7 = Sunday).
+    - holidays: ISO dates that are not business days.
+    - promise_date_must_be_business_day: true or false.
+    - earliest: {days, unit}; the first allowed date counted from today.
+    - latest: ordered rules {when?, days, unit}; the first rule whose ``when`` matches the
+      product decides the latest allowed date. No match: no latest date.
+    - latest_on_non_business_day: previous | next | keep (for calendar-day rules).
+    - min_amount / max_amount: ordered rules {when?, field | value, share?}; first match wins.
+    - max_rejected_offers: rejected distinct offers before the call closes.
+    ``when`` is a list of conditions on product fields: {field, min?, max?, equals?, in?}; all must hold.
+    """
+    _string(_required(data, "today_variable", "offer"), "offer.today_variable")
+    for index, day in enumerate(_list(_required(data, "non_business_weekdays", "offer"), "offer.non_business_weekdays")):
+        if _int(day, f"offer.non_business_weekdays[{index}]", minimum=1) > 7:
+            raise SpecError(f"offer.non_business_weekdays[{index}] must be 1..7")
+    for index, day in enumerate(_list(_required(data, "holidays", "offer"), "offer.holidays")):
+        try:
+            datetime.date.fromisoformat(_string(day, f"offer.holidays[{index}]"))
+        except ValueError as exc:
+            raise SpecError(f"offer.holidays[{index}] must be an ISO date (YYYY-MM-DD)") from exc
+    if not isinstance(_required(data, "promise_date_must_be_business_day", "offer"), bool):
+        raise SpecError("offer.promise_date_must_be_business_day must be true or false")
+    _validate_day_rule(_object(_required(data, "earliest", "offer"), "offer.earliest"), "offer.earliest")
+    for index, item in enumerate(_list(_required(data, "latest", "offer"), "offer.latest")):
+        where = f"offer.latest[{index}]"
+        obj = _object(item, where)
+        _validate_day_rule(obj, where)
+        _validate_when(obj.get("when", []), f"{where}.when")
+    if _required(data, "latest_on_non_business_day", "offer") not in OFFER_ADJUST:
+        raise SpecError(f"offer.latest_on_non_business_day must be one of {list(OFFER_ADJUST)}")
+    for key in ("min_amount", "max_amount"):
+        for index, item in enumerate(_list(_required(data, key, "offer"), f"offer.{key}")):
+            where = f"offer.{key}[{index}]"
+            obj = _object(item, where)
+            if ("field" in obj) == ("value" in obj):
+                raise SpecError(f"{where} needs exactly one of field or value")
+            if "field" in obj:
+                _string(obj["field"], f"{where}.field")
+            else:
+                _number(obj["value"], f"{where}.value", minimum=0)
+            if "share" in obj:
+                _number(obj["share"], f"{where}.share", minimum=0)
+            _validate_when(obj.get("when", []), f"{where}.when")
+    _int(_required(data, "max_rejected_offers", "offer"), "offer.max_rejected_offers", minimum=1)
 
 
 def load_spec(path: str | Path) -> PhoneAgentSpec:

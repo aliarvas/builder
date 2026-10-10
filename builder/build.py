@@ -156,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             workflow = build_workflow(brief_text, tools)
             trace.add("renderer", "single-step fallback (no --spec supplied)")
         trace.add("nodes", len(workflow["nodes"]))
+        trace.add("global_nodes", len(workflow.get("global_nodes", {})))
         trace.add("tools", len(tools))
         for step, step_tools in workflow_tools_by_step(workflow).items():
             trace.add("step", f"{step}: tools={','.join(step_tools) if step_tools else 'none'}")

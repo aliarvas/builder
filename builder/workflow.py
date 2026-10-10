@@ -15,13 +15,19 @@ from .prompts import (
     MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
     OPENING_TASK_TEMPLATE,
+    SPECIAL_ASK_TASK_TEMPLATE,
     SPECIAL_PATH_TASK_TEMPLATE,
     THIRD_PARTY_TASK_TEMPLATE,
     render_phone_agent_system_prompt,
     render_phone_agent_task_message,
     render_prompt,
 )
-from .spec import PhoneAgentSpec, Rule, SpecError, required_close_states
+from .offer_check import (
+    OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED_COUNT,
+    check_offer_code, offer_setup_code, promise_values_hook,
+)
+from .spec import PhoneAgentSpec, Rule, SpecError, SpecialPath, required_close_states
+from .tools_from_openapi import CALL_VARIABLES
 
 
 FIXED_TOOL_NAMES = frozenset(
@@ -192,12 +198,15 @@ except Exception:
 """
 
 
-def _promise_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
+def _with_product_number(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
+    """Let the model choose a product by its list number; a pre-hook sends the stored id."""
     result = copy.deepcopy(tool)
     body = result["function"]["parameters"]["properties"]["body"]
     properties = body.setdefault("properties", {})
     number_field = spec.confirmation.data["product_number_field"]
-    id_field = spec.confirmation.data["promise_product_id_field"]
+    id_field = spec.account.data["product_id_field"]
+    if id_field not in properties or not _model_filled(properties[id_field]):
+        return result
     properties.pop(id_field, None)
     properties[number_field] = {
         "type": "integer",
@@ -212,8 +221,123 @@ def _promise_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
         spec.account.data["products_variable"], spec.account.data["products_field"],
         number_field, id_field
     )
+    return result
+
+
+def _promise_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
+    """The model names only the product number; date, amount and id come from checked offers."""
+    result = _with_product_number(spec, tool)
+    body = result["function"]["parameters"]["properties"]["body"]
+    properties = body.setdefault("properties", {})
+    checked = (spec.confirmation.data["promise_date_field"], spec.confirmation.data["promise_amount_field"])
+    for field in checked:
+        if field not in properties:
+            raise SpecError(f"confirmation field {field!r} is not a create_promise body field")
+        properties.pop(field)
+    body["required"] = [name for name in body.get("required", []) if name not in checked]
+    result["pre_process_code"] = promise_values_hook(spec)
     result["response_mapping"] = [{"path": "data.ok", "variable": "promise_result_ok"}]
     return result
+
+
+def _model_filled(prop: dict[str, Any]) -> bool:
+    """True when the model must supply this body field (not baked by the workflow)."""
+    default = prop.get("default")
+    if not isinstance(default, str):
+        return default is None
+    match = re.fullmatch(r"\{\{([A-Za-z0-9_.]+)\}\}", default)
+    return bool(match) and match.group(1) not in CALL_VARIABLES
+
+
+def _model_fields(tool: dict[str, Any]) -> list[str]:
+    body = tool["function"]["parameters"]["properties"]["body"]
+    properties = body.get("properties", {})
+    return [name for name in body.get("required", []) if _model_filled(properties.get(name, {}))]
+
+
+SPECIAL_RESULT_PREFIX = "special_result_"
+
+
+def _special_nodes(
+    spec: PhoneAgentSpec, path: SpecialPath, key: str, by_name: dict[str, dict[str, Any]],
+    close_via: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return (global node, extra regular nodes) for one special path.
+
+    The path never asks the model whether it is finished: it speaks a fixed line, the
+    engine (or, if a value is needed from the conversation, the model) runs the tool,
+    and the exit routes on the tool result.
+    """
+    success = close_via("special:" + path.id) if path.then == "close" else "__previous__"
+    failure = close_via("special_tool_failed") if path.then == "close" else "__previous__"
+    tool = None
+    if path.tool:
+        if path.tool not in by_name:
+            raise SpecError(f"special path {path.id!r} references unavailable tool {path.tool!r}")
+        tool = _with_product_number(spec, _tool_with_baked_args(by_name[path.tool], path.tool_args, path.id))
+        # Write tools are not retried by the engine; the result decides the route.
+        tool.setdefault("config", {})["maxRetries"] = 0
+    result_variable = special_result_variable(path)
+
+    def ok_transitions() -> list[dict[str, Any]]:
+        return [
+            _transition(success, "Special-path tool succeeded", [
+                _condition(result_variable, "equals", value) for value in ("true", "True")
+            ]),
+            _transition(failure, "Special-path tool failed", [
+                _condition(result_variable, "equals", value) for value in ("false", "False")
+            ]),
+        ]
+
+    def action(node_key: str) -> dict[str, Any]:
+        if tool is None:
+            return {
+                "name": node_key, "node_type": "conversation", "task_message": path.say.text,
+                "on_enter": {"type": "tts", "text": path.say.text},
+                "passthrough": True, "passthrough_default_transition": success,
+                "transitions": [{"target_node": success, "description": "Line spoken", "condition": {"operator": "always"}}],
+            }
+        if not _model_fields(tool):
+            return {
+                "name": node_key, "node_type": "api_request",
+                "on_enter": {"type": "tts", "text": path.say.text},
+                "passthrough": True, "passthrough_default_transition": failure,
+                "pre_actions": [tool],
+                "response_mapping": [{"path": "data.ok", "variable": result_variable}],
+                "transitions": [
+                    ok_transitions()[0],
+                    {"target_node": failure, "description": "Special-path tool did not succeed", "condition": {"operator": "always"}},
+                ],
+            }
+        scoped = _response_mapping(tool, {"data.ok": result_variable})
+        return _conversation(node_key, render_prompt(
+            SPECIAL_PATH_TASK_TEMPLATE, when=path.when.text, say=path.say.text
+        ), [scoped], ok_transitions())
+
+    extra: dict[str, Any] = {}
+    if path.ask is None:
+        node = action(key)
+    else:
+        go_key = key + "_go"
+        extra[go_key] = action(go_key)
+        choice = result_variable + "_choice"
+        node = _conversation(key, render_prompt(SPECIAL_ASK_TASK_TEMPLATE, ask=path.ask.text), [], [
+            _transition(go_key, "The customer still wants this", [_condition(choice, "equals", "proceed")]),
+            _transition("__previous__", "The customer accepts help instead", [_condition(choice, "equals", "stay")]),
+        ])
+        node["on_enter"] = {"type": "tts", "text": path.ask.text}
+        node["extraction_schema"] = [{
+            "name": choice, "type": "string", "enum_values": ["proceed", "stay"],
+            "description": "proceed: the customer still insists on this request; stay: they accept help or drop it",
+            "min_confidence": 0.8,
+        }]
+    node["description"] = path.when.text
+    node["condition"] = {"operator": "matches_intent", "description": path.when.text}
+    return node, extra
+
+
+def special_result_variable(path: SpecialPath) -> str:
+    return SPECIAL_RESULT_PREFIX + re.sub(r"[^A-Za-z0-9_]+", "_", path.id)
 
 
 def _code_node(name: str, code: str, transitions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -254,7 +378,7 @@ def _confirmation_progress_code(spec: PhoneAgentSpec) -> str:
     number = "create_promise_args." + confirmation["product_number_field"]
     maximum = confirmation["max_attempts_per_product"]
     return f"""try:
-    expected_count = max(1, int(vars.get({expected!r}) or 1))
+    expected_count = max(1, int(vars.get({OFFERS_ACCEPTED_COUNT!r}) or vars.get({expected!r}) or 1))
 except Exception:
     expected_count = 1
 try:
@@ -422,9 +546,13 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
     negotiation = spec.negotiation.data
     confirmation = spec.confirmation.data
 
+    reset_variables = [
+        special_result_variable(path) for path in spec.special_paths
+    ] + [negotiation["intent_variable"], confirmation["intent_variable"]]
     used = {
         "opening", "opening_unclear", "third_party", "identity", "account", "negotiate",
         "confirm_record", "confirmation_progress", "closing", "closing_say", "close_attempt",
+        "offer_setup", "check_offer",
         "close_record", "end_call",
     }
     close_nodes: dict[str, str] = {}
@@ -442,20 +570,7 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         return close_nodes[state]
 
     close_via("turn_limit")
-    special_keys = [
-        (path, source, _special_key(path.id + "_from_" + source, used))
-        for path in spec.special_paths for source in path.available_in
-    ]
-
-    def special_transitions(step: str) -> list[dict[str, Any]]:
-        return [
-            {
-                "target_node": key,
-                "description": path.when.text,
-                "condition": {"operator": "matches_intent", "description": path.when.text},
-            }
-            for path, source, key in special_keys if source == step
-        ]
+    special_keys = [(path, _special_key(path.id, used)) for path in spec.special_paths]
 
     opening_transitions = [
         *(
@@ -476,7 +591,6 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
             _condition(opening["who_answered_variable"], "equals", value)
             for value in opening["stay_values"]
         ]),
-        *special_transitions("opening"),
     ]
 
     identity_tool = _response_mapping(by_name["verify_identity"], {
@@ -535,8 +649,7 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
                 ])
                 for value in third["close_values"]
             ),
-            *special_transitions("third_party"),
-        ]),
+            ]),
         "identity": _conversation("identity", render_prompt(
             IDENTITY_TASK_TEMPLATE, questions=questions,
             answer_verified=identity["answer_verified_field"],
@@ -551,11 +664,10 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
             _transition(close_via("identity_failed"), "No identity attempts remain", [
                 _condition("identity_attempts_left", "less_than", 1)
             ]),
-            *special_transitions("identity"),
-        ]),
+            ]),
         "account": {
             "name": "account", "node_type": "api_request", "on_enter": {"type": "silent"},
-            "passthrough": True, "passthrough_default_transition": "negotiate",
+            "passthrough": True, "passthrough_default_transition": "offer_setup",
             "pre_actions": [account_tool],
             "response_mapping": [{
                 "path": "data." + spec.account.data["products_field"],
@@ -565,22 +677,56 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
                 _transition(close_via("account_failed"), "Account retrieval failed after retry", [
                     _condition("account_failure_count", "greater_than", 0)
                 ]),
-                {"target_node": "negotiate", "description": "Account loaded", "condition": {"operator": "always"}},
+                {"target_node": "offer_setup", "description": "Account loaded", "condition": {"operator": "always"}},
             ],
         },
-        "negotiate": _conversation("negotiate", render_prompt(
-            NEGOTIATION_TASK_TEMPLATE, rules=_rule_lines(spec.account.rules + spec.negotiation.rules)
-        ), [], [
-            _transition("confirm_record", "Customer proposes an arrangement", [
-                _condition(negotiation["intent_variable"], "equals", value) for value in negotiation["confirm_values"]
+        "offer_setup": _code_node("offer_setup", offer_setup_code(spec), [
+            {"target_node": "negotiate", "description": "Product facts computed", "condition": {"operator": "always"}},
+        ]),
+        "check_offer": _code_node("check_offer", check_offer_code(spec, reset_variables), [
+            _transition("confirm_record", "Every agreed offer passed the check", [
+                _condition(OFFER_PROGRESS, "equals", "ready")
             ]),
+            _transition(close_via("offer_limit"), "Too many rejected offers", [
+                _condition(OFFER_PROGRESS, "equals", "limit")
+            ]),
+            {"target_node": "negotiate", "description": "Discuss the check result", "condition": {"operator": "always"}},
+        ]),
+        "negotiate": _conversation("negotiate", render_prompt(
+            NEGOTIATION_TASK_TEMPLATE,
+            rules=_rule_lines(spec.account.rules + spec.negotiation.rules + spec.offer.rules),
+        ), [], [
+            {
+                "target_node": "check_offer", "description": "The customer named a date and an amount",
+                "condition": {"logic": "or", "conditions": [{"logic": "and", "conditions": [
+                    {"variable": OFFER_DATE, "operator": "is_set"},
+                    _condition(OFFER_DATE, "not_equals", ""),
+                    {"variable": OFFER_AMOUNT, "operator": "is_set"},
+                    _condition(OFFER_AMOUNT, "not_equals", ""),
+                ]}]},
+            },
             *(
-                _transition(close_via("negotiation:" + value), "Negotiation ends without a proposal", [
-                    _condition(negotiation["intent_variable"], "equals", value)
-                ])
+                {
+                    "target_node": "confirm_record",
+                    "description": "The customer is done and some offers were accepted",
+                    "condition": {"logic": "or", "conditions": [{"logic": "and", "conditions": [
+                        _condition(negotiation["intent_variable"], "equals", value),
+                        _condition(OFFERS_ACCEPTED_COUNT, "greater_than", 0),
+                    ]}]},
+                }
+                for value in [*negotiation["confirm_values"], *negotiation["close_values"]]
+            ),
+            *(
+                {
+                    "target_node": close_via("negotiation:" + value),
+                    "description": "Negotiation ends without an accepted offer",
+                    "condition": {"logic": "or", "conditions": [{"logic": "and", "conditions": [
+                        _condition(negotiation["intent_variable"], "equals", value),
+                        _condition(OFFERS_ACCEPTED_COUNT, "less_than", 1),
+                    ]}]},
+                }
                 for value in negotiation["close_values"]
             ),
-            *special_transitions("negotiate"),
         ]),
         "confirm_record": _conversation("confirm_record", render_prompt(
             CONFIRM_TASK_TEMPLATE, rules=_rule_lines(spec.confirmation.rules)
@@ -593,8 +739,7 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
                 _condition("promise_result_ok", "equals", value)
                 for value in ("true", "True", "false", "False")
             ]),
-            *special_transitions("confirm_record"),
-        ]),
+            ]),
         "confirmation_progress": _code_node(
             "confirmation_progress", _confirmation_progress_code(spec), [
                 _transition(close_via("promise_recorded"), "All agreed products were recorded", [
@@ -640,25 +785,11 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         },
     }
 
-    for path, source, key in special_keys:
-        if path.tool and path.tool not in by_name:
-            raise SpecError(f"special path {path.id!r} references unavailable tool {path.tool!r}")
-        scoped = [_tool_with_baked_args(by_name[path.tool], path.tool_args, path.id)] if path.tool else []
-        conditions = (
-            [_condition(path.tool + "_success_count", "greater_than", 0), _condition(path.tool + "_failure_count", "greater_than", 0)]
-            if path.tool else []
-        )
-        target = close_via("special:" + path.id) if path.then == "close" else source
-        transitions = (
-            [_transition(target, "Special-path tool completed", conditions)]
-            if conditions else [{
-                "target_node": target, "description": "Special path handled", "is_tool_call": True,
-                "condition": {"operator": "matches_intent", "description": "The required special-path response has been given."},
-            }]
-        )
-        nodes[key] = _conversation(key, render_prompt(
-            SPECIAL_PATH_TASK_TEMPLATE, when=path.when.text, say=path.say.text
-        ), scoped, transitions)
+    global_nodes: dict[str, Any] = {}
+    for path, key in special_keys:
+        node, extra = _special_nodes(spec, path, key, by_name, close_via)
+        global_nodes[key] = node
+        nodes.update(extra)
 
     for state, key in close_nodes.items():
         nodes[key] = _code_node(key, _close_state_code(state), [
@@ -677,6 +808,18 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         "min_confidence": 0.8,
     }]
     nodes["negotiate"]["extraction_schema"] = [{
+        "name": OFFER_DATE, "type": "date",
+        "description": "The payment date the customer proposes or accepts in their last message. Empty if none.",
+        "min_confidence": 0.7,
+    }, {
+        "name": OFFER_AMOUNT, "type": "float",
+        "description": "The payment amount the customer proposes or accepts in their last message. Empty if none.",
+        "min_confidence": 0.7,
+    }, {
+        "name": OFFER_PRODUCT, "type": "integer",
+        "description": "The number of the product in the account facts list that the offer is for. Empty if unclear.",
+        "min_confidence": 0.7,
+    }, {
         "name": negotiation["intent_variable"], "type": "string",
         "description": "The customer's negotiation intent", "enum_values": negotiation["intent_values"],
         "min_confidence": 0.8,
@@ -691,6 +834,12 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         "enum_values": confirmation["intent_values"], "min_confidence": 0.8,
     }]
 
+    for path, key in special_keys:
+        allowed = set(path.available_in)
+        global_nodes[key]["excluded_nodes"] = sorted(
+            [name for name in nodes if name not in allowed] + list(global_nodes)
+        )
+
     return {
         "initial_node": "opening",
         "system_prompt": render_prompt(
@@ -700,7 +849,7 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
             rules=_rule_lines(spec.global_rules),
         ),
         "nodes": nodes,
-        "global_nodes": {},
+        "global_nodes": global_nodes,
         "test_variables": {
             "customer_id": "placeholder_customer", "first_name": "Test", "last_name": "Customer",
             "title": "Mx", "now": "2000-01-03T12:00",
@@ -717,7 +866,7 @@ def workflow_prompt_estimates(workflow: dict[str, Any]) -> dict[str, int]:
             + len(str(node.get("task_message", "")))
             + sum(len(str(tool.get("function", {}).get("description", ""))) for tool in node.get("tools", []))
         ) / 4)
-        for key, node in workflow.get("nodes", {}).items()
+        for key, node in {**workflow.get("nodes", {}), **workflow.get("global_nodes", {})}.items()
         if node.get("node_type") == "conversation"
     }
 
@@ -728,5 +877,5 @@ def workflow_tools_by_step(workflow: dict[str, Any]) -> dict[str, list[str]]:
             _tool_name(tool) + " (engine)" for tool in node.get("pre_actions", [])
             if _tool_name(tool) != "code_exec"
         ]
-        for key, node in workflow.get("nodes", {}).items()
+        for key, node in {**workflow.get("nodes", {}), **workflow.get("global_nodes", {})}.items()
     }

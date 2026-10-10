@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from builder import build
 from builder.spec import (
-    CLOSE_STATE_NAMES, OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
+    CLOSE_STATE_NAMES, OFFER_ADJUST, OFFER_UNITS, OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
 )
 from builder.tools_from_openapi import CALL_VARIABLES, tools_from_openapi
 from builder.workflow import build_spec_workflow, close_table, workflow_prompt_estimates
@@ -44,6 +44,18 @@ def edges(node):
     if node.get("max_turn_transition"):
         targets.append(node["max_turn_transition"])
     return targets
+
+
+def graph(workflow):
+    """Successors of every step, including the global nodes a step can trigger."""
+    nodes, globals_ = workflow["nodes"], workflow["global_nodes"]
+    every = {**nodes, **globals_}
+    result = {}
+    for key, node in every.items():
+        targets = [target for target in edges(node) if target != "__previous__"]
+        targets += [name for name, item in globals_.items() if key not in item["excluded_nodes"]]
+        result[key] = targets
+    return result
 
 
 def tool_names(node):
@@ -93,6 +105,172 @@ class SpecTests(unittest.TestCase):
             parse_spec(value)
 
 
+CARD = {"product_id": "p-card", "type": "credit_card", "card_last4": "0377", "past_due": 95.0,
+        "days_late": 4, "minimum_payment": 28.5}
+LOAN = {"product_id": "p-loan", "type": "personal_loan", "past_due": 300.0, "days_late": 20,
+        "instalment_amount": 150.0}
+
+
+class OfferCheckTests(unittest.TestCase):
+    """Expected values computed by hand from each fixture's offer rules."""
+
+    def run_offer(self, index, products, now, date, amount, number=None, state=None):
+        spec = load_spec(FIXTURES[index])
+        nodes = build_spec_workflow(spec, kit_tools(spec if index == 2 else None))["nodes"]
+        variables = {spec.account.data["products_variable"]: json.dumps(products), "now": now}
+        exec(code_of(nodes["offer_setup"]), {"vars": variables})
+        variables.update(state or {})
+        variables.update({"offer_date": date, "offer_amount": amount})
+        if number is not None:
+            variables["offer_product_number"] = number
+        exec(code_of(nodes["check_offer"]), {"vars": variables})
+        return variables
+
+    def assertVerdict(self, variables, verdict, date="", amount=""):
+        self.assertEqual(verdict, variables["offer_verdict"], variables["offer_message"])
+        self.assertEqual(date, variables["offer_suggested_date"])
+        self.assertEqual(amount, variables["offer_suggested_amount"])
+        self.assertEqual("", variables["offer_date"])
+        self.assertEqual("", variables["offer_amount"])
+
+    def test_code_shape(self):
+        for index in range(len(FIXTURES)):
+            spec = load_spec(FIXTURES[index])
+            nodes = build_spec_workflow(spec, kit_tools(spec if index == 2 else None))["nodes"]
+            for key in ("offer_setup", "check_offer"):
+                code = code_of(nodes[key])
+                compile(code, key, "exec")
+                self.assertNotIn("{{", code)
+                self.assertNotIn("}}", code)
+
+    def test_brief_a_rules(self):
+        now = "2026-10-14T11:00"  # Wednesday
+        cases = [
+            # (product, date, amount, verdict, suggested date, suggested amount)
+            (CARD, "2026-10-16", 95, "ok", "", ""),
+            (CARD, "2026-11-02", 28.5, "ok", "", ""),                      # early band: 12th business day, holiday skipped
+            (CARD, "2026-11-03", 95, "date_too_late", "2026-11-02", ""),
+            (CARD, "2026-10-26", 95, "date_not_business_day", "2026-10-27", ""),  # holiday -> next business day
+            (CARD, "2026-10-17", 95, "date_not_business_day", "2026-10-19", ""),  # Saturday
+            (CARD, "2026-10-13", 95, "date_too_early", "2026-10-14", ""),         # before today
+            (CARD, "2026-10-16", 20, "amount_too_low", "", 28.5),
+            (CARD, "2026-10-16", 100, "amount_too_high", "", 95.0),
+            (LOAN, "2026-10-23", 150, "ok", "", ""),                       # late band: 7th business day
+            (LOAN, "2026-10-26", 150, "date_too_late", "2026-10-23", ""),
+            (LOAN, "2026-10-20", 100, "amount_too_low", "", 150.0),
+            (CARD, "next week", 95, "missing", "", ""),
+            (CARD, "2026-10-16", "", "missing", "", ""),
+        ]
+        for product, date, amount, verdict, day, money in cases:
+            with self.subTest(product=product["type"], date=date, amount=amount):
+                self.assertVerdict(self.run_offer(0, [product], now, date, amount), verdict, day, money)
+
+    def test_brief_a_late_deadline_on_holiday_week_and_setup_facts(self):
+        variables = self.run_offer(0, [CARD, LOAN], "2026-10-14T11:00", "2026-10-16", 95, number=1)
+        facts = variables["products_facts"]
+        self.assertIn("Product 1: type credit_card", facts)
+        self.assertIn("latest date Monday 2026-11-02", facts)
+        self.assertIn("latest date Friday 2026-10-23", facts)
+        self.assertIn("minimum amount 28.50", facts)
+        self.assertIn("minimum amount 150.00", facts)
+        self.assertNotIn("p-card", facts)
+        self.assertEqual("Wednesday 2026-10-14", variables["today_text"])
+
+    def test_brief_b_products_and_progress(self):
+        now = "2026-10-14T11:00"
+        unknown = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95)
+        self.assertVerdict(unknown, "product_unknown")
+        first = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95, number=1, state={"agreed_item_count": 2})
+        self.assertVerdict(first, "ok")
+        self.assertEqual("more", first["offer_progress"])
+        self.assertEqual(1, first["offers_accepted_count"])
+        second = self.run_offer(1, [CARD, LOAN], now, "2026-10-20", 150, number=2, state={
+            "agreed_item_count": 2, "offers_accepted": first["offers_accepted"],
+        })
+        self.assertEqual("ready", second["offer_progress"])
+        self.assertEqual(2, second["offers_accepted_count"])
+        self.assertEqual(
+            "Product 1: 95.00 on Friday 2026-10-16; Product 2: 150.00 on Tuesday 2026-10-20",
+            second["offers_summary"],
+        )
+        accepted = json.loads(second["offers_accepted"])
+        self.assertEqual({"product_id": "p-loan", "date": "2026-10-20", "amount": 150.0}, accepted["2"])
+
+    def test_rejections_count_distinct_offers_up_to_the_spec_limit(self):
+        now = "2026-10-14T11:00"
+        state = {}
+        progress = []
+        for date in ("2026-11-03", "2026-11-03", "2026-11-04", "2026-11-05"):
+            variables = self.run_offer(0, [CARD], now, date, 95, state=state)
+            state = {key: variables[key] for key in ("offer_rejections", "offer_last_signature")}
+            progress.append((variables["offer_rejections"], variables["offer_progress"]))
+        self.assertEqual([(1, "rejected"), (1, "rejected"), (2, "rejected"), (3, "limit")], progress)
+
+    def test_synthetic_rules_differ_from_the_practice_briefs(self):
+        now = "2030-12-30T09:00"  # Monday; only Sunday is non-business, 2031-01-01 is a holiday
+        item = {"product_id": "n-1", "type": "car_loan", "past_due": 100.0, "days_late": 3}
+        cases = [
+            ("2030-12-30", 60, "date_too_early", "2030-12-31", ""),  # earliest: 1 business day after today
+            ("2031-01-20", 60, "ok", "", ""),                         # 20 calendar days lands on Sunday -> next
+            ("2031-01-21", 60, "date_too_late", "2031-01-20", ""),
+            ("2031-01-05", 60, "ok", "", ""),                         # Sunday allowed: no business-day rule
+            ("2031-01-06", 40, "amount_too_low", "", 50.0),           # half of past_due
+        ]
+        for date, amount, verdict, day, money in cases:
+            with self.subTest(date=date, amount=amount):
+                self.assertVerdict(self.run_offer(2, [item], now, date, amount), verdict, day, money)
+
+    def test_never_raises_on_missing_or_broken_inputs(self):
+        spec = load_spec(FIXTURES[0])
+        nodes = build_spec_workflow(spec, kit_tools())["nodes"]
+        for variables in ({}, {"account_products": "not json", "now": "garbage"},
+                          {"account_products": [None, 3], "offer_date": None, "offer_amount": "abc"}):
+            setup, check = dict(variables), dict(variables)
+            exec(code_of(nodes["offer_setup"]), {"vars": setup})
+            exec(code_of(nodes["check_offer"]), {"vars": check})
+            self.assertIn(check["offer_verdict"], {"missing", "product_unknown"})
+            self.assertTrue(check["offer_message"])
+            for key in ("products_facts", "today_text", "offers_summary", "offer_message", "offers_accepted"):
+                self.assertIn(key, setup)
+
+    def test_offer_routing(self):
+        nodes = build_spec_workflow(load_spec(FIXTURES[0]), kit_tools())["nodes"]
+        self.assertEqual("offer_setup", nodes["account"]["passthrough_default_transition"])
+        self.assertEqual(["negotiate"], edges(nodes["offer_setup"]))
+        self.assertEqual(["confirm_record", "close_offer_limit", "negotiate"], edges(nodes["check_offer"]))
+        first = nodes["negotiate"]["transitions"][0]
+        self.assertEqual("check_offer", first["target_node"])
+        rendered = json.dumps(first)
+        self.assertIn('"variable": "offer_date", "operator": "is_set"', rendered)
+        self.assertIn('"variable": "offer_amount", "operator": "not_equals", "operand": ""', rendered)
+        types = {item["name"]: item["type"] for item in nodes["negotiate"]["extraction_schema"]}
+        self.assertEqual("date", types["offer_date"])
+        self.assertEqual("float", types["offer_amount"])
+        self.assertIn("{{products_facts}}", nodes["negotiate"]["task_message"])
+        self.assertIn("{{offer_message}}", nodes["negotiate"]["task_message"])
+        self.assertIn("{{offers_summary}}", nodes["confirm_record"]["task_message"])
+
+    def test_offer_spec_validation(self):
+        base = json.loads(FIXTURES[0].read_text(encoding="utf-8"))
+        broken = [
+            (("holidays",), ["26/10/2026"], "ISO date"),
+            (("non_business_weekdays",), [0], "at least 1"),
+            (("latest", 0, "unit"), "weeks", "unit must be one of"),
+            (("min_amount", 0), {"field": "x", "value": 1}, "exactly one of field or value"),
+            (("max_rejected_offers",), 0, "max_rejected_offers"),
+            (("latest", 0, "when", 0), {"field": "x"}, "needs one of"),
+        ]
+        for path, value, message in broken:
+            data = json.loads(json.dumps(base))
+            target = data["offer"]
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(SpecError, message):
+                    parse_spec(data)
+
+
 class MultiStepWorkflowTests(unittest.TestCase):
     def render(self, index=0):
         spec = load_spec(FIXTURES[index])
@@ -120,33 +298,35 @@ class MultiStepWorkflowTests(unittest.TestCase):
             with self.subTest(fixture=FIXTURES[index].name):
                 workflow = self.render(index)
                 nodes = workflow["nodes"]
+                successors = graph(workflow)
                 reached = {workflow["initial_node"]}
                 pending = list(reached)
                 while pending:
-                    for target in edges(nodes[pending.pop()]):
+                    for target in successors[pending.pop()]:
                         if target not in reached:
                             reached.add(target)
                             pending.append(target)
-                self.assertEqual(set(nodes), reached)
+                self.assertEqual(set(nodes) | set(workflow["global_nodes"]), reached)
                 terminals = [key for key, node in nodes.items() if node["node_type"] == "end_call"]
                 self.assertEqual(["end_call"], terminals)
-                incoming_end = [source for source, node in nodes.items() if "end_call" in edges(node)]
+                incoming_end = [source for source, targets in successors.items() if "end_call" in targets]
                 self.assertEqual(["close_record"], incoming_end)
-                for node in nodes.values():
-                    if node["node_type"] in {"api_request", "code"}:
+                for node in [*nodes.values(), *workflow["global_nodes"].values()]:
+                    if node["node_type"] in {"api_request", "code"} or node.get("passthrough"):
                         self.assertEqual("always", node["transitions"][-1]["condition"]["operator"])
 
     def test_every_path_to_end_call_runs_the_close_path(self):
         for index in range(len(FIXTURES)):
             with self.subTest(fixture=FIXTURES[index].name):
-                nodes = self.render(index)["nodes"]
+                workflow = self.render(index)
+                nodes = workflow["nodes"]
+                successors = graph(workflow)
                 # Remove the close path; then end_call must be unreachable from everywhere else.
                 close_path = {"closing", "closing_say", "close_attempt", "close_record"}
                 reached = {"opening"}
                 pending = ["opening"]
                 while pending:
-                    key = pending.pop()
-                    for target in edges(nodes[key]):
+                    for target in successors[pending.pop()]:
                         if target not in reached and target not in close_path:
                             reached.add(target)
                             pending.append(target)
@@ -155,11 +335,11 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 self.assertEqual(["close_attempt"], edges(nodes["closing_say"]))
                 self.assertEqual(["close_record"], edges(nodes["close_attempt"]))
                 # Every node that leads into the close path is a state marker.
-                for key, node in nodes.items():
-                    if "closing" in edges(node):
+                for key, targets in successors.items():
+                    if "closing" in targets:
                         self.assertTrue(key.startswith("close_"), key)
-                        self.assertEqual("code", node["node_type"])
-                        self.assertIn("vars['close_state'] = ", code_of(node))
+                        self.assertEqual("code", nodes[key]["node_type"])
+                        self.assertIn("vars['close_state'] = ", code_of(nodes[key]))
 
     def test_conversation_steps_have_no_unconditional_self_loop(self):
         for index in range(len(FIXTURES)):
@@ -319,37 +499,28 @@ class MultiStepWorkflowTests(unittest.TestCase):
             self.assertNotIn("close_call", tool_names(node))
 
     def test_freya_extraction_and_passthrough_wire_shapes(self):
-        nodes = self.render()["nodes"]
+        workflow = self.render()
+        nodes = workflow["nodes"]
         for key in ("opening", "third_party", "negotiate"):
             schema = nodes[key]["extraction_schema"]
             self.assertIsInstance(schema, list)
             self.assertIn("name", schema[0])
-            self.assertIn("enum_values", schema[0])
             self.assertIn("min_confidence", schema[0])
         account = nodes["account"]
         self.assertTrue(account["passthrough"])
-        self.assertEqual("negotiate", account["passthrough_default_transition"])
         self.assertIn("response_mapping", account)
         self.assertNotIn("response_mapping", account["pre_actions"][0])
-        for key, node in nodes.items():
+        for node in [*nodes.values(), *workflow["global_nodes"].values()]:
             for transition in node.get("transitions", []):
-                self.assertNotEqual("is_tool_call", transition.get("condition", {}).get("operator"))
-        no_tool_specials = [
-            node for key, node in nodes.items()
-            if key.startswith("special_already_paid")
-        ]
-        self.assertTrue(no_tool_specials)
-        self.assertTrue(all(node["transitions"][0].get("is_tool_call") is True for node in no_tool_specials))
+                self.assertNotIn("is_tool_call", transition)
 
     def test_special_tool_args_are_baked(self):
-        nodes = self.render()
-        special = next(
-            node for key, node in nodes["nodes"].items()
-            if key.startswith("special_human")
-        )
-        body = special["tools"][0]["function"]["parameters"]["properties"]["body"]
+        nodes = self.render()["nodes"]
+        tool = nodes["special_human_go"]["pre_actions"][0]
+        body = tool["function"]["parameters"]["properties"]["body"]
         self.assertEqual("general", body["properties"]["queue"]["default"])
         self.assertNotIn("queue", body.get("required", []))
+        self.assertEqual(0, tool["config"]["maxRetries"])
 
     def test_identity_routes_on_both_true_spellings_and_attempt_count(self):
         transitions = self.render()["nodes"]["identity"]["transitions"]
@@ -359,7 +530,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertIn('"operator": "less_than", "operand": 1', rendered)
 
     def test_product_hook_maps_any_index_from_three_supported_variable_shapes(self):
-        tool = self.render()["nodes"]["confirm_record"]["tools"][0]
+        tool = self.render(1)["global_nodes"]["special_product_dispute"]["tools"][0]
         code = tool["pre_process_code"]
         compile(code, "<product-hook>", "exec")
         self.assertNotIn("{{", code)
@@ -368,18 +539,42 @@ class MultiStepWorkflowTests(unittest.TestCase):
             {"product_id": "id-c"}, {"product_id": "id-d"},
         ]
         sources = (
-            {"account_products": products},
-            {"account_products": json.dumps(products)},
+            {"late_products": products},
+            {"late_products": json.dumps(products)},
             {"get_account_response.data.products": products},
         )
         for source in sources:
-            config = {"body": {"product_number": 4}}
+            config = {"body": {"selected_product_number": 4}}
             exec(code, {"config": config, "vars": source, "json": json})
             self.assertEqual("id-d", config["body"]["product_id"])
-            self.assertNotIn("product_number", config["body"])
+            self.assertNotIn("selected_product_number", config["body"])
         for bad in (None, "", "x", 0, 5, {}, []):
-            config = {"body": {"product_number": bad}}
-            exec(code, {"config": config, "vars": {"account_products": products}, "json": json})
+            config = {"body": {"selected_product_number": bad}}
+            exec(code, {"config": config, "vars": {"late_products": products}, "json": json})
+
+    def test_promise_values_come_from_checked_offers(self):
+        tool = self.render(1)["nodes"]["confirm_record"]["tools"][0]
+        body = tool["function"]["parameters"]["properties"]["body"]
+        self.assertEqual({"customer_id", "selected_product_number"}, set(body["properties"]))
+        hook = tool["pre_process_code"]
+        compile(hook, "<promise-hook>", "exec")
+        self.assertNotIn("{{", hook)
+        self.assertNotIn("}}", hook)
+        accepted = {"1": {"product_id": "id-a", "date": "2026-10-16", "amount": 95.0},
+                    "2": {"product_id": "id-b", "date": "2026-10-20", "amount": 150.0}}
+        config = {"body": {"customer_id": "c", "selected_product_number": 2, "date": "1999-01-01"}}
+        exec(hook, {"config": config, "vars": {"offers_accepted": json.dumps(accepted)}})
+        self.assertEqual(
+            {"customer_id": "c", "product_id": "id-b", "date": "2026-10-20", "amount": 150.0}, config["body"]
+        )
+        # A single accepted offer is used even if the model names no valid number.
+        config = {"body": {"customer_id": "c", "selected_product_number": "x"}}
+        exec(hook, {"config": config, "vars": {"offers_accepted": json.dumps({"1": accepted["1"]})}})
+        self.assertEqual("id-a", config["body"]["product_id"])
+        for bad in ({}, {"offers_accepted": "x"}, {"offers_accepted": None}):
+            config = {"body": {"selected_product_number": 1}}
+            exec(hook, {"config": config, "vars": dict(bad)})
+            self.assertNotIn("product_id", config["body"])
 
     def test_confirmation_progress_supports_multiple_products_and_one_retry(self):
         node = self.render(1)["nodes"]["confirmation_progress"]
@@ -430,21 +625,80 @@ class MultiStepWorkflowTests(unittest.TestCase):
             [condition["operand"] for condition in result_transition["condition"]["conditions"]],
         )
 
-    def test_special_availability_return_and_deterministic_transition_order(self):
-        nodes = self.render(1)["nodes"]
-        self.assertFalse(any(key.startswith("special_product_dispute_from_identity") for key in nodes))
-        dispute = nodes["special_product_dispute_from_negotiate"]
-        self.assertEqual("negotiate", dispute["transitions"][0]["target_node"])
-        for key in ("opening", "third_party", "identity", "negotiate", "confirm_record"):
-            transitions = nodes[key]["transitions"]
-            first_intent = next((index for index, item in enumerate(transitions)
-                                 if item.get("condition", {}).get("operator") == "matches_intent"), None)
-            if first_intent is not None:
-                deterministic = [
-                    index for index, item in enumerate(transitions[:first_intent])
-                    if item.get("condition", {}).get("logic") == "or"
-                ]
-                self.assertTrue(deterministic, key)
+    def test_special_paths_are_global_nodes_with_scoped_exclusions(self):
+        for index in range(len(FIXTURES)):
+            spec = load_spec(FIXTURES[index])
+            workflow = self.render(index)
+            nodes, globals_ = workflow["nodes"], workflow["global_nodes"]
+            self.assertFalse([key for key in nodes if "_from_" in key])
+            self.assertEqual(len(spec.special_paths), len(globals_))
+            close_chain = {"closing", "closing_say", "close_attempt", "close_record", "end_call"}
+            for path in spec.special_paths:
+                key = "special_" + path.id
+                node = globals_[key]
+                with self.subTest(fixture=FIXTURES[index].name, path=path.id):
+                    self.assertEqual(key, node["name"])
+                    self.assertEqual("matches_intent", node["condition"]["operator"])
+                    fires_in = {name for name in nodes if name not in node["excluded_nodes"]}
+                    self.assertEqual(set(path.available_in), fires_in)
+                    self.assertTrue(close_chain <= set(node["excluded_nodes"]))
+                    self.assertTrue(set(globals_) <= set(node["excluded_nodes"]))
+                    if "identity" not in path.available_in:
+                        self.assertIn("identity", node["excluded_nodes"])
+                        self.assertIn("opening", node["excluded_nodes"])
+                    def exits(item):
+                        return [transition["target_node"] for transition in item["transitions"]]
+                    targets = exits(node) + (exits(nodes[key + "_go"]) if path.ask else [])
+                    if path.then == "return":
+                        self.assertEqual({"__previous__"}, set(targets))
+                    else:
+                        self.assertIn("close_special_" + path.id, targets)
+                        if path.ask:
+                            self.assertIn("__previous__", edges(node))
+
+    def test_no_special_path_exit_depends_on_the_model(self):
+        for index in range(len(FIXTURES)):
+            workflow = self.render(index)
+            special = {
+                key: node for key, node in {**workflow["nodes"], **workflow["global_nodes"]}.items()
+                if key.startswith("special_")
+            }
+            self.assertTrue(special)
+            for key, node in special.items():
+                for transition in node["transitions"]:
+                    self.assertNotEqual("matches_intent", transition["condition"].get("operator"), key)
+                    self.assertNotIn("is_tool_call", transition)
+            for key, node in workflow["nodes"].items():
+                for transition in node.get("transitions", []):
+                    self.assertNotEqual("matches_intent", transition["condition"].get("operator"), key)
+
+    def test_special_path_shapes_follow_the_tool(self):
+        a = self.render(0)
+        paid = a["global_nodes"]["special_already_paid"]
+        self.assertTrue(paid["passthrough"])
+        self.assertEqual("tts", paid["on_enter"]["type"])
+        human = a["global_nodes"]["special_human"]
+        self.assertEqual("tts", human["on_enter"]["type"])
+        self.assertEqual("api_request", a["nodes"]["special_human_go"]["node_type"])
+        b = self.render(1)
+        dispute = b["global_nodes"]["special_product_dispute"]
+        self.assertEqual(["add_note"], tool_names(dispute))
+        tool = dispute["tools"][0]
+        body = tool["function"]["parameters"]["properties"]["body"]
+        self.assertNotIn("product_id", body["properties"])
+        self.assertIn("selected_product_number", body["properties"])
+        self.assertIn("pre_process_code", tool)
+        self.assertEqual(0, tool["config"]["maxRetries"])
+        self.assertEqual(
+            [{"path": "data.ok", "variable": "special_result_product_dispute"}], tool["response_mapping"]
+        )
+
+    def test_ask_requires_close(self):
+        value = json.loads(FIXTURES[1].read_text(encoding="utf-8"))
+        dispute = next(item for item in value["special_paths"] if item["then"] == "return")
+        dispute["ask"] = {"text": "Are you sure?", "source": "test"}
+        with self.assertRaisesRegex(SpecError, "ask is supported only"):
+            parse_spec(value)
 
     def test_account_and_closing_have_bounded_retries_and_confirm_can_revise(self):
         nodes = self.render()["nodes"]
@@ -509,9 +763,18 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 for child in value:
                     yield from strings(child)
 
-        openapi_values = set(strings(json.loads(
-            (ROOT / "build-the-builder-v2/tools/openapi.json").read_text(encoding="utf-8")
-        )))
+        def keys(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    yield key
+                    yield from keys(child)
+            elif isinstance(value, list):
+                for child in value:
+                    yield from keys(child)
+
+        openapi = json.loads((ROOT / "build-the-builder-v2/tools/openapi.json").read_text(encoding="utf-8"))
+        # Values and field names of the bank's tool API are its contract, not brief data.
+        openapi_values = set(strings(openapi)) | set(keys(openapi))
         fixture_values = set()
         for path in FIXTURES:
             fixture_values.update(strings(json.loads(path.read_text(encoding="utf-8"))))
@@ -529,7 +792,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         required_framework_terms = {
             "third_party", "identity", "negotiate", "confirm_record",
             "close", "return", "failed",
-        } | set(CLOSE_STATE_NAMES)
+        } | set(CLOSE_STATE_NAMES) | set(OFFER_UNITS) | set(OFFER_ADJUST)
         # Call variable names are a kit contract (STARTER-KIT-FACTS), not brief data.
         allowed_fixed_tools = allowed_fixed_tools | CALL_VARIABLES
         leaked = {

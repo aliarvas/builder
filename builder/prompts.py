@@ -158,13 +158,35 @@ IDENTITY_TASK_TEMPLATE = PromptDefinition(
     ("{questions}", "{answer_verified}", "{failed_answer}", "{attempts_left}", "{exhausted_say}", "{rules}"),
 )
 NEGOTIATION_TASK_TEMPLATE = PromptDefinition(
-    "NEGOTIATION_TASK_TEMPLATE", "Discusses the account and obtains an arrangement proposal.", "phone agent",
-    "builder/workflow.py — negotiate", "Discuss only the account information already retrieved.\nRules:\n{rules}",
+    "NEGOTIATION_TASK_TEMPLATE", "Discusses the account and obtains a date and an amount per product.", "phone agent",
+    "builder/workflow.py — negotiate",
+    "Today is {{today_text}}. Account facts, computed by the bank system:\n{{products_facts}}\n"
+    "Use only these dates and amounts; never compute a deadline or a minimum yourself. "
+    "Refer to a product by its number when there are several.\n"
+    "Last offer check: {{offer_message}}\nOffers accepted so far: {{offers_summary}}\n"
+    "Get a concrete date and amount from the customer. When the last offer check names a date or "
+    "an amount, offer exactly that.\nRules:\n{rules}",
     ("{rules}",),
+)
+OFFER_VERDICT_MESSAGES = PromptDefinition(
+    "OFFER_VERDICT_MESSAGES", "One sentence per offer-check verdict, read by the agent in the negotiate step.",
+    "phone agent (via offer_message)", "builder/offer_check.py — check_offer code step",
+    "ok: The offer for product [product] is valid and noted.\n"
+    "more: Now ask about the next product.\n"
+    "missing: The date or the amount was not clear. Ask the customer for the exact date and amount.\n"
+    "product_unknown: It is not clear which product the offer is for. Ask which product, by its number.\n"
+    "date_too_early: That date is before the earliest allowed date. Offer [date] instead.\n"
+    "date_too_late: That date is after the latest date that can be recorded for this product. Offer [date], the latest possible date.\n"
+    "date_not_business_day: That date is not a business day. Offer [date], the next possible business day.\n"
+    "amount_too_low: That amount is below the minimum for this product. Offer [amount] instead.\n"
+    "amount_too_high: That amount is more than the amount due. Offer [amount].",
 )
 CONFIRM_TASK_TEMPLATE = PromptDefinition(
     "CONFIRM_TASK_TEMPLATE", "Reads back and records a confirmed arrangement.", "phone agent",
-    "builder/workflow.py — confirm_record", "Read the proposal back, obtain confirmation, then call the promise tool.\nRules:\n{rules}",
+    "builder/workflow.py — confirm_record",
+    "Checked offers: {{offers_summary}}\nRead these back exactly and ask for a clear confirmation. "
+    "After a clear yes, call the promise tool once per product, giving only its product number. "
+    "Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.\nRules:\n{rules}",
     ("{rules}",),
 )
 CLOSING_FALLBACK_SAY = PromptDefinition(
@@ -172,9 +194,19 @@ CLOSING_FALLBACK_SAY = PromptDefinition(
     "builder/workflow.py — closing code step (closing_sentence)", "Thank you for your time. Goodbye.",
 )
 SPECIAL_PATH_TASK_TEMPLATE = PromptDefinition(
-    "SPECIAL_PATH_TASK_TEMPLATE", "Handles one spec-defined exceptional customer path.", "phone agent",
-    "builder/workflow.py — special_*", "Condition: {when}\nSay or do: {say}\nUse the available tool when required, then follow the configured route.",
+    "SPECIAL_PATH_TASK_TEMPLATE",
+    "Handles a spec-defined special path whose tool needs a value only the conversation can give.",
+    "phone agent", "builder/workflow.py — global special_<id> (model-filled tool only)",
+    "The customer said: {when}\nSay exactly: {say}\n"
+    "Then call the available tool once. Fill only the fields it asks for, from this call. "
+    "Do not say anything was recorded unless the tool result says so.",
     ("{when}", "{say}"),
+)
+SPECIAL_ASK_TASK_TEMPLATE = PromptDefinition(
+    "SPECIAL_ASK_TASK_TEMPLATE", "Waits for the answer to a special path's first question.", "phone agent",
+    "builder/workflow.py — global special_<id> with ask",
+    "You asked: {ask}\nWait for the answer. Do not call any tool and do not promise anything.",
+    ("{ask}",),
 )
 
 
@@ -192,9 +224,11 @@ PROMPTS = (
     THIRD_PARTY_TASK_TEMPLATE,
     IDENTITY_TASK_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
+    OFFER_VERDICT_MESSAGES,
     CONFIRM_TASK_TEMPLATE,
     CLOSING_FALLBACK_SAY,
     SPECIAL_PATH_TASK_TEMPLATE,
+    SPECIAL_ASK_TASK_TEMPLATE,
 )
 
 

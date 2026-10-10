@@ -164,15 +164,39 @@ Rules:
 
 ## NEGOTIATION_TASK_TEMPLATE
 
-- Purpose: Discusses the account and obtains an arrangement proposal.
+- Purpose: Discusses the account and obtains a date and an amount per product.
 - Receiver: phone agent
 - Used at: builder/workflow.py — negotiate
-- Approximate tokens: ~16 static + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~109 static + `{rules}` characters ÷ 4 at runtime
 
 ```text
-Discuss only the account information already retrieved.
+Today is {{today_text}}. Account facts, computed by the bank system:
+{{products_facts}}
+Use only these dates and amounts; never compute a deadline or a minimum yourself. Refer to a product by its number when there are several.
+Last offer check: {{offer_message}}
+Offers accepted so far: {{offers_summary}}
+Get a concrete date and amount from the customer. When the last offer check names a date or an amount, offer exactly that.
 Rules:
 {rules}
+```
+
+## OFFER_VERDICT_MESSAGES
+
+- Purpose: One sentence per offer-check verdict, read by the agent in the negotiate step.
+- Receiver: phone agent (via offer_message)
+- Used at: builder/offer_check.py — check_offer code step
+- Approximate tokens: ~192 (characters ÷ 4)
+
+```text
+ok: The offer for product [product] is valid and noted.
+more: Now ask about the next product.
+missing: The date or the amount was not clear. Ask the customer for the exact date and amount.
+product_unknown: It is not clear which product the offer is for. Ask which product, by its number.
+date_too_early: That date is before the earliest allowed date. Offer [date] instead.
+date_too_late: That date is after the latest date that can be recorded for this product. Offer [date], the latest possible date.
+date_not_business_day: That date is not a business day. Offer [date], the next possible business day.
+amount_too_low: That amount is below the minimum for this product. Offer [amount] instead.
+amount_too_high: That amount is more than the amount due. Offer [amount].
 ```
 
 ## CONFIRM_TASK_TEMPLATE
@@ -180,10 +204,11 @@ Rules:
 - Purpose: Reads back and records a confirmed arrangement.
 - Receiver: phone agent
 - Used at: builder/workflow.py — confirm_record
-- Approximate tokens: ~20 static + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~73 static + `{rules}` characters ÷ 4 at runtime
 
 ```text
-Read the proposal back, obtain confirmation, then call the promise tool.
+Checked offers: {{offers_summary}}
+Read these back exactly and ask for a clear confirmation. After a clear yes, call the promise tool once per product, giving only its product number. Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.
 Rules:
 {rules}
 ```
@@ -201,13 +226,25 @@ Thank you for your time. Goodbye.
 
 ## SPECIAL_PATH_TASK_TEMPLATE
 
-- Purpose: Handles one spec-defined exceptional customer path.
+- Purpose: Handles a spec-defined special path whose tool needs a value only the conversation can give.
 - Receiver: phone agent
-- Used at: builder/workflow.py — special_*
-- Approximate tokens: ~24 static + `{when}` characters ÷ 4 + `{say}` characters ÷ 4 at runtime
+- Used at: builder/workflow.py — global special_<id> (model-filled tool only)
+- Approximate tokens: ~46 static + `{when}` characters ÷ 4 + `{say}` characters ÷ 4 at runtime
 
 ```text
-Condition: {when}
-Say or do: {say}
-Use the available tool when required, then follow the configured route.
+The customer said: {when}
+Say exactly: {say}
+Then call the available tool once. Fill only the fields it asks for, from this call. Do not say anything was recorded unless the tool result says so.
+```
+
+## SPECIAL_ASK_TASK_TEMPLATE
+
+- Purpose: Waits for the answer to a special path's first question.
+- Receiver: phone agent
+- Used at: builder/workflow.py — global special_<id> with ask
+- Approximate tokens: ~21 static + `{ask}` characters ÷ 4 at runtime
+
+```text
+You asked: {ask}
+Wait for the answer. Do not call any tool and do not promise anything.
 ```
