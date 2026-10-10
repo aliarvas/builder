@@ -32,10 +32,10 @@ from .prompts import (
 )
 from .offer_check import (
     OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED_COUNT,
-    OFFER_AMOUNT_KIND, OFFER_PROPOSED_KIND, AMOUNT_KINDS, AMOUNT_KIND_NONE, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
+    OFFER_AMOUNT_KIND, OFFER_PROPOSED_KIND, AMOUNT_KINDS, AMOUNT_KIND_NONE, OFFER_ACCEPTS, ACCEPTS_YES, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
     promise_values_hook, special_noted_code,
 )
-from .spec import ENFORCEMENT_CHECKS, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
+from .spec import ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
 from .spoken import agent_directed, spoken_words
 from .tools_from_openapi import CALL_VARIABLES
 
@@ -539,13 +539,13 @@ def _code_node(name: str, code: str, transitions: list[dict[str, Any]]) -> dict[
     }
 
 
-def _increment_code(variable: str, clear_variable: str) -> str:
+def _increment_code(variable: str, clear_variable: str, clear_value: str = "") -> str:
     return (
         "try:\n"
         f"    vars[{variable!r}] = int(vars.get({variable!r}) or 0) + 1\n"
         "except Exception:\n"
         f"    vars[{variable!r}] = 1\n"
-        f"vars[{clear_variable!r}] = ''\n"
+        f"vars[{clear_variable!r}] = {clear_value!r}\n"
     )
 
 
@@ -965,9 +965,11 @@ def _render_spec_workflow(
     negotiation = spec.negotiation.data
     confirmation = spec.confirmation.data
 
+    # (variable, reset value). Enum variables get the framework value "none": the platform
+    # rejects "" for an enum and would keep the old intent (F-052).
     reset_variables = [
-        special_result_variable(path) for path in spec.special_paths
-    ] + [negotiation["intent_variable"], confirmation["intent_variable"]]
+        (special_result_variable(path), "") for path in spec.special_paths
+    ] + [(negotiation["intent_variable"], FRAMEWORK_NONE_VALUE), (confirmation["intent_variable"], FRAMEWORK_NONE_VALUE)]
     used = {
         "opening", "opening_reask", "opening_unclear", "third_party", IDENTITY_CHECK, "identity", "account", "negotiate",
         "confirm_record", "confirmation_progress", "closing", "closing_say", "close_attempt",
@@ -1047,7 +1049,7 @@ def _render_spec_workflow(
             OPENING_REASK_TASK_TEMPLATE, **opening_values
         ), [], copy.deepcopy(opening_transitions)),
         "opening_unclear": _code_node("opening_unclear", _increment_code(
-            opening["unclear_count_variable"], opening["who_answered_variable"]
+            opening["unclear_count_variable"], opening["who_answered_variable"], FRAMEWORK_NONE_VALUE
         ) + _write_close_state([
             (f"int(vars.get({opening['unclear_count_variable']!r}) or 0) > {unclear_limit!r}", "opening_unclear"),
         ]), [
@@ -1120,11 +1122,15 @@ def _render_spec_workflow(
             {
                 # F-051: a date is enough. Without an amount the check uses the amount the
                 # agent last proposed, so a customer who only names a date is checked too.
-                "target_node": "check_offer", "description": "The customer named a date",
-                "condition": {"logic": "or", "conditions": [{"logic": "and", "conditions": [
-                    {"variable": OFFER_DATE, "operator": "is_set"},
-                    _condition(OFFER_DATE, "not_equals", ""),
-                ]}]},
+                "target_node": "check_offer", "description": "The customer named or accepted a date",
+                "condition": {"logic": "or", "conditions": [
+                    {"logic": "and", "conditions": [
+                        {"variable": OFFER_DATE, "operator": "is_set"},
+                        _condition(OFFER_DATE, "not_equals", ""),
+                    ]},
+                    # F-052: "yes, that works" to the date the agent just proposed.
+                    _condition(OFFER_ACCEPTS, "equals", ACCEPTS_YES),
+                ]},
             },
             *(
                 {
@@ -1228,17 +1234,17 @@ def _render_spec_workflow(
         nodes[key]["extraction_schema"] = [{
             "name": opening["who_answered_variable"], "type": "string",
             "description": render_prompt(WHO_ANSWERED_DESCRIPTION, greeting=OPENING_GREETING_VALUE),
-            "enum_values": [*opening["who_answered_options"], OPENING_GREETING_VALUE],
+            "enum_values": [*opening["who_answered_options"], OPENING_GREETING_VALUE, FRAMEWORK_NONE_VALUE],
             "min_confidence": 0.8,
         }]
     nodes["third_party"]["extraction_schema"] = [{
         "name": third["intent_variable"], "type": "string",
-        "description": "The third party's current intent", "enum_values": third["intent_values"],
+        "description": "The third party's current intent", "enum_values": [*third["intent_values"], FRAMEWORK_NONE_VALUE],
         "min_confidence": 0.8,
     }]
     nodes["negotiate"]["extraction_schema"] = [{
         "name": OFFER_DATE, "type": "string",
-        "description": "Copy the payment date phrase from the customer's last message unchanged. Do not resolve relative dates with the system clock. Empty if none.",
+        "description": "Copy the payment date phrase from the customer's last message unchanged. If the customer accepts a date the agent just proposed without naming it (for example \"yes, that works\"), copy the date as the agent said it. Do not resolve relative dates with the system clock. Empty if none.",
         "min_confidence": 0.7,
     }, {
         "name": OFFER_AMOUNT, "type": "float",
@@ -1251,9 +1257,14 @@ def _render_spec_workflow(
         "min_confidence": 0.7,
     }, {
         "name": OFFER_PROPOSED_KIND, "type": "string",
-        "description": "Which amount the agent proposed most recently in this conversation: full for the full amount due; minimum for the minimum or floor amount. Keep the previous value if the agent proposed no new amount.",
+        "description": "Which amount the agent proposed most recently for the product being discussed now: full for the full amount due; minimum for the minimum or floor amount. When the talk moves to another product, full unless the agent proposed that product's minimum. Keep the previous value if the agent proposed no new amount.",
         "enum_values": ["full", "minimum"],
         "min_confidence": 0.7,
+    }, {
+        "name": OFFER_ACCEPTS, "type": "string",
+        "description": "yes if the customer's last message accepts the date and amount the agent just proposed without naming a date (for example \"yes, that works\" or \"fine\"); none otherwise.",
+        "enum_values": [ACCEPTS_YES, FRAMEWORK_NONE_VALUE],
+        "min_confidence": 0.8,
     }, {
         "name": OFFER_PRODUCT, "type": "integer",
         "description": "The number of the product in the account facts list that the offer is for. Empty if unclear.",
@@ -1264,7 +1275,8 @@ def _render_spec_workflow(
             "The customer's negotiation intent. Values " + ", ".join(negotiation["close_values"])
             + " mean the customer refuses any payment or arrangement after being asked for alternatives. "
             + "Not today, not now, uncertainty about a date, or inability to pay on one proposed date are not refusal; keep negotiating."
-        ), "enum_values": negotiation["intent_values"],
+        ) + " none: only the system writes it; choose a value above.",
+        "enum_values": [*negotiation["intent_values"], FRAMEWORK_NONE_VALUE],
         "min_confidence": 0.8,
     }, {
         "name": confirmation["expected_count_variable"], "type": "integer",
@@ -1274,7 +1286,7 @@ def _render_spec_workflow(
     nodes["confirm_record"]["extraction_schema"] = [{
         "name": confirmation["intent_variable"], "type": "string",
         "description": "Whether the customer confirms or revises the read-back",
-        "enum_values": confirmation["intent_values"], "min_confidence": 0.8,
+        "enum_values": [*confirmation["intent_values"], FRAMEWORK_NONE_VALUE], "min_confidence": 0.8,
     }]
 
     for node in [*nodes.values(), *global_nodes.values()]:

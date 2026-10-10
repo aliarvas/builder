@@ -199,10 +199,11 @@ NEGOTIATION_TASK_TEMPLATE = PromptDefinition(
 OFFER_VERDICT_MESSAGES = PromptDefinition(
     "OFFER_VERDICT_MESSAGES", "One sentence per offer-check verdict, read by the agent in the negotiate step.",
     "phone agent (via offer_message)", "builder/offer_check.py — check_offer code step",
-    "ok: The offer for product [product] is valid and noted.\n"
+    "ok: The offer for the [product] is valid and noted.\n"
     "more: Now ask about the next product.\n"
-    "missing: The date or the amount was not clear. Ask the customer for the exact date and amount.\n"
-    "product_unknown: It is not clear which product the offer is for. Ask which product, by its number.\n"
+    "missing: The date was not clear. Ask the customer for the exact date.\n"
+    "amount_missing: The amount was not clear. Propose the amount again yourself: the full amount due, or the minimum if you offered it.\n"
+    "product_unknown: It is not clear which product the offer is for. Ask which product they mean.\n"
     "date_too_early: That date is before the earliest allowed date. Offer [date] instead.\n"
     "date_too_late: That date is after the latest date that can be recorded for this product. Offer [date], the latest possible date.\n"
     "date_not_business_day: That date is not a business day. Offer [date], the next possible business day.\n"

@@ -1031,7 +1031,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         variables = {"who_answered": "unclear"}
         exec(code, {"vars": variables})
         self.assertEqual(1, variables["opening_unclear_count"])
-        self.assertEqual("", variables["who_answered"])
+        self.assertEqual("none", variables["who_answered"])  # F-052: an enum value, never ""
         self.assertNotIn("close_state", variables)
         exec(code, {"vars": variables})
         self.assertEqual(2, variables["opening_unclear_count"])
@@ -1050,7 +1050,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 field = node["extraction_schema"][0]
                 with self.subTest(fixture=FIXTURES[index].name, step=key):
                     self.assertEqual(opening["who_answered_variable"], field["name"])
-                    self.assertEqual([*opening["who_answered_options"], OPENING_GREETING_VALUE], field["enum_values"])
+                    self.assertEqual([*opening["who_answered_options"], OPENING_GREETING_VALUE, "none"], field["enum_values"])
                     self.assertIn(OPENING_GREETING_VALUE + ":", field["description"])
                     self.assertNotIn(f'"operand": "{OPENING_GREETING_VALUE}"', json.dumps(node["transitions"]))
                     variables = {opening["who_answered_variable"]: OPENING_GREETING_VALUE}

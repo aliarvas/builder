@@ -42,6 +42,7 @@ from .prompts import (
 from .spoken import agent_directed, spoken_words
 from .spec import (
     CLOSE_STATE_NAMES,
+    FRAMEWORK_NONE_VALUE,
     OPENING_GREETING_VALUE,
     OPTIONAL_CLOSE_STATES,
     PhoneAgentSpec,
@@ -434,7 +435,7 @@ def _routed(entries: Any, routes: tuple[str, ...], path: str, check: _Checker, *
             continue
         if value in seen:
             check.error(where + ".value", f"repeats {value!r}")
-        if value == OPENING_GREETING_VALUE:
+        if value in (OPENING_GREETING_VALUE, FRAMEWORK_NONE_VALUE):
             check.error(where + ".value", f"{value!r} is reserved; the program adds it")
         seen.add(value)
         if entry.get("route") not in routes:

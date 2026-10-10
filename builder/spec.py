@@ -248,6 +248,11 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
             f"opening.who_answered_options must not contain {OPENING_GREETING_VALUE!r}; "
             "the builder adds it for a bare greeting"
         )
+    for stage_name, key in (("opening", "who_answered_options"), ("third_party", "intent_values"),
+                            ("negotiation", "intent_values"), ("confirmation", "intent_values")):
+        if FRAMEWORK_NONE_VALUE in (stages[stage_name].data.get(key) or []):
+            raise SpecError(f"{stage_name}.{key} must not contain {FRAMEWORK_NONE_VALUE!r}; "
+                            "the builder uses it to reset the variable")
     _string_list(stages["third_party"].data, "intent_values", "third_party")
     _string_list(stages["third_party"].data, "close_values", "third_party")
     _string_list(stages["negotiation"].data, "intent_values", "negotiation")
@@ -305,6 +310,9 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Who-answered value the builder adds for a bare greeting or a line check ("Hello?").
 # It routes nowhere: the opening step stays and asks again, and it never counts as unclear.
 OPENING_GREETING_VALUE = "greeting"
+# Value the builder writes to reset an enum variable (F-052). The platform rejects "" for an
+# enum, so a reset with "" silently kept the old value. It routes nowhere.
+FRAMEWORK_NONE_VALUE = "none"
 
 # Terminal call states the skeleton can produce. Brief-independent; the spec maps each
 # to an outcome-table row through ``outcomes[].on``.

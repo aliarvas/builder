@@ -350,6 +350,12 @@ class FrameworkStateAndOfferFieldTests(unittest.TestCase):
         spec["account"]["product_label_field"] = ""
         self.assertNotIn("product_label_field", self.check(BRIEF_A[0][1], spec))
 
+    def test_none_is_a_reserved_routed_value(self):
+        broken = copy.deepcopy(RECORDED_A["flow"])
+        broken["negotiation"]["intents"][-1]["value"] = "none"
+        _, client, _ = run(flow=[as_text(broken), as_text(RECORDED_A["flow"])])
+        self.assertIn("'none' is reserved", self.repair_text(client, "flow"))
+
     def test_compare_treats_an_unmapped_optional_state_as_the_default_row(self):
         explicit = copy.deepcopy(FIXTURE_A)
         refused = next(row for row in explicit["outcomes"] if "default" in row["on"])

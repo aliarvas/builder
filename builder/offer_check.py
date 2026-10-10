@@ -11,7 +11,7 @@ import json
 from typing import Any
 
 from .prompts import OFFER_VERDICT_MESSAGES
-from .spec import PhoneAgentSpec
+from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec
 
 # Workflow variables owned by the offer steps (framework names, not brief data).
 OFFER_DATE = "offer_date"
@@ -22,7 +22,10 @@ OFFER_AMOUNT_KIND = "offer_amount_kind"
 OFFER_PROPOSED_KIND = "offer_proposed_kind"
 AMOUNT_KINDS = ("full", "minimum", "other")
 # Written instead of "" to reset the amount kind: the platform rejects a value outside the enum.
-AMOUNT_KIND_NONE = "none"
+AMOUNT_KIND_NONE = FRAMEWORK_NONE_VALUE
+# F-052: the customer accepts the date (and amount) the agent just proposed without naming it.
+OFFER_ACCEPTS = "offer_accepts_proposal"
+ACCEPTS_YES = "yes"
 OFFER_PRODUCT = "offer_product_number"
 OFFER_PROGRESS = "offer_progress"
 OFFERS_ACCEPTED = "offers_accepted"
@@ -44,7 +47,7 @@ def _verdict_messages() -> dict[str, str]:
     return messages
 
 
-def _config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, Any]:
+def _config(spec: PhoneAgentSpec, reset_variables: list[tuple[str, str]]) -> dict[str, Any]:
     offer = spec.offer.data
     return {
         "offer": {key: value for key, value in offer.items() if key != "rules"},
@@ -499,6 +502,7 @@ vars['offer_rejections_by_product'] = json.dumps(dict())
 vars['offer_last_signatures_by_product'] = json.dumps(dict())
 vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
 vars[CONFIG['proposed_kind_var']] = 'full'
+vars[CONFIG['accepts_var']] = CONFIG['kind_none']
 vars[CONFIG['progress']] = 'none'
 """
 
@@ -517,6 +521,9 @@ try:
     except Exception:
         number = 1 if len(products) == 1 else None
     raw_day = vars.get(CONFIG['date_var'])
+    if not str(raw_day or '').strip() and vars.get(CONFIG['accepts_var']) == CONFIG['accepts_yes']:
+        # "Yes, that works": the date the last check proposed.
+        raw_day = vars.get('offer_suggested_date') or ''
     day = resolve_offer_day(raw_day)
     amount = parse_amount(vars.get(CONFIG['amount_var']))
     if number is None or not (1 <= number <= len(products)):
@@ -540,7 +547,7 @@ try:
         elif amount is None and amount_kind == 'minimum':
             amount = low
         if amount is None or amount <= 0:
-            verdict = 'missing'
+            verdict = 'amount_missing'
         elif day < earliest:
             # Before the counted earliest date: too early. On or after it, the date was only
             # moved because it is not a business day (for example today is a holiday).
@@ -564,6 +571,8 @@ try:
             vars[CONFIG['proposed_kind_var']] = 'full'
         else:
             verdict = 'ok'
+            # The next product starts again from the full amount (F-052).
+            vars[CONFIG['proposed_kind_var']] = 'full'
             accepted = accepted_offers()
             accepted[str(number)] = dict(
                 product_id=product.get(CONFIG['product_id_field']), date=day.isoformat(), amount=round(amount, 2)
@@ -574,7 +583,7 @@ try:
             # Ready when every returned product has an accepted offer or a note.
             progress = 'ready' if len(handled_numbers(accepted)) >= len(products) else 'more'
     signature = str(number) + '|' + str(vars.get(CONFIG['date_var'])) + '|' + str(vars.get(CONFIG['amount_var'])) + '|' + str(vars.get(CONFIG['amount_kind_var']))
-    if verdict not in ('ok', 'missing', 'product_unknown', 'date_ambiguous'):
+    if verdict not in ('ok', 'missing', 'amount_missing', 'product_unknown', 'date_ambiguous'):
         rejection_key = str(number)
         rejection_counts = vars.get('offer_rejections_by_product')
         last_signatures = vars.get('offer_last_signatures_by_product')
@@ -616,7 +625,9 @@ except Exception:
 message = CONFIG['messages'].get(verdict, CONFIG['messages'].get('missing', ''))
 shown_day = say_confirmation_day(suggest_day) if verdict == 'date_ambiguous' else say_day(suggest_day)
 message = message.replace('[date]', shown_day).replace('[amount]', say_amount(suggest_amount))
-message = message.replace('[product]', str(number) if number is not None else 'unknown')
+products_now = load_products()
+named = product_name(number, products_now[number - 1], len(products_now)) if number and 1 <= number <= len(products_now) else 'product'
+message = message.replace('[product]', named)
 if progress == 'more':
     message = message + ' ' + CONFIG['messages'].get('more', '')
 vars['offer_verdict'] = verdict
@@ -627,8 +638,9 @@ vars[CONFIG['progress']] = progress
 vars[CONFIG['date_var']] = ''
 vars[CONFIG['amount_var']] = ''
 vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
-for name in CONFIG['reset']:
-    vars[name] = ''
+vars[CONFIG['accepts_var']] = CONFIG['kind_none']
+for name, value in CONFIG['reset']:
+    vars[name] = value
 """
 
 
@@ -689,6 +701,7 @@ def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, 
         "progress": OFFER_PROGRESS, "product_var": OFFER_PRODUCT, "date_var": OFFER_DATE,
         "amount_var": OFFER_AMOUNT, "amount_kind_var": OFFER_AMOUNT_KIND,
         "proposed_kind_var": OFFER_PROPOSED_KIND, "kind_none": AMOUNT_KIND_NONE,
+        "accepts_var": OFFER_ACCEPTS, "accepts_yes": ACCEPTS_YES,
         "number_field": spec.confirmation.data["product_number_field"],
         "id_field": spec.confirmation.data["promise_product_id_field"],
         "date_field": spec.confirmation.data["promise_date_field"],

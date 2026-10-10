@@ -7,9 +7,9 @@ import json
 import unittest
 from pathlib import Path
 
-from builder.offer_check import AMOUNT_KIND_NONE, OFFER_AMOUNT_KIND, OFFER_PROPOSED_KIND
+from builder.offer_check import AMOUNT_KIND_NONE, OFFER_ACCEPTS, OFFER_AMOUNT_KIND, OFFER_PROPOSED_KIND
 from builder.prompts import NEGOTIATION_TASK_TEMPLATE
-from builder.spec import parse_spec
+from builder.spec import SpecError, parse_spec
 from builder.tools_from_openapi import tools_from_openapi
 from builder.workflow import build_spec_workflow
 
@@ -96,7 +96,8 @@ class DateOnlyTests(unittest.TestCase):
 
     def test_other_amount_without_a_number_is_missing(self):
         result = Call().turn(offer_date="2026-10-16", **{OFFER_AMOUNT_KIND: "other"})
-        self.assertEqual("missing", result["offer_verdict"])
+        self.assertEqual("amount_missing", result["offer_verdict"])
+        self.assertIn("Propose the amount again yourself", result["offer_message"])
 
     def test_a_late_date_alone_is_checked_not_invented(self):
         result = Call().turn(offer_date="2026-11-03")  # after the early-band deadline
@@ -132,3 +133,77 @@ class NegotiationPromptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+LOAN = {"product_id": "p-loan", "type": "personal_loan", "past_due": 300.0, "days_late": 20,
+        "instalment_amount": 150.0}
+
+
+class FollowUpTests(unittest.TestCase):
+    """F-052: proposal per product, date-less acceptance, date-only missing message, enum resets."""
+
+    def test_next_product_starts_from_the_full_amount(self):
+        call = Call(products=(CARD, LOAN))
+        call.turn(offer_date="2026-10-16", offer_amount=10, offer_product_number=1)   # below the floor
+        call.turn(offer_date="2026-10-16", offer_product_number=1)                    # floor accepted
+        self.assertEqual(28.5, call.accepted()["1"]["amount"])
+        self.assertEqual("full", call.vars[OFFER_PROPOSED_KIND])
+        call.turn(offer_date="2026-10-20", offer_product_number=2)                    # only a date
+        self.assertEqual(300.0, call.accepted()["2"]["amount"])
+
+    def test_yes_to_the_proposed_date_is_checked_with_that_date(self):
+        call = Call()
+        first = call.turn(offer_date="2026-11-03")          # after the deadline: the check proposes 2026-11-02
+        self.assertEqual("2026-11-02", first["offer_suggested_date"])
+        negotiate = call.nodes["negotiate"]
+        self.assertTrue(any(c.get("variable") == OFFER_ACCEPTS and c.get("operand") == "yes"
+                            for c in negotiate["transitions"][0]["condition"]["conditions"]))
+        second = call.turn(**{OFFER_ACCEPTS: "yes"})
+        self.assertEqual("ok", second["offer_verdict"], second["offer_message"])
+        self.assertEqual("2026-11-02", call.accepted()["1"]["date"])
+        self.assertEqual("none", call.vars[OFFER_ACCEPTS])
+
+    def test_yes_without_a_proposed_date_asks_for_the_date(self):
+        result = Call().turn(**{OFFER_ACCEPTS: "yes"})
+        self.assertEqual("missing", result["offer_verdict"])
+        self.assertEqual("The date was not clear. Ask the customer for the exact date.", result["offer_message"])
+        self.assertNotIn("amount", result["offer_message"])
+
+    def test_ok_message_names_the_product(self):
+        result = Call().turn(offer_date="2026-10-16")
+        self.assertIn("credit card ending 0377", result["offer_message"])
+        self.assertNotIn("product 1", result["offer_message"])
+
+    def test_old_intent_cannot_skip_the_second_product(self):
+        spec = parse_spec(copy.deepcopy(FIXTURE_A))
+        intent = spec.negotiation.data["intent_variable"]
+        proposal = spec.negotiation.data["confirm_values"][0]
+        call = Call(products=(CARD, LOAN))
+        result = call.turn(offer_date="2026-10-16", offer_product_number=1, **{intent: proposal})
+        self.assertEqual("more", result["offer_progress"])
+        schema = {item["name"]: item for item in call.nodes["negotiate"]["extraction_schema"]}
+        self.assertEqual("none", call.vars[intent])
+        self.assertIn("none", schema[intent]["enum_values"])
+        to_confirm = [t for t in call.nodes["negotiate"]["transitions"] if t["target_node"] == "confirm_record"]
+        for transition in to_confirm:
+            for group in transition["condition"]["conditions"]:
+                self.assertFalse(all(call.vars.get(c["variable"]) == c["operand"] if c["operator"] == "equals"
+                                     else float(call.vars.get(c["variable"]) or 0) > c["operand"]
+                                     for c in group["conditions"]))
+
+    def test_every_enum_reset_writes_an_allowed_value(self):
+        spec = parse_spec(copy.deepcopy(FIXTURE_A))
+        call = Call()
+        call.turn(offer_date="2026-10-16")
+        schemas = {item["name"]: item for node in call.nodes.values() for item in node.get("extraction_schema", [])}
+        for name in (spec.negotiation.data["intent_variable"], spec.confirmation.data["intent_variable"],
+                     OFFER_AMOUNT_KIND, OFFER_ACCEPTS, OFFER_PROPOSED_KIND):
+            self.assertIn(call.vars[name], schemas[name]["enum_values"], name)
+
+    def test_none_is_reserved_in_spec_value_lists(self):
+        for stage, key in (("opening", "who_answered_options"), ("third_party", "intent_values"),
+                           ("negotiation", "intent_values"), ("confirmation", "intent_values")):
+            data = copy.deepcopy(FIXTURE_A)
+            data[stage][key] = [*data[stage][key], "none"]
+            with self.assertRaises(SpecError, msg=f"{stage}.{key}"):
+                parse_spec(data)

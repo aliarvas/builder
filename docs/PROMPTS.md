@@ -218,13 +218,14 @@ Rules:
 - Purpose: One sentence per offer-check verdict, read by the agent in the negotiate step.
 - Receiver: phone agent (via offer_message)
 - Used at: builder/offer_check.py — check_offer code step
-- Approximate tokens: ~201 (characters ÷ 4)
+- Approximate tokens: ~226 (characters ÷ 4)
 
 ```text
-ok: The offer for product [product] is valid and noted.
+ok: The offer for the [product] is valid and noted.
 more: Now ask about the next product.
-missing: The date or the amount was not clear. Ask the customer for the exact date and amount.
-product_unknown: It is not clear which product the offer is for. Ask which product, by its number.
+missing: The date was not clear. Ask the customer for the exact date.
+amount_missing: The amount was not clear. Propose the amount again yourself: the full amount due, or the minimum if you offered it.
+product_unknown: It is not clear which product the offer is for. Ask which product they mean.
 date_too_early: That date is before the earliest allowed date. Offer [date] instead.
 date_too_late: That date is after the latest date that can be recorded for this product. Offer [date], the latest possible date.
 date_not_business_day: That date is not a business day. Offer [date], the next possible business day.

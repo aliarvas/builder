@@ -30,6 +30,32 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-054: The model computes proposal dates itself and gets the weekday wrong
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-07 chat on version 13 (ledger **passed**)
+- **Run:** customer `c_564b6f62-f39`, scratchpad `pub07v13.json`
+- **Symptom:** First persuasion: "I can offer a payment of 540 on Friday, 2026-10-17." With `now` = Wednesday 2026-10-14, Friday is the 16th; the 17th is a Saturday. The date was also read as ISO.
+- **Root cause:** Brief rules for persuasion name dates relative to the calendar ("last business day of this week"). The prompt gives the rule but not the dates, so the model does calendar arithmetic, which ARCHITECTURE says it must not do.
+- **Category:** date-logic
+- **Fix / lesson:** Give the negotiate step a computed, spoken calendar: today, the business days of this and next week up to the deadline (weekday + spoken date), the deadline, and the per-product amounts. The prompt says to use only these dates. Generic, from spec calendar data and `now`.
+- **Status:** open
+- **Retest:** -
+
+### F-053: After the offer check, the agent printed "_call:check_offer{...}" instead of the check result
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-07 chat on version 13 (ledger **passed**)
+- **Run:** customer `c_564b6f62-f39`
+- **Symptom:** The customer said "Monday the 26th" (a holiday). Routing went `negotiate → check_offer → negotiate` in the same turn, and the agent's message was `_call:check_offer{amount:540.0,date:"2026-10-26"}`. It should have said the check message (offer the next business day). The F-051 prompt rule did not stop it.
+- **Root cause:** On re-entry the dialogue model sees the code step's function call in its history and imitates it as text, instead of voicing `offer_message`.
+- **Category:** honesty / policy
+- **Fix / lesson:** Do not leave the check result to the model. When the verdict is not `ok`, speak `offer_message` deterministically (a code step with a `tts` line, the form that works live, then back to `negotiate` waiting for the customer). When the verdict is `ok` and more is needed, the same. Keep the model's free text for the customer's answers only.
+- **Status:** open
+- **Retest:** -
+
+**PUB-07 passed the ledger on version 13** (holiday 26 Oct → promise 27 Oct, 540, one `create_promise`, one `close_call` = `promise`). The judge would likely fail it on F-053 and F-054.
+
 ### F-051: Offer check never runs when the customer gives only a date; the model invents limits
 
 - **Date:** 2026-10-11
