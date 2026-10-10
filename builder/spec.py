@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,8 @@ class Outcome:
     outcome: str
     reason: str
     when: Rule
+    say: Rule
+    on: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,7 @@ class PhoneAgentSpec:
     special_paths: tuple[SpecialPath, ...]
     outcomes: tuple[Outcome, ...]
     global_rules: tuple[Rule, ...]
+    closing: StageSpec
 
 
 def _object(value: Any, path: str) -> dict[str, Any]:
@@ -136,7 +140,7 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
         _rule(_required(agent_data, "introduction", "agent"), "agent.introduction"),
     )
     stages = {name: _stage(root, name) for name in (
-        "opening", "third_party", "identity", "account", "negotiation", "confirmation"
+        "opening", "third_party", "identity", "account", "negotiation", "confirmation", "closing"
     )}
 
     questions = tuple(
@@ -155,6 +159,8 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
             _string(_required(obj := _object(item, f"outcomes[{index}]"), "outcome", f"outcomes[{index}]"), f"outcomes[{index}].outcome"),
             _string(_required(obj, "reason", f"outcomes[{index}]"), f"outcomes[{index}].reason", empty=True),
             _rule(_required(obj, "when", f"outcomes[{index}]"), f"outcomes[{index}].when"),
+            _rule(_required(obj, "say", f"outcomes[{index}]"), f"outcomes[{index}].say"),
+            _string_list(obj, "on", f"outcomes[{index}]"),
         )
         for index, item in enumerate(_list(_required(root, "outcomes", "$"), "outcomes"))
     )
@@ -210,17 +216,21 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
     for stage_name, keys in {
         "opening": ("who_answered_variable", "unclear_count_variable", "confirmation_question", "unclear_instruction"),
         "third_party": ("intent_variable",),
-        "identity": ("verified_field", "attempts_left_field"),
+        "identity": (
+            "verified_field", "attempts_left_field", "answer_verified_field",
+            "failed_answer_instruction", "exhausted_say",
+        ),
         "account": ("products_field", "products_variable", "product_id_field"),
         "negotiation": ("intent_variable",),
         "confirmation": (
             "product_number_field", "promise_product_id_field", "expected_count_variable",
             "intent_variable",
         ),
+        "closing": ("outcome_field", "reason_field"),
     }.items():
         for key in keys:
             raw = _required(stages[stage_name].data, key, stage_name)
-            if key in {"confirmation_question", "unclear_instruction"}:
+            if key in {"confirmation_question", "unclear_instruction", "failed_answer_instruction", "exhausted_say"}:
                 _rule(raw, f"{stage_name}.{key}")
             else:
                 _string(raw, f"{stage_name}.{key}")
@@ -230,12 +240,54 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
     max_unclear = _required(stages["opening"].data, "max_unclear_asks", "opening")
     if not isinstance(max_unclear, int) or isinstance(max_unclear, bool) or max_unclear < 1:
         raise SpecError("opening.max_unclear_asks must be a positive integer")
+    address_with = _string_list(stages["opening"].data, "address_with", "opening")
+    if not address_with or any(not _IDENTIFIER.fullmatch(name) for name in address_with):
+        raise SpecError("opening.address_with must list call variable names (letters, digits, _)")
 
-    return PhoneAgentSpec(
+    spec = PhoneAgentSpec(
         1, agent, stages["opening"], stages["third_party"], stages["identity"], questions,
         stages["account"], stages["negotiation"], stages["confirmation"],
-        tuple(special_paths), outcomes, global_rules,
+        tuple(special_paths), outcomes, global_rules, stages["closing"],
     )
+    _validate_close_states(spec)
+    return spec
+
+
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Terminal call states the skeleton can produce. Brief-independent; the spec maps each
+# to an outcome-table row through ``outcomes[].on``.
+OPTIONAL_CLOSE_STATES = ("callback_failed", "account_failed", "turn_limit")
+
+
+def required_close_states(spec: PhoneAgentSpec) -> tuple[str, ...]:
+    """States that every spec must map to an outcome row (``default`` is the fallback)."""
+    return (
+        *("opening:" + value for value in spec.opening.data["close_values"]),
+        "opening_unclear",
+        *("third_party:" + value for value in spec.third_party.data["close_values"]),
+        "callback_scheduled",
+        "identity_failed",
+        *("negotiation:" + value for value in spec.negotiation.data["close_values"]),
+        "promise_recorded",
+        "promise_failed",
+        "default",
+    )
+
+
+def _validate_close_states(spec: PhoneAgentSpec) -> None:
+    allowed = set(required_close_states(spec)) | set(OPTIONAL_CLOSE_STATES)
+    seen: dict[str, int] = {}
+    for index, outcome in enumerate(spec.outcomes):
+        for state in outcome.on:
+            if state not in allowed:
+                raise SpecError(f"outcomes[{index}].on has unknown state {state!r}; allowed: {sorted(allowed)}")
+            if state in seen:
+                raise SpecError(f"outcomes[{index}].on repeats state {state!r} (also in outcomes[{seen[state]}])")
+            seen[state] = index
+    missing = [state for state in required_close_states(spec) if state not in seen]
+    if missing:
+        raise SpecError("outcomes[].on does not map these call-end states: " + ", ".join(missing))
 
 
 def load_spec(path: str | Path) -> PhoneAgentSpec:

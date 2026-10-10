@@ -132,8 +132,10 @@ MULTI_STEP_SYSTEM_PROMPT_TEMPLATE = PromptDefinition(
 
 OPENING_TASK_TEMPLATE = PromptDefinition(
     "OPENING_TASK_TEMPLATE", "Opens the call and identifies who answered.", "phone agent",
-    "builder/workflow.py — opening", "Say: {introduction}\nAsk: {question}\nIf unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
-    ("{introduction}", "{question}", "{unclear}", "{forbidden}", "{rules}"),
+    "builder/workflow.py — opening",
+    "Say: {introduction}\nThe person to ask for is {address}. Use these words when you address them.\n"
+    "Ask: {question}\nIf unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
+    ("{introduction}", "{address}", "{question}", "{unclear}", "{forbidden}", "{rules}"),
 )
 THIRD_PARTY_TASK_TEMPLATE = PromptDefinition(
     "THIRD_PARTY_TASK_TEMPLATE", "Handles a person other than the customer.", "phone agent",
@@ -142,8 +144,17 @@ THIRD_PARTY_TASK_TEMPLATE = PromptDefinition(
 )
 IDENTITY_TASK_TEMPLATE = PromptDefinition(
     "IDENTITY_TASK_TEMPLATE", "Asks ordered identity questions and uses the verification tool.", "phone agent",
-    "builder/workflow.py — identity", "Ask these questions in order, then call the identity tool:\n{questions}\nRules:\n{rules}",
-    ("{questions}", "{rules}"),
+    "builder/workflow.py — identity",
+    "Ask these security questions one at a time, in order. Call the identity tool with each answer:\n{questions}\n"
+    "Convert the customer's spoken answer into the tool format yourself. Never ask the customer to say a technical format.\n"
+    "After each tool result:\n"
+    "- {answer_verified} is true: acknowledge briefly and ask the next question.\n"
+    "- {answer_verified} is false: say the answer did not match. Do not thank them as if it passed. "
+    "Ask the same question again; never move to the next question until this one is verified. {failed_answer}\n"
+    "- The action was not carried out: ask for the same answer again; it is not a wrong answer.\n"
+    "- {attempts_left} is 0: {exhausted_say} Ask nothing more and give no account details.\n"
+    "Rules:\n{rules}",
+    ("{questions}", "{answer_verified}", "{failed_answer}", "{attempts_left}", "{exhausted_say}", "{rules}"),
 )
 NEGOTIATION_TASK_TEMPLATE = PromptDefinition(
     "NEGOTIATION_TASK_TEMPLATE", "Discusses the account and obtains an arrangement proposal.", "phone agent",
@@ -155,10 +166,9 @@ CONFIRM_TASK_TEMPLATE = PromptDefinition(
     "builder/workflow.py — confirm_record", "Read the proposal back, obtain confirmation, then call the promise tool.\nRules:\n{rules}",
     ("{rules}",),
 )
-CLOSING_TASK_TEMPLATE = PromptDefinition(
-    "CLOSING_TASK_TEMPLATE", "Records the applicable disposition before ending the call.", "phone agent",
-    "builder/workflow.py — closing", "Select the supported outcome from this table, call the closing tool, and remain truthful about its result:\n{outcomes}",
-    ("{outcomes}",),
+CLOSING_FALLBACK_SAY = PromptDefinition(
+    "CLOSING_FALLBACK_SAY", "Spoken goodbye when the matched outcome row has an empty closing sentence.", "phone agent (fixed spoken line)",
+    "builder/workflow.py — closing code step (closing_say)", "Thank you for your time. Goodbye.",
 )
 SPECIAL_PATH_TASK_TEMPLATE = PromptDefinition(
     "SPECIAL_PATH_TASK_TEMPLATE", "Handles one spec-defined exceptional customer path.", "phone agent",
@@ -182,7 +192,7 @@ PROMPTS = (
     IDENTITY_TASK_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
     CONFIRM_TASK_TEMPLATE,
-    CLOSING_TASK_TEMPLATE,
+    CLOSING_FALLBACK_SAY,
     SPECIAL_PATH_TASK_TEMPLATE,
 )
 

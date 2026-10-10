@@ -30,6 +30,68 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-023: Freya staging returned 503/504 on several chat turns
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-03 manual chat test on the multi-step agent
+- **Run:** workflow `b0bdd6e6`, published version 3, call `da86613c-a3c8-4f68-b8f3-7e2ae5f1b638`; request IDs `86a430c5…`, `d97b1a01…`, `12b28e5b…`, `ece5648a…`, `06239925…`
+- **Symptom:** About half of the turns failed with HTTP 503 ("Internal server error") or 504. A failed turn was not recorded in the call and made no tool call. Resending the same message usually worked, sometimes only after a pause. The last turn (in the closing step) never got through, so the closing behavior was not observed.
+- **Root cause:** Unknown. The failed turns tended to be ones where a tool call or a step change was due. It may be platform instability (staging, weekend), or our hooks may fail on the server. The call record lists no `problems`.
+- **Category:** platform
+- **Fix / lesson:** The chat driver needs one automatic retry with a pause. A simulation run (approved) would show whether the errors are ours, because the platform would then report them per call. Ask the organizers if 503s persist.
+- **Status:** open (TO-CONFIRM)
+- **Retest:** -
+
+### F-022: Closing step does not know what to say or which outcome to record
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-03 manual chat test
+- **Run:** same call as F-023
+- **Symptom:** After the third wrong identity answer, the agent correctly moved to the closing step, but it asked again for the phone digits instead of telling the customer to use the app or a branch. No `close_call` was seen before the test stopped (see F-023).
+- **Root cause:** The closing prompt only shows the outcome table. It does not know why the call is ending, and the identity step's rules do not carry over. This is review finding T-004 #5(a)/(d), deferred to T-005.
+- **Category:** routing
+- **Fix / lesson:** T-005a: every path that ends the call now goes through a small step that records why (identity exhausted, third party, promise recorded or failed, special path, turn limit, ...). A code step picks outcome, reason and closing sentence from the spec's outcome table (each row lists the call-end states it covers and its closing sentence). The sentence is spoken as a fixed line, then the engine runs `close_call` with the baked values (one retry), then the call ends. The model can no longer choose, skip or change the outcome. The spec fails to load if a call-end state has no outcome row.
+- **Status:** fixed offline (T-005a, not committed); open: whether a fixed line on a passthrough code step is spoken in chat before the engine call (TO-CONFIRM)
+- **Retest:** -
+
+### F-021: Routing right after a tool result is suppressed in chat
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-03 manual chat test
+- **Run:** same call as F-023
+- **Symptom:** The third wrong identity answer left 0 attempts, and the mapped counter was 0, but the agent stayed in the identity step for that turn and asked for the next question. It only moved to the closing step on the customer's next message.
+- **Root cause:** Freya evaluates routing after the tool result but suppresses it with "Missing prior assistant message". In this run, routing on a tool result happened only on the next user turn, not in the same turn as the kit docs suggest.
+- **Category:** platform
+- **Fix / lesson:** T-005a, two layers. (1) Conversation steps no longer have an unconditional self-loop: the log showed the step re-entering itself on every turn, which likely leaves no assistant message in the current step when the tool result arrives. With no match the engine stays in the step anyway (kit docs). (2) The identity prompt itself says the failure sentence and asks nothing more when no attempts are left, so a one-turn delay does no harm. A passthrough code step after the tool would not help, because the route into it is the one being suppressed.
+- **Status:** fixed offline (T-005a); cause of the suppression is TO-CONFIRM in the next approved chat test. Check also voice.
+- **Retest:** -
+
+### F-020: Agent said "thank you" and moved on after a failed identity answer
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-03 manual chat test
+- **Run:** same call as F-023
+- **Symptom:** After each wrong birth date (`verified: false`), the agent said "Thank you. Now, please provide the last four digits of your phone number." It did not tell the customer the answer did not match, and asked for the next field even though the date of birth was never verified. Once it also asked the customer to repeat a spoken date in YYYY-MM-DD format instead of converting it.
+- **Root cause:** The post-hook sentence ("these fields are false, treat as NOT satisfied") arrived correctly, but the identity prompt lists the questions in order and gives no rule for a failed answer. The spec fixture has no wrong-answer wording, and the model follows the question list. The format instruction for the answer was read aloud to the customer as a demand.
+- **Category:** honesty
+- **Fix / lesson:** Identity step: on `verified: false`, say it did not match and ask the same field again (the brief decides if hints are allowed). Move to the next field only on `verified: true`. Convert spoken dates yourself and never ask the customer for a technical format. The rules come from the spec (T-006 extraction); the "do not move on after a failed check" behavior is generic and belongs in the template. T-005a: generic rules for true / false / not carried out / no attempts left are in the identity template; the per-answer result field, the retry hint wording and the exhausted sentence come from the spec. The answer format is now labelled as a tool format the agent converts itself.
+- **Status:** fixed offline (T-005a), retest pending
+- **Retest:** -
+
+### F-019: Opening did not use the customer's name
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-03 manual chat test
+- **Run:** same call as F-023
+- **Symptom:** The first sentence asked "Am I speaking with the named customer?" instead of using the customer's title and name.
+- **Root cause:** The opening prompt describes the rule ("ask for the named customer") but does not insert the call variables for title and name.
+- **Category:** other
+- **Fix / lesson:** Fill the opening prompt with the customer name variables from the call (generic: the variable names come from the brief or the OpenAPI, never hardcoded). T-005a: the spec lists the call variables to address the customer with (`opening.address_with`); the opening prompt inserts them as placeholders.
+- **Status:** fixed offline (T-005a), retest pending
+- **Retest:** -
+
+Verified in the same test: the Freya editor warning "unresolved variables (`field`, `answer`, `date`, `time`), field is removed from the request" is a false alarm for tools the model calls. The bank ledger shows `verify_identity` received `field` and `answer` filled in by the model.
+
 ### F-018: Leakage test treated required routing vocabulary as brief data
 
 - **Date:** 2026-10-10

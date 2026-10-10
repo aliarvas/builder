@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import re
 from typing import Any
 
 from .prompts import (
-    CLOSING_TASK_TEMPLATE,
+    CLOSING_FALLBACK_SAY,
     CONFIRM_TASK_TEMPLATE,
     IDENTITY_TASK_TEMPLATE,
     MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
@@ -20,7 +21,7 @@ from .prompts import (
     render_phone_agent_task_message,
     render_prompt,
 )
-from .spec import PhoneAgentSpec, Rule, SpecError
+from .spec import PhoneAgentSpec, Rule, SpecError, required_close_states
 
 
 FIXED_TOOL_NAMES = frozenset(
@@ -123,7 +124,7 @@ def _transition(target: str, description: str, conditions: list[dict[str, Any]])
 
 def _conversation(
     name: str, task: str, tools: list[dict[str, Any]], transitions: list[dict[str, Any]],
-    *, max_turn_transition: str = "closing",
+    *, max_turn_transition: str = "close_turn_limit",
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -311,6 +312,79 @@ def _special_key(raw: str, used: set[str]) -> str:
     return key
 
 
+def _py_str(value: str) -> str:
+    """Python string literal for generated code that never contains a brace."""
+    return json.dumps(value).replace("{", "\\u007b").replace("}", "\\u007d")
+
+
+def _close_state_code(state: str) -> str:
+    return f"vars['close_state'] = {_py_str(state)}\n"
+
+
+def close_table(spec: PhoneAgentSpec) -> list[tuple[str, str, str, str]]:
+    """(state, outcome, reason, closing sentence) rows; the ``default`` row comes last."""
+    says = {(item.outcome, item.reason): item.say.text for item in spec.outcomes}
+    rows = [
+        (state, item.outcome, item.reason, item.say.text)
+        for item in spec.outcomes for state in item.on if state != "default"
+    ]
+    rows.extend(
+        ("special:" + path.id, path.outcome, path.reason, says[(path.outcome, path.reason)])
+        for path in spec.special_paths if path.then == "close"
+    )
+    default = next(item for item in spec.outcomes if "default" in item.on)
+    rows.append(("default", default.outcome, default.reason, default.say.text))
+    return rows
+
+
+def _closing_code(spec: PhoneAgentSpec) -> str:
+    """Pick outcome, reason and the closing sentence from call state; never raises."""
+    rows = ",\n".join(
+        "    (" + ", ".join(_py_str(value) for value in row) + ")" for row in close_table(spec)
+    )
+    return f"""TABLE = [
+{rows},
+]
+chosen = TABLE[-1]
+try:
+    state = str(vars.get('close_state') or '')
+    try:
+        recorded = int(vars.get('promise_recorded_count') or 0)
+    except Exception:
+        recorded = 0
+    candidates = [state]
+    if recorded > 0:
+        candidates.append('promise_recorded')
+    found = None
+    for candidate in candidates:
+        for row in TABLE:
+            if row[0] == candidate:
+                found = row
+                break
+        if found is not None:
+            break
+    if found is not None:
+        chosen = found
+except Exception:
+    pass
+vars['close_resolved_state'] = chosen[0]
+vars['close_outcome'] = chosen[1]
+if chosen[2]:
+    vars['close_reason'] = chosen[2]
+vars['closing_say'] = chosen[3] or {_py_str(CLOSING_FALLBACK_SAY.text)}
+"""
+
+
+def _close_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
+    closing = spec.closing.data
+    result = _tool_with_baked_args(tool, {
+        closing["outcome_field"]: "{{close_outcome}}",
+        closing["reason_field"]: "{{close_reason}}",
+    }, "closing")
+    result.setdefault("config", {})["maxRetries"] = 1
+    return result
+
+
 def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> dict[str, Any]:
     """Render the T-004 deterministic skeleton from a validated spec and OpenAPI tools."""
     by_name = _tool_index(tools)
@@ -326,6 +400,15 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
             "identity question fields are not in the OpenAPI enum: "
             + ", ".join(unknown_identity_fields)
         )
+    close_body = by_name["close_call"]["function"]["parameters"]["properties"]["body"].get("properties", {})
+    for field in (spec.closing.data["outcome_field"], spec.closing.data["reason_field"]):
+        if field not in close_body:
+            raise SpecError(f"closing field {field!r} is not a close_call body field")
+    outcome_enum = close_body[spec.closing.data["outcome_field"]].get("enum")
+    if outcome_enum:
+        unknown_outcomes = sorted({item.outcome for item in spec.outcomes} - set(outcome_enum))
+        if unknown_outcomes:
+            raise SpecError("outcomes are not in the close_call enum: " + ", ".join(unknown_outcomes))
     reserved_special_tools = {"verify_identity", "get_account", "create_promise", "close_call"}
     for path in spec.special_paths:
         if path.tool in reserved_special_tools:
@@ -340,8 +423,24 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
 
     used = {
         "opening", "opening_unclear", "third_party", "identity", "account", "negotiate",
-        "confirm_record", "confirmation_progress", "closing", "end_call",
+        "confirm_record", "confirmation_progress", "closing", "closing_say", "close_attempt",
+        "close_record", "end_call",
     }
+    close_nodes: dict[str, str] = {}
+
+    def close_via(state: str) -> str:
+        """Node that records why the call ends, then runs the shared closing path."""
+        if state not in close_nodes:
+            key = "close_" + re.sub(r"[^A-Za-z0-9_]+", "_", state).strip("_")
+            base, suffix = key, 2
+            while key in used:
+                key = f"{base}_{suffix}"
+                suffix += 1
+            used.add(key)
+            close_nodes[state] = key
+        return close_nodes[state]
+
+    close_via("turn_limit")
     special_keys = [
         (path, source, _special_key(path.id + "_from_" + source, used))
         for path in spec.special_paths for source in path.available_in
@@ -358,10 +457,12 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         ]
 
     opening_transitions = [
-        _transition("closing", "Opening path must close", [
-            _condition(opening["who_answered_variable"], "equals", value)
+        *(
+            _transition(close_via("opening:" + value), "Opening path must close", [
+                _condition(opening["who_answered_variable"], "equals", value)
+            ])
             for value in opening["close_values"]
-        ]),
+        ),
         _transition("identity", "Customer answered", [
             _condition(opening["who_answered_variable"], "equals", value)
             for value in opening["identity_values"]
@@ -375,7 +476,6 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
             for value in opening["stay_values"]
         ]),
         *special_transitions("opening"),
-        {"target_node": "opening", "description": "Clarify who answered", "condition": {"operator": "always"}},
     ]
 
     identity_tool = _response_mapping(by_name["verify_identity"], {
@@ -387,16 +487,15 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
     promise_tool = _promise_tool(spec, by_name["create_promise"])
 
     questions = "\n".join(
-        f"{index}. {question.ask.text} Answer format: {question.answer_format.text} (field: {question.field})"
+        f"{index}. {question.ask.text} (field: {question.field}; tool format, convert it yourself: {question.answer_format.text})"
         for index, question in enumerate(spec.identity_questions, start=1)
     )
-    outcomes = "\n".join(
-        f"- outcome={item.outcome}; reason={item.reason}; when={item.when.text}" for item in spec.outcomes
-    )
+    callback_tool = _response_mapping(by_name["schedule_callback"], {"data.ok": "callback_ok"})
     nodes: dict[str, Any] = {
         "opening": _conversation("opening", render_prompt(
             OPENING_TASK_TEMPLATE,
             introduction=spec.agent.introduction.text,
+            address=" ".join("{{" + name + "}}" for name in opening["address_with"]),
             question=opening["confirmation_question"]["text"],
             unclear=opening["unclear_instruction"]["text"],
             forbidden=", ".join(opening["forbidden_before_verification"]),
@@ -405,7 +504,7 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         "opening_unclear": _code_node("opening_unclear", _increment_code(
             opening["unclear_count_variable"], opening["who_answered_variable"]
         ), [
-            _transition("closing", "Opening uncertainty limit reached", [
+            _transition(close_via("opening_unclear"), "Opening uncertainty limit reached", [
                 _condition(
                     opening["unclear_count_variable"], "greater_than",
                     opening["max_unclear_asks"] - 1,
@@ -415,28 +514,43 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
         ]),
         "third_party": _conversation("third_party", render_prompt(
             THIRD_PARTY_TASK_TEMPLATE, rules=_rule_lines(spec.third_party.rules)
-        ), [by_name["schedule_callback"]], [
-            _transition("closing", "Third-party path is complete", [
-                _condition(third["intent_variable"], "equals", value) for value in third["close_values"]
+        ), [callback_tool], [
+            _transition(close_via("callback_scheduled"), "Callback was scheduled", [
+                _condition(variable, "equals", value)
+                for variable in ("callback_ok", "schedule_callback_response.data.ok")
+                for value in ("true", "True")
             ]),
-            _transition("closing", "Callback tool completed", [
-                _condition("schedule_callback_success_count", "greater_than", 0),
+            _transition(close_via("callback_failed"), "Callback could not be scheduled", [
+                *(
+                    _condition(variable, "equals", value)
+                    for variable in ("callback_ok", "schedule_callback_response.data.ok")
+                    for value in ("false", "False")
+                ),
                 _condition("schedule_callback_failure_count", "greater_than", 0),
             ]),
+            *(
+                _transition(close_via("third_party:" + value), "Third-party path is complete", [
+                    _condition(third["intent_variable"], "equals", value)
+                ])
+                for value in third["close_values"]
+            ),
             *special_transitions("third_party"),
-            {"target_node": "third_party", "description": "Continue third-party handling", "condition": {"operator": "always"}},
         ]),
         "identity": _conversation("identity", render_prompt(
-            IDENTITY_TASK_TEMPLATE, questions=questions, rules=_rule_lines(spec.identity.rules)
+            IDENTITY_TASK_TEMPLATE, questions=questions,
+            answer_verified=identity["answer_verified_field"],
+            failed_answer=identity["failed_answer_instruction"]["text"],
+            attempts_left=identity["attempts_left_field"],
+            exhausted_say=identity["exhausted_say"]["text"],
+            rules=_rule_lines(spec.identity.rules),
         ), [identity_tool], [
             _transition("account", "Identity verified", [
                 _condition("identity_verified", "equals", value) for value in ("true", "True")
             ]),
-            _transition("closing", "No identity attempts remain", [
+            _transition(close_via("identity_failed"), "No identity attempts remain", [
                 _condition("identity_attempts_left", "less_than", 1)
             ]),
             *special_transitions("identity"),
-            {"target_node": "identity", "description": "Continue identity checks", "condition": {"operator": "always"}},
         ]),
         "account": {
             "name": "account", "node_type": "api_request", "on_enter": {"type": "silent"},
@@ -447,7 +561,7 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
                 "variable": spec.account.data["products_variable"],
             }],
             "transitions": [
-                _transition("closing", "Account retrieval failed after retry", [
+                _transition(close_via("account_failed"), "Account retrieval failed after retry", [
                     _condition("account_failure_count", "greater_than", 0)
                 ]),
                 {"target_node": "negotiate", "description": "Account loaded", "condition": {"operator": "always"}},
@@ -459,11 +573,13 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
             _transition("confirm_record", "Customer proposes an arrangement", [
                 _condition(negotiation["intent_variable"], "equals", value) for value in negotiation["confirm_values"]
             ]),
-            _transition("closing", "Negotiation ends without a proposal", [
-                _condition(negotiation["intent_variable"], "equals", value) for value in negotiation["close_values"]
-            ]),
+            *(
+                _transition(close_via("negotiation:" + value), "Negotiation ends without a proposal", [
+                    _condition(negotiation["intent_variable"], "equals", value)
+                ])
+                for value in negotiation["close_values"]
+            ),
             *special_transitions("negotiate"),
-            {"target_node": "negotiate", "description": "Continue negotiation", "condition": {"operator": "always"}},
         ]),
         "confirm_record": _conversation("confirm_record", render_prompt(
             CONFIRM_TASK_TEMPLATE, rules=_rule_lines(spec.confirmation.rules)
@@ -477,35 +593,45 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
                 for value in ("true", "True", "false", "False")
             ]),
             *special_transitions("confirm_record"),
-            {"target_node": "confirm_record", "description": "Obtain or correct confirmation", "condition": {"operator": "always"}},
         ]),
         "confirmation_progress": _code_node(
             "confirmation_progress", _confirmation_progress_code(spec), [
-                _transition("closing", "All agreed products were recorded", [
+                _transition(close_via("promise_recorded"), "All agreed products were recorded", [
                     _condition("promise_progress_state", "equals", "complete")
                 ]),
-                _transition("closing", "A product exhausted its recording attempts", [
+                _transition(close_via("promise_failed"), "A product exhausted its recording attempts", [
                     _condition("promise_progress_state", "equals", "exhausted")
                 ]),
                 {"target_node": "confirm_record", "description": "Record the next product or retry once", "condition": {"operator": "always"}},
             ],
         ),
-        "closing": _conversation("closing", render_prompt(
-            CLOSING_TASK_TEMPLATE, outcomes=outcomes
-        ), [by_name["close_call"]], [
-            _transition("end_call", "Closing tool succeeded", [
-                _condition("close_call_response.data.ok", "equals", value)
-                for value in ("true", "True")
+        "closing": _code_node("closing", _closing_code(spec), [
+            {"target_node": "closing_say", "description": "Outcome computed", "condition": {"operator": "always"}},
+        ]),
+        "closing_say": {
+            **_code_node("closing_say", "vars['closing_said'] = 'yes'\n", [
+                {"target_node": "close_attempt", "description": "Goodbye said", "condition": {"operator": "always"}},
             ]),
-            _transition("end_call", "Closing tool failed twice", [
-                _condition("close_call_failure_count", "greater_than", 1)
-            ]),
-            _transition("closing", "Closing tool reported failure", [
-                _condition("close_call_response.data.ok", "equals", value)
-                for value in ("false", "False")
-            ]),
-            {"target_node": "closing", "description": "Retry or explain a closing failure", "condition": {"operator": "always"}},
-        ], max_turn_transition="end_call"),
+            "on_enter": {"type": "tts", "text": "{{closing_say}}"},
+        },
+        "close_attempt": _code_node("close_attempt", _increment_code("close_attempts", "close_call_ok"), [
+            {"target_node": "close_record", "description": "Record the outcome", "condition": {"operator": "always"}},
+        ]),
+        "close_record": {
+            "name": "close_record", "node_type": "api_request", "on_enter": {"type": "silent"},
+            "passthrough": True, "passthrough_default_transition": "close_attempt",
+            "pre_actions": [_close_tool(spec, by_name["close_call"])],
+            "response_mapping": [{"path": "data.ok", "variable": "close_call_ok"}],
+            "transitions": [
+                _transition("end_call", "Closing tool succeeded", [
+                    _condition("close_call_ok", "equals", value) for value in ("true", "True")
+                ]),
+                _transition("end_call", "Closing tool failed twice; end without claiming success", [
+                    _condition("close_attempts", "greater_than", 1)
+                ]),
+                {"target_node": "close_attempt", "description": "Retry the closing tool once", "condition": {"operator": "always"}},
+            ],
+        },
         "end_call": {
             "name": "end_call", "node_type": "end_call", "on_enter": {"type": "silent"},
             "disable_inactivity_monitor": True, "transitions": [],
@@ -521,7 +647,7 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
             [_condition(path.tool + "_success_count", "greater_than", 0), _condition(path.tool + "_failure_count", "greater_than", 0)]
             if path.tool else []
         )
-        target = "closing" if path.then == "close" else source
+        target = close_via("special:" + path.id) if path.then == "close" else source
         transitions = (
             [_transition(target, "Special-path tool completed", conditions)]
             if conditions else [{
@@ -529,10 +655,14 @@ def build_spec_workflow(spec: PhoneAgentSpec, tools: list[dict[str, Any]]) -> di
                 "condition": {"operator": "matches_intent", "description": "The required special-path response has been given."},
             }]
         )
-        transitions.append({"target_node": key, "description": "Complete special handling", "condition": {"operator": "always"}})
         nodes[key] = _conversation(key, render_prompt(
             SPECIAL_PATH_TASK_TEMPLATE, when=path.when.text, say=path.say.text
         ), scoped, transitions)
+
+    for state, key in close_nodes.items():
+        nodes[key] = _code_node(key, _close_state_code(state), [
+            {"target_node": "closing", "description": "Compute the closing outcome", "condition": {"operator": "always"}},
+        ])
 
     # Extraction is restricted to categorical routing signals supplied by the spec.
     nodes["opening"]["extraction_schema"] = [{
@@ -593,6 +723,9 @@ def workflow_prompt_estimates(workflow: dict[str, Any]) -> dict[str, int]:
 
 def workflow_tools_by_step(workflow: dict[str, Any]) -> dict[str, list[str]]:
     return {
-        key: [_tool_name(tool) for tool in node.get("tools", [])]
+        key: [_tool_name(tool) for tool in node.get("tools", [])] + [
+            _tool_name(tool) + " (engine)" for tool in node.get("pre_actions", [])
+            if _tool_name(tool) != "code_exec"
+        ]
         for key, node in workflow.get("nodes", {}).items()
     }
