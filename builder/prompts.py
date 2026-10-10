@@ -203,7 +203,7 @@ OFFER_VERDICT_MESSAGES = PromptDefinition(
     # F-053: spoken word for word to the customer by a fixed line after the check.
     "ok: Thank you, that works for the [product].\n"
     "more: Now let us look at the [next]. The amount due is [next_amount]. Could you pay [next_amount]?\n"
-    "missing: Sorry, I did not catch the date. On which day would you like to pay?\n"
+    "missing: Could you tell me the exact day you would like to pay?\n"
     "amount_missing: Could you pay [amount]?\n"
     "product_unknown: Which of your products is this payment for?\n"
     "date_too_early: I can only record a date from [date]. Would [date] work for you?\n"
@@ -246,11 +246,29 @@ SPECIAL_PATH_TASK_TEMPLATE = PromptDefinition(
     "If it did not return ok true, do not say anything was recorded or completed.",
     ("{when}", "{say}"),
 )
+SPECIAL_CLOSE_TOOL_TASK_TEMPLATE = PromptDefinition(
+    "SPECIAL_CLOSE_TOOL_TASK_TEMPLATE",
+    "Handles a special path that ends the call and whose tool needs a value only the conversation can give. "
+    "The closing step speaks the path's line after the tool, so this step says nothing then (F-056 fix).",
+    "phone agent", "builder/workflow.py — special_<id> (model-filled tool, then close)",
+    "The customer said: {when}\nCall the available tool once. Fill only the fields it asks for, from this call. "
+    "If a field is not known yet, ask only for it and call no tool.\n"
+    "When you call the tool, say nothing before or after it: the next step speaks to the customer. "
+    "Never say that anything was recorded or completed.",
+    ("{when}",),
+)
 SPECIAL_SAY_FALLBACK = PromptDefinition(
     "SPECIAL_SAY_FALLBACK",
     "Spoken instead of a special path's line when the spec's line is an instruction to the agent (F-047).",
     "phone agent (fixed spoken line)", "builder/workflow.py — special path say fallback",
     "Thank you for letting me know.",
+)
+SPECIAL_TOOL_FAILED_SAY = PromptDefinition(
+    "SPECIAL_TOOL_FAILED_SAY",
+    "Said before the closing sentence when a closing special path's tool failed and the spec has no line "
+    "for that state (F-059).",
+    "phone agent (fixed spoken line)", "builder/workflow.py — closing code, special_tool_failed",
+    "I am sorry, I could not complete that request right now.",
 )
 CALLBACK_COLLECT_RULE = PromptDefinition(
     "CALLBACK_COLLECT_RULE",
@@ -669,8 +687,10 @@ PROMPTS = (
     REVISE_ASK_LINE,
     CLOSING_FALLBACK_SAY,
     SPECIAL_PATH_TASK_TEMPLATE,
+    SPECIAL_CLOSE_TOOL_TASK_TEMPLATE,
     SPECIAL_ASK_TASK_TEMPLATE,
     SPECIAL_SAY_FALLBACK,
+    SPECIAL_TOOL_FAILED_SAY,
     SPECIAL_ASK_PHRASED_TEMPLATE,
     CALLBACK_COLLECT_RULE,
     CALLBACK_DAY_DESCRIPTION,

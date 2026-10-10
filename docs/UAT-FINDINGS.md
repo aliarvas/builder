@@ -30,6 +30,66 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-060: The offer check resets the numeric amount with an empty value, which the platform rejects
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-01 chat on version 10 and PUB-07 on version 13 (LIVE-AUDIT)
+- **Run:** `traces/live-runs/pub01v10.json`, `traces/live-runs/pub07v13.json`; report `tasks/LIVE-AUDIT-report.md`
+- **Symptom:** Each `check_offer` run reports `variable 'offer_amount' rejected by schema validation`. No wrong outcome was seen yet, because in these runs the customer never named an amount.
+- **Root cause:** The check clears the customer's amount with an empty string, but the amount variable is a number. The platform rejects values that do not fit the schema and keeps the old value (the same rule as the enum resets of F-052). A customer amount from an earlier, rejected offer could then be checked again on the next date-only answer, instead of the amount the agent just proposed.
+- **Category:** tool-call
+- **Fix / lesson:** Reset every typed variable with a value its schema accepts, or track in code which turn the amount belongs to. Add an offline test with a stale amount followed by a date-only answer. [HYPOTHESIS] until that test or a live trace shows the stale value.
+- **Status:** fixed offline (F-060): the amount is reset with a valid float sentinel (-1.0) that `parse_amount` reads as no amount; the rejection signature uses parsed values. Reviewed (`reviews/F-060-review.md`, re-review: merge). Retest: no `validation_errors` for `offer_amount` in the next live trace.
+- **Retest:** -
+
+### F-059: The transfer line is spoken before the transfer tool runs
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-09 chat on version 13 (LIVE-AUDIT)
+- **Run:** `traces/live-runs/pub09v13.json`, customer `c_2413285e-e5d`
+- **Symptom:** "I will connect you with a colleague who can help you with this. Thank you for your time. Goodbye." was said, and only then did `transfer_to_agent` run. It succeeded here. Had it failed, the customer would already have heard that they are being connected, and then the failure close.
+- **Root cause:** The F-050 form for a special path with an engine tool: a code step speaks the path's line, then a silent api step runs the tool. The line describes the action, so it comes before the result.
+- **Category:** honesty
+- **Fix / lesson:** A closing special path speaks nothing before its tool. The path's line is spoken by `closing_say` together with the closing sentence, after the tool returned ok. When the tool fails, the close says plainly that the request could not be completed (unless the spec has its own line for that state) and never says the path's line.
+- **Status:** fixed offline (F-056/059 task; review + re-review: merge). Retest pending (PUB-09).
+- **Retest:** -
+
+### F-058: A global path matched from a global step that its exclusions list
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-09 chat on version 13 (LIVE-AUDIT)
+- **Run:** `traces/live-runs/pub09v13.json`
+- **Symptom:** After the goodbye, the conversation resumed in the restructuring path's step (see F-056). "Yes, please transfer me." then routed to the human-request path, and the agent asked "Can I help you with this first?". The human-request path lists the restructuring step in `excluded_nodes` (also in the published definition). Had the customer insisted, a second transfer could have run.
+- **Root cause:** [TO-CONFIRM, platform] `excluded_nodes` was not honoured in this branched resume, or it does not apply when the current step is itself a global step.
+- **Category:** platform
+- **Fix / lesson:** Ask the organizers how `excluded_nodes` applies to global steps and resumed branches. Avoid resting in a global step: since F-056 the closing special steps are silent passthrough steps, so the call never waits for a message there.
+- **Status:** open (platform, to confirm)
+- **Retest:** -
+
+### F-057: The end-of-call close sends a second close_call after the call state was rolled back
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-02 and PUB-09 chat on version 13 (LIVE-AUDIT)
+- **Run:** `traces/live-runs/pub02v13.json`, `traces/live-runs/pub09v13.json`
+- **Symptom:** After the agent closed the call (`close_call` ok), one more customer message arrived. The conversation resumed as a branch from a point before the close, the agent spoke again after its goodbye, and at hang-up the end-of-call tool sent a second `close_call` with an outcome derived from the old state (`not_verified/declined`, `no_promise/refused`). The bank refused it ("the call is already closed"), but the ledger lists two `close_call` calls, and the brief requires exactly one, as the last tool call.
+- **Root cause:** [TO-CONFIRM, platform] The end-of-call tool decides from `close_call_ok` and `close_attempts`, and the rollback erased both. Triggers: a lost 5xx response (F-049, PUB-02) and a closing turn with two spoken messages (F-056, PUB-09).
+- **Category:** platform
+- **Fix / lesson:** Remove the triggers in our workflow (F-056). Ask the organizers whether the judge's simulation can send a message after the agent ended the call, and whether a rollback can be avoided. A guard that survives a rollback needs a state source outside the variable table; none is known yet.
+- **Status:** open (platform, to confirm); the F-056 trigger is fixed offline
+- **Retest:** -
+
+### F-056: The closing turn speaks twice, and the next message resumes before the close
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-09 chat on version 13 (ledger passed; LIVE-AUDIT)
+- **Run:** `traces/live-runs/pub09v13.json`, customer `c_2413285e-e5d`
+- **Symptom:** The restructuring path said its line, and `closing_say` then said the same closing sentence again (twice in the transcript). The turn was recorded as finished at the first line. The next customer message resumed from there as a branch: the close was forgotten, the agent spoke after its goodbye, and the end-of-call tool sent a second `close_call` (F-057).
+- **Root cause:** A special path that closes the call spoke its own line on entry, and the closing chain always speaks the closing sentence. The variable the path wrote to mark the line as said was never read. Two spoken messages in one turn make the platform end the turn at the first.
+- **Category:** policy
+- **Fix / lesson:** A closing turn has exactly one spoken message, from `closing_say`. Closing special steps are silent; `closing` puts the path's line before the closing sentence (once, if one already contains the other). No tts on api steps (F-050). A test walks every spoken step and fails if `closing` can be reached from it through passthrough steps only.
+- **Status:** fixed offline (F-056/059 task; review + re-review: merge). Retest pending (PUB-09).
+- **Retest:** -
+
 ### F-055: Callback date filled by the model with the wrong year
 
 - **Date:** 2026-10-11

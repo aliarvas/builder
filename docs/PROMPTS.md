@@ -219,12 +219,12 @@ Rules:
 - Purpose: One customer-facing sentence per offer-check verdict, spoken word for word after the check.
 - Receiver: customer (fixed spoken line via offer_message)
 - Used at: builder/offer_check.py — check_offer; builder/workflow.py — offer_say
-- Approximate tokens: ~210 (characters ÷ 4)
+- Approximate tokens: ~207 (characters ÷ 4)
 
 ```text
 ok: Thank you, that works for the [product].
 more: Now let us look at the [next]. The amount due is [next_amount]. Could you pay [next_amount]?
-missing: Sorry, I did not catch the date. On which day would you like to pay?
+missing: Could you tell me the exact day you would like to pay?
 amount_missing: Could you pay [amount]?
 product_unknown: Which of your products is this payment for?
 date_too_early: I can only record a date from [date]. Would [date] work for you?
@@ -295,6 +295,19 @@ Call the available tool once before claiming any action. Fill only the fields it
 If it did not return ok true, do not say anything was recorded or completed.
 ```
 
+## SPECIAL_CLOSE_TOOL_TASK_TEMPLATE
+
+- Purpose: Handles a special path that ends the call and whose tool needs a value only the conversation can give. The closing step speaks the path's line after the tool, so this step says nothing then (F-056 fix).
+- Receiver: phone agent
+- Used at: builder/workflow.py — special_<id> (model-filled tool, then close)
+- Approximate tokens: ~77 static + `{when}` characters ÷ 4 at runtime
+
+```text
+The customer said: {when}
+Call the available tool once. Fill only the fields it asks for, from this call. If a field is not known yet, ask only for it and call no tool.
+When you call the tool, say nothing before or after it: the next step speaks to the customer. Never say that anything was recorded or completed.
+```
+
 ## SPECIAL_ASK_TASK_TEMPLATE
 
 - Purpose: Waits for the answer to a special path's first question.
@@ -316,6 +329,17 @@ Wait for the answer. Do not call any tool and do not promise anything.
 
 ```text
 Thank you for letting me know.
+```
+
+## SPECIAL_TOOL_FAILED_SAY
+
+- Purpose: Said before the closing sentence when a closing special path's tool failed and the spec has no line for that state (F-059).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/workflow.py — closing code, special_tool_failed
+- Approximate tokens: ~14 (characters ÷ 4)
+
+```text
+I am sorry, I could not complete that request right now.
 ```
 
 ## SPECIAL_ASK_PHRASED_TEMPLATE

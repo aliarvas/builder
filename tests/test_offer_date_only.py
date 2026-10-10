@@ -166,7 +166,7 @@ class FollowUpTests(unittest.TestCase):
     def test_yes_without_a_proposed_date_asks_for_the_date(self):
         result = Call().turn(**{OFFER_ACCEPTS: "yes"})
         self.assertEqual("missing", result["offer_verdict"])
-        self.assertEqual("Sorry, I did not catch the date. On which day would you like to pay?", result["offer_message"])
+        self.assertEqual("Could you tell me the exact day you would like to pay?", result["offer_message"])
         self.assertNotIn("amount", result["offer_message"])
 
     def test_ok_message_names_the_product(self):

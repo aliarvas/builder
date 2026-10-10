@@ -23,6 +23,9 @@ OFFER_PROPOSED_KIND = "offer_proposed_kind"
 AMOUNT_KINDS = ("full", "minimum", "other")
 # Written instead of "" to reset the amount kind: the platform rejects a value outside the enum.
 AMOUNT_KIND_NONE = FRAMEWORK_NONE_VALUE
+# F-060: offer_amount is a float field and the platform rejects "" (the old value stays). The
+# code resets it to this value, which no customer amount can be, and reads it as no amount.
+AMOUNT_NONE_VALUE = -1.0
 # F-052: the customer accepts the date (and amount) the agent just proposed without naming it.
 OFFER_ACCEPTS = "offer_accepts_proposal"
 ACCEPTS_YES = "yes"
@@ -266,7 +269,10 @@ def parse_amount(value):
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        # A negative number is the reset value (F-060), never an amount.
+        return float(value) if value >= 0 else None
+    if re.match(r'^\s*-\s*\d', str(value or '')):
+        return None
     text = re.sub(r'[^0-9.,]', '', str(value or ''))
     if ',' in text and '.' in text:
         if text.rfind(',') > text.rfind('.'):
@@ -667,7 +673,9 @@ try:
             vars['offers_summary'] = summary(accepted)
             # Ready when every returned product has an accepted offer or a note.
             progress = 'ready' if len(handled_numbers(accepted)) >= len(products) else 'more'
-    signature = str(number) + '|' + str(vars.get(CONFIG['date_var'])) + '|' + str(vars.get(CONFIG['amount_var'])) + '|' + str(vars.get(CONFIG['amount_kind_var']))
+    # F-060 fix: the signature uses the parsed offer (day, amount after the proposed-amount rule),
+    # so a reset value ('', None, the sentinel) or another spelling of the same day is the same offer.
+    signature = str(number) + '|' + (day.isoformat() if day else '') + '|' + ('%.2f' % amount if amount is not None else '')
     if verdict not in ('ok', 'missing', 'amount_missing', 'product_unknown', 'date_ambiguous'):
         rejection_key = str(number)
         rejection_counts = vars.get('offer_rejections_by_product')
@@ -744,7 +752,7 @@ vars['offer_suggested_date'] = suggest_day.isoformat() if suggest_day else ''
 vars['offer_suggested_amount'] = suggest_amount if suggest_amount is not None else ''
 vars[CONFIG['progress']] = progress
 vars[CONFIG['date_var']] = ''
-vars[CONFIG['amount_var']] = ''
+vars[CONFIG['amount_var']] = CONFIG['amount_none']
 vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
 vars[CONFIG['accepts_var']] = CONFIG['kind_none']
 for name, value in CONFIG['reset']:
@@ -808,7 +816,7 @@ def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, 
         "accepted": OFFERS_ACCEPTED, "accepted_count": OFFERS_ACCEPTED_COUNT, "noted": OFFERS_NOTED,
         "progress": OFFER_PROGRESS, "product_var": OFFER_PRODUCT, "date_var": OFFER_DATE,
         "amount_var": OFFER_AMOUNT, "amount_kind_var": OFFER_AMOUNT_KIND,
-        "proposed_kind_var": OFFER_PROPOSED_KIND, "kind_none": AMOUNT_KIND_NONE,
+        "proposed_kind_var": OFFER_PROPOSED_KIND, "kind_none": AMOUNT_KIND_NONE, "amount_none": AMOUNT_NONE_VALUE,
         "accepts_var": OFFER_ACCEPTS, "accepts_yes": ACCEPTS_YES,
         "number_field": spec.confirmation.data["product_number_field"],
         "id_field": spec.confirmation.data["promise_product_id_field"],

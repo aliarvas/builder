@@ -14,6 +14,7 @@ from .prompts import (
     REVISE_ASK_LINE,
     SPECIAL_ASK_PHRASED_TEMPLATE,
     SPECIAL_SAY_FALLBACK,
+    SPECIAL_TOOL_FAILED_SAY,
     CLOSING_FALLBACK_SAY,
     CONVERSATION_NO_TOOL_RULE,
     CONVERSATION_TOOL_RULE_TEMPLATE,
@@ -25,6 +26,7 @@ from .prompts import (
     OPENING_TASK_TEMPLATE,
     SPECIAL_ASK_TASK_TEMPLATE,
     SPECIAL_PATH_TASK_TEMPLATE,
+    SPECIAL_CLOSE_TOOL_TASK_TEMPLATE,
     THIRD_PARTY_TASK_TEMPLATE,
     WHO_ANSWERED_DESCRIPTION,
     render_phone_agent_system_prompt,
@@ -379,12 +381,12 @@ def _special_nodes(
     extra: dict[str, Any] = {}
 
     def action(node_key: str) -> dict[str, Any]:
+        # F-056/F-059: a closing path is silent. ``closing_say`` speaks its line with the
+        # closing sentence, once per turn and only after the tool returned ok.
         if tool is None and path.then == "close":
-            node = _code_node(node_key, _write_close_state([("True", "special:" + path.id)]), [
-                {"target_node": success, "description": "Line spoken", "condition": {"operator": "always"}},
+            return _code_node(node_key, _write_close_state([("True", "special:" + path.id)]), [
+                {"target_node": success, "description": "State written", "condition": {"operator": "always"}},
             ])
-            node["on_enter"] = {"type": "tts", "text": path.say.text}
-            return node
         if tool is None:
             return {
                 "name": node_key, "node_type": "conversation", "task_message": path.say.text,
@@ -407,15 +409,14 @@ def _special_nodes(
                     {"target_node": failure, "description": "Special-path tool did not succeed", "condition": {"operator": "always"}},
                 ],
             }
-            node = _code_node(node_key, f"vars[{(result_variable + '_said')!r}] = 'yes'\n", [
-                {"target_node": call_key, "description": "Line spoken; run the tool", "condition": {"operator": "always"}},
+            node = _code_node(node_key, f"vars[{(result_variable + '_started')!r}] = 'yes'\n", [
+                {"target_node": call_key, "description": "Run the tool", "condition": {"operator": "always"}},
             ])
-            node["on_enter"] = {"type": "tts", "text": path.say.text}
+            if path.then != "close":
+                node["on_enter"] = {"type": "tts", "text": path.say.text}
             return node
         scoped = _response_mapping(tool, {"data.ok": result_variable})
-        return _conversation(node_key, render_prompt(
-            SPECIAL_PATH_TASK_TEMPLATE, when=path.when.text, say=path.say.text
-        ), [scoped], ok_transitions())
+        return _conversation(node_key, _model_tool_task(path), [scoped], ok_transitions())
 
     if tool is not None and _model_fields(tool) and path.ask is None:
         return _model_tool_special(spec, path, key, tool, result_variable, success, failure)
@@ -502,9 +503,7 @@ def _model_tool_special(
     scoped = _response_mapping(tool, {"data.ok": result_variable})
     after_success = done_key if returns else success
     after_failure = done_key if returns else failure
-    extra: dict[str, Any] = {key: _conversation(key, render_prompt(
-        SPECIAL_PATH_TASK_TEMPLATE, when=path.when.text, say=path.say.text
-    ), [scoped], [
+    extra: dict[str, Any] = {key: _conversation(key, _model_tool_task(path), [scoped], [
         _transition(after_success, "Special-path tool succeeded", [
             _condition(result_variable, "equals", value) for value in ("true", "True")
         ]),
@@ -521,6 +520,14 @@ def _model_tool_special(
             *_done_transitions(source_variable, source_steps(path)),
         ])
     return globals_, extra
+
+
+def _model_tool_task(path: SpecialPath) -> str:
+    """Task of a step where the model fills the path's tool. A closing path says nothing
+    when it calls the tool: ``closing_say`` speaks its line after ok (F-056 fix)."""
+    if path.then == "close":
+        return render_prompt(SPECIAL_CLOSE_TOOL_TASK_TEMPLATE, when=path.when.text)
+    return render_prompt(SPECIAL_PATH_TASK_TEMPLATE, when=path.when.text, say=path.say.text)
 
 
 def special_result_variable(path: SpecialPath) -> str:
@@ -835,14 +842,52 @@ def choose(candidates):
 
 
 def _closing_code(spec: PhoneAgentSpec) -> str:
-    """Pick outcome, reason and the closing sentence from call state; never raises."""
+    """Pick outcome, reason and the closing sentence from call state; never raises.
+
+    F-056/F-059: closing special paths are silent, so their line is said here, before the
+    closing sentence (once when one already contains the other), and only on the state that
+    the path's success sets. A failed special-path tool gets a plain line, unless the spec
+    has a row for that state.
+    """
+    first_lines = [("special:" + path.id, path.say.text) for path in spec.special_paths if path.then == "close"]
+    if any(path.then == "close" and path.tool for path in spec.special_paths):
+        first_lines.append(("special_tool_failed", SPECIAL_TOOL_FAILED_SAY.text))
+    rows = "".join(f"    ({_py_str(state)}, {_py_str(line)}),\n" for state, line in first_lines)
     return _close_state_derivation_code(spec) + _outcome_choice_code(spec) + f"""
-chosen = choose([derive_close_state()])
+FIRST_LINES = [
+{rows}]
+
+
+def join_lines(first, second):
+    first = str(first or '').strip()
+    second = str(second or '').strip()
+    if not first or not second:
+        return first or second
+    first_words = ' '.join(first.lower().split())
+    second_words = ' '.join(second.lower().split())
+    if first_words in second_words:
+        return second
+    if second_words in first_words:
+        return first
+    return first + ' ' + second
+
+
+state = derive_close_state()
+chosen = choose([state])
 vars['close_resolved_state'] = chosen[0]
 vars['close_outcome'] = chosen[1]
 if chosen[2]:
     vars['close_reason'] = chosen[2]
-vars['closing_sentence'] = chosen[3] or {_py_str(CLOSING_FALLBACK_SAY.text)}
+sentence = chosen[3] or {_py_str(CLOSING_FALLBACK_SAY.text)}
+try:
+    # A spec row for the state itself says what to say; the builder line is only a fallback.
+    if chosen[0] != state or state != 'special_tool_failed':
+        for line_state, line in FIRST_LINES:
+            if line_state == state:
+                sentence = join_lines(line, sentence)
+except Exception:
+    pass
+vars['closing_sentence'] = sentence
 """
 
 

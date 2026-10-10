@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from builder import build
+from builder.offer_check import AMOUNT_NONE_VALUE
 from builder.prompts import (
     CONVERSATION_NO_TOOL_RULE, CONVERSATION_TOOL_RULE_TEMPLATE, render_prompt,
 )
@@ -181,7 +182,7 @@ class OfferCheckTests(unittest.TestCase):
         self.assertEqual(date, variables["offer_suggested_date"])
         self.assertEqual(amount, variables["offer_suggested_amount"])
         self.assertEqual("", variables["offer_date"])
-        self.assertEqual("", variables["offer_amount"])
+        self.assertEqual(AMOUNT_NONE_VALUE, variables["offer_amount"])  # F-060: a float the platform accepts
 
     def test_code_shape(self):
         for index in range(len(FIXTURES)):
@@ -1390,12 +1391,13 @@ class MultiStepWorkflowTests(unittest.TestCase):
         a = self.render(0)
         paid = a["global_nodes"]["special_already_paid"]
         self.assertTrue(paid["passthrough"])
-        self.assertEqual("tts", paid["on_enter"]["type"])
+        # F-056/F-059: a closing path is silent; closing_say says its line after the tool.
+        self.assertEqual({"type": "silent"}, paid["on_enter"])
         human = a["global_nodes"]["special_human"]
         self.assertEqual("tts", human["on_enter"]["type"])
-        # F-050: the line is spoken by a code step; the tool runs in a silent api step after it.
+        # F-050: the tool runs in a silent api step after a silent code step.
         self.assertEqual("code", a["nodes"]["special_human_go"]["node_type"])
-        self.assertEqual("tts", a["nodes"]["special_human_go"]["on_enter"]["type"])
+        self.assertEqual({"type": "silent"}, a["nodes"]["special_human_go"]["on_enter"])
         self.assertEqual("api_request", a["nodes"]["special_human_go_call"]["node_type"])
         self.assertEqual({"type": "silent"}, a["nodes"]["special_human_go_call"]["on_enter"])
         b = self.render(1)

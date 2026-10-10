@@ -31,8 +31,11 @@ def spoken_texts(workflow):
         if node.get("on_enter", {}).get("type") == "tts":
             texts.append(node["on_enter"]["text"])
     code = workflow["nodes"]["closing"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]["default"]
-    table = code[code.index("TABLE = ["):]
-    texts += [text for text in re.findall(r'"((?:[^"\\\\]|\\\\.)*)"', table) if " " in text]
+    # The outcome table and the special-path lines said before it (F-056/F-059).
+    for marker in ("TABLE = [", "FIRST_LINES = ["):
+        start = code.index(marker)
+        table = code[start:code.index("\n]\n", start)]
+        texts += [text for text in re.findall(r'"((?:[^"\\\\]|\\\\.)*)"', table) if " " in text]
     return [text for text in texts if "{{" not in text]
 
 
