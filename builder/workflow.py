@@ -10,6 +10,8 @@ from typing import Any
 
 from .prompts import (
     CLOSING_FALLBACK_SAY,
+    CONVERSATION_NO_TOOL_RULE,
+    CONVERSATION_TOOL_RULE_TEMPLATE,
     CONFIRM_TASK_TEMPLATE,
     IDENTITY_TASK_TEMPLATE,
     MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
@@ -63,7 +65,7 @@ def build_workflow(brief_text: str, tools: list[dict[str, Any]]) -> dict[str, An
         raise ValueError("OpenAPI document must define the fixed close_call POST tool")
 
     task_message = render_phone_agent_task_message(brief_text)
-    return {
+    workflow = {
         "initial_node": "call",
         "system_prompt": render_phone_agent_system_prompt(),
         "nodes": {
@@ -113,6 +115,8 @@ def build_workflow(brief_text: str, tools: list[dict[str, Any]]) -> dict[str, An
             "now": "2000-01-03T12:00",
         },
     }
+    _apply_conversation_tool_rules(workflow["nodes"]["call"])
+    return workflow
 
 
 def _rule_lines(rules: tuple[Rule, ...]) -> str:
@@ -148,6 +152,24 @@ def _conversation(
 
 def _tool_name(tool: dict[str, Any]) -> str:
     return str(tool.get("function", {}).get("name", ""))
+
+
+def _apply_conversation_tool_rules(node: dict[str, Any]) -> None:
+    """Put the kit's two-way tool rule in every prompt the node may show."""
+    if node.get("node_type") != "conversation":
+        return
+    names = [_tool_name(tool) for tool in node.get("tools", [])]
+    if any(not name for name in names):
+        raise ValueError("conversation tool has no function.name")
+    if names:
+        rule = "\n".join(
+            render_prompt(CONVERSATION_TOOL_RULE_TEMPLATE, tool_name=name) for name in names
+        )
+    else:
+        rule = CONVERSATION_NO_TOOL_RULE.text
+    for field in ("task_message", "loop_prompt"):
+        if field in node:
+            node[field] = str(node[field]).rstrip() + "\n\n" + rule
 
 
 def _tool_index(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1232,6 +1254,7 @@ def build_spec_workflow(
     }]
 
     for node in [*nodes.values(), *global_nodes.values()]:
+        _apply_conversation_tool_rules(node)
         if node.get("transitions"):
             node["transitions"] = group_transitions_by_target(node["transitions"])
 

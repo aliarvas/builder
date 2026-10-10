@@ -1,0 +1,578 @@
+{
+  "spec_version": 1,
+  "agent": {
+    "name": "Freya Bank digital assistant",
+    "language": "English",
+    "introduction": {
+      "text": "Say you are a digital assistant calling from Freya Bank and that the call is recorded.",
+      "source": "Opening rule 1"
+    }
+  },
+  "opening": {
+    "rules": [
+      {
+        "text": "Do not disclose collections, debt, payment, or product information before verification.",
+        "source": "Opening rule 1"
+      }
+    ],
+    "confirmation_question": {
+      "text": "Ask whether you are speaking with the named customer.",
+      "source": "Opening rule 2"
+    },
+    "unclear_instruction": {
+      "text": "Ask once more, then close without disclosure if still unclear.",
+      "source": "Opening rule 3"
+    },
+    "who_answered_variable": "caller_role",
+    "forbidden_before_verification": [
+      "collections",
+      "debt",
+      "payment",
+      "product"
+    ],
+    "who_answered_options": [
+      "customer",
+      "third_party",
+      "unclear",
+      "declined"
+    ],
+    "identity_values": [
+      "customer"
+    ],
+    "third_party_values": [
+      "third_party"
+    ],
+    "stay_values": [
+      "unclear"
+    ],
+    "close_values": [
+      "declined"
+    ],
+    "unclear_count_variable": "opening_unclear_asks",
+    "max_unclear_asks": 2,
+    "address_with": [
+      "title",
+      "last_name"
+    ]
+  },
+  "third_party": {
+    "rules": [
+      {
+        "text": "Do not reveal why the bank called; ask only when the customer can be reached.",
+        "source": "Someone else answers rules 5-10"
+      }
+    ],
+    "intent_variable": "third_party_reply",
+    "intent_values": [
+      "callback",
+      "no_callback",
+      "wrong_number",
+      "deceased"
+    ],
+    "close_values": [
+      "no_callback",
+      "wrong_number",
+      "deceased"
+    ]
+  },
+  "identity": {
+    "rules": [
+      {
+        "text": "Ask one security question at a time and never retrieve the account before all questions pass.",
+        "source": "Identity rules 11-15"
+      }
+    ],
+    "questions": [
+      {
+        "field": "date_of_birth",
+        "ask": {
+          "text": "Ask for date of birth.",
+          "source": "Identity rule 11"
+        },
+        "answer_format": {
+          "text": "Send it as YYYY-MM-DD.",
+          "source": "Identity rule 11"
+        }
+      },
+      {
+        "field": "phone_last4",
+        "ask": {
+          "text": "Ask for the last four phone digits.",
+          "source": "Identity rule 11"
+        },
+        "answer_format": {
+          "text": "Send four digits.",
+          "source": "Identity rule 11"
+        }
+      }
+    ],
+    "verified_field": "all_verified",
+    "attempts_left_field": "wrong_answers_left",
+    "answer_verified_field": "verified",
+    "failed_answer_instruction": {
+      "text": "If the result has hint day_month_swapped, ask the customer to say the month as a word; that retry is not a wrong answer.",
+      "source": "Identity rules 12-13"
+    },
+    "exhausted_say": {
+      "text": "Tell the customer you cannot continue without verification and that they can use the mobile app or visit a branch.",
+      "source": "Identity rule 14"
+    }
+  },
+  "account": {
+    "rules": [
+      {
+        "text": "State the late product, amount, and days late only after successful verification.",
+        "source": "Stating the debt rules 16-17"
+      }
+    ],
+    "products_field": "products",
+    "products_variable": "account_product_list",
+    "product_id_field": "product_id"
+  },
+  "negotiation": {
+    "rules": [
+      {
+        "text": "Ask for the full past-due amount first and apply the brief's date, floor, and refusal rules.",
+        "source": "Dates, amounts, and getting the promise rules 18-33"
+      }
+    ],
+    "intent_variable": "negotiation_reply",
+    "intent_values": [
+      "proposal",
+      "refusal",
+      "continue"
+    ],
+    "confirm_values": [
+      "proposal"
+    ],
+    "close_values": [
+      "refusal"
+    ]
+  },
+  "confirmation": {
+    "rules": [
+      {
+        "text": "Read back product, amount, and date and call the tool only after clear confirmation.",
+        "source": "Confirming rules 34-38"
+      },
+      {
+        "text": "Do not say it was recorded unless the tool succeeds.",
+        "source": "Confirming rule 37"
+      }
+    ],
+    "product_number_field": "promise_product_number",
+    "promise_product_id_field": "product_id",
+    "expected_count_variable": "readback_product_count",
+    "intent_variable": "readback_reply",
+    "intent_values": [
+      "confirmed",
+      "revise"
+    ],
+    "revise_values": [
+      "revise"
+    ],
+    "max_attempts_per_product": 2,
+    "promise_date_field": "date",
+    "promise_amount_field": "amount"
+  },
+  "special_paths": [
+    {
+      "id": "already_paid",
+      "when": {
+        "text": "The customer says the late amount was already paid.",
+        "source": "Rule 39"
+      },
+      "say": {
+        "text": "Thank you. Payments can take one business day to appear.",
+        "source": "Rule 39"
+      },
+      "tool": "",
+      "tool_args": {},
+      "outcome": "paid",
+      "reason": "",
+      "available_in": [
+        "negotiate",
+        "confirm_record"
+      ],
+      "then": "close"
+    },
+    {
+      "id": "dispute",
+      "when": {
+        "text": "The customer disputes the debt or product.",
+        "source": "Rule 40"
+      },
+      "say": {
+        "text": "I understand. I will not ask you for a payment today.",
+        "source": "Rule 40"
+      },
+      "tool": "",
+      "tool_args": {},
+      "outcome": "no_promise",
+      "reason": "dispute",
+      "available_in": [
+        "negotiate",
+        "confirm_record"
+      ],
+      "then": "close"
+    },
+    {
+      "id": "human",
+      "when": {
+        "text": "The customer insists on speaking to a human.",
+        "source": "Rule 42"
+      },
+      "say": {
+        "text": "I am transferring you to a colleague now.",
+        "source": "Rule 42"
+      },
+      "tool": "transfer_to_agent",
+      "tool_args": {
+        "queue": "general"
+      },
+      "outcome": "transferred",
+      "reason": "human",
+      "available_in": [
+        "identity",
+        "negotiate",
+        "confirm_record"
+      ],
+      "then": "close",
+      "ask": {
+        "text": "Before I transfer you, is there anything I can help you with myself?",
+        "source": "Rule 42"
+      }
+    }
+  ],
+  "outcomes": [
+    {
+      "outcome": "promise",
+      "reason": "",
+      "when": {
+        "text": "At least one promise was recorded.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "You will receive a text message confirming this promise. Thank you for speaking with me today. Goodbye.",
+        "source": "Rules 38, 47"
+      },
+      "on": [
+        "promise_recorded"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "paid",
+      "reason": "",
+      "when": {
+        "text": "The customer says the late amount was paid.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "Thank you for speaking with me today. Goodbye.",
+        "source": "Rule 47"
+      },
+      "on": [],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "transferred",
+      "reason": "human",
+      "when": {
+        "text": "The call was transferred for a human request.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "Thank you for speaking with me today. Goodbye.",
+        "source": "Rule 47"
+      },
+      "wins_over_promise": true,
+      "on": []
+    },
+    {
+      "outcome": "no_promise",
+      "reason": "dispute",
+      "when": {
+        "text": "The customer disputes the debt.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "Thank you for speaking with me today. Goodbye.",
+        "source": "Rule 47"
+      },
+      "on": [],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "no_promise",
+      "reason": "refused",
+      "when": {
+        "text": "Negotiation ended after permitted attempts.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "Thank you for speaking with me today. Goodbye.",
+        "source": "Rule 47"
+      },
+      "on": [
+        "default",
+        "negotiation:refusal"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "not_verified",
+      "reason": "failed",
+      "when": {
+        "text": "Identity attempts were exhausted.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "For your security, please use the mobile app or visit a branch. Thank you for speaking with me today. Goodbye.",
+        "source": "Rules 14, 47"
+      },
+      "on": [
+        "identity_failed"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "not_reached",
+      "reason": "callback",
+      "when": {
+        "text": "A callback was scheduled.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "We will call back at the agreed time. Thank you for speaking with me today. Goodbye.",
+        "source": "Rules 6, 47"
+      },
+      "on": [
+        "callback_scheduled"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "not_reached",
+      "reason": "no_callback",
+      "when": {
+        "text": "No callback was scheduled.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "Thank you for speaking with me today. Goodbye.",
+        "source": "Rule 47"
+      },
+      "on": [
+        "callback_failed",
+        "third_party:no_callback"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "not_reached",
+      "reason": "wrong_number",
+      "when": {
+        "text": "The number is wrong.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "Sorry for the inconvenience. Goodbye.",
+        "source": "Rule 47"
+      },
+      "on": [
+        "third_party:wrong_number"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "not_reached",
+      "reason": "deceased",
+      "when": {
+        "text": "The customer is deceased.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "Thank you for speaking with me today. Goodbye.",
+        "source": "Rule 47"
+      },
+      "on": [
+        "third_party:deceased"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "not_reached",
+      "reason": "unclear",
+      "when": {
+        "text": "Who answered remained unclear.",
+        "source": "Closing table"
+      },
+      "say": {
+        "text": "Thank you for speaking with me today. Goodbye.",
+        "source": "Rule 47"
+      },
+      "on": [
+        "opening_unclear"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "no_promise",
+      "reason": "service_error",
+      "when": {
+        "text": "The promise could not be recorded after the retry.",
+        "source": "Rule 37"
+      },
+      "say": {
+        "text": "I am sorry, I could not record this because of a technical problem. Thank you for speaking with me today. Goodbye.",
+        "source": "Rules 37, 47"
+      },
+      "on": [
+        "promise_failed",
+        "account_failed"
+      ],
+      "wins_over_promise": false
+    },
+    {
+      "outcome": "not_verified",
+      "reason": "declined",
+      "when": {
+        "text": "The customer declined before verification.",
+        "source": "Rules 15, 45"
+      },
+      "say": {
+        "text": "Thank you for speaking with me today. Goodbye.",
+        "source": "Rule 47"
+      },
+      "on": [
+        "hangup_unverified",
+        "opening:declined"
+      ],
+      "wins_over_promise": false
+    }
+  ],
+  "global_rules": [
+    {
+      "text": "Use only facts from call variables, this spec, and successful tool results.",
+      "source": "Global honesty rule"
+    },
+    {
+      "text": "Thank the customer and say goodbye before closing the call.",
+      "source": "Closing rule 47"
+    }
+  ],
+  "closing": {
+    "rules": [],
+    "outcome_field": "outcome",
+    "reason_field": "reason"
+  },
+  "offer": {
+    "rules": [],
+    "today_variable": "now",
+    "non_business_weekdays": [
+      6,
+      7
+    ],
+    "holidays": [
+      "2026-10-26",
+      "2026-11-11",
+      "2026-11-26",
+      "2026-12-25",
+      "2027-01-01"
+    ],
+    "promise_date_must_be_business_day": true,
+    "earliest": {
+      "days": 0,
+      "unit": "calendar"
+    },
+    "latest": [
+      {
+        "when": [
+          {
+            "field": "days_late",
+            "min": 1,
+            "max": 7
+          }
+        ],
+        "days": 12,
+        "unit": "business"
+      },
+      {
+        "when": [
+          {
+            "field": "days_late",
+            "min": 8,
+            "max": 45
+          }
+        ],
+        "days": 7,
+        "unit": "business"
+      }
+    ],
+    "latest_on_non_business_day": "previous",
+    "min_amount": [
+      {
+        "when": [
+          {
+            "field": "type",
+            "in": [
+              "credit_card"
+            ]
+          }
+        ],
+        "field": "minimum_payment"
+      },
+      {
+        "when": [
+          {
+            "field": "type",
+            "in": [
+              "personal_loan",
+              "car_loan"
+            ]
+          }
+        ],
+        "field": "instalment_amount"
+      }
+    ],
+    "max_amount": [
+      {
+        "field": "past_due"
+      }
+    ],
+    "next_weekday": "following_week",
+    "max_rejected_offers": 2,
+    "max_rejected_offers_by_product": [
+      {
+        "when": [
+          {
+            "field": "days_late",
+            "min": 1,
+            "max": 7
+          }
+        ],
+        "value": 2
+      },
+      {
+        "when": [
+          {
+            "field": "days_late",
+            "min": 8,
+            "max": 45
+          }
+        ],
+        "value": 3
+      }
+    ]
+  },
+  "provenance": {
+    "opening.max_unclear_asks": "recorded",
+    "offer.holidays": "recorded"
+  },
+  "overrides": [],
+  "coverage": {
+    "items": 186,
+    "unmapped": []
+  }
+}

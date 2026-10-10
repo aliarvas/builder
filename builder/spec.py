@@ -332,6 +332,7 @@ def _validate_close_states(spec: PhoneAgentSpec) -> None:
 # Offer rule vocabulary (brief-independent). See docs in _validate_offer.
 OFFER_UNITS = ("business", "calendar")
 OFFER_ADJUST = ("previous", "next", "keep")
+OFFER_NEXT_WEEKDAY = ("following_week", "upcoming", "ask")
 OFFER_WHEN_KEYS = ("field", "min", "max", "equals", "in")
 
 
@@ -383,8 +384,14 @@ def _validate_offer(data: dict[str, Any]) -> None:
     - latest: ordered rules {when?, days, unit}; the first rule whose ``when`` matches the
       product decides the latest allowed date. No match: no latest date.
     - latest_on_non_business_day: previous | next | keep (for calendar-day rules).
+    - next_weekday: following_week | upcoming | ask; optional, defaults to ask.
     - min_amount / max_amount: ordered rules {when?, field | value, share?}; first match wins.
-    - max_rejected_offers: rejected distinct offers before the call closes.
+    - max_rejected_offers: distinct customer offers that fail deterministic date or amount
+      rules before that product is exhausted. It is not the number of persuasion attempts
+      after a flat refusal. The value is at least 2 so the agent can state one counter-offer
+      and the customer can reject it before the product is exhausted.
+    - max_rejected_offers_by_product: optional ordered rules {when?, value}; first match
+      overrides max_rejected_offers for that product, with the same invalid-offer meaning.
     ``when`` is a list of conditions on product fields: {field, min?, max?, equals?, in?}; all must hold.
     """
     _string(_required(data, "today_variable", "offer"), "offer.today_variable")
@@ -406,6 +413,9 @@ def _validate_offer(data: dict[str, Any]) -> None:
         _validate_when(obj.get("when", []), f"{where}.when")
     if _required(data, "latest_on_non_business_day", "offer") not in OFFER_ADJUST:
         raise SpecError(f"offer.latest_on_non_business_day must be one of {list(OFFER_ADJUST)}")
+    next_weekday = data.setdefault("next_weekday", "ask")
+    if next_weekday not in OFFER_NEXT_WEEKDAY:
+        raise SpecError(f"offer.next_weekday must be one of {list(OFFER_NEXT_WEEKDAY)}")
     for key in ("min_amount", "max_amount"):
         for index, item in enumerate(_list(_required(data, key, "offer"), f"offer.{key}")):
             where = f"offer.{key}[{index}]"
@@ -419,7 +429,16 @@ def _validate_offer(data: dict[str, Any]) -> None:
             if "share" in obj:
                 _number(obj["share"], f"{where}.share", minimum=0)
             _validate_when(obj.get("when", []), f"{where}.when")
-    _int(_required(data, "max_rejected_offers", "offer"), "offer.max_rejected_offers", minimum=1)
+    _int(_required(data, "max_rejected_offers", "offer"), "offer.max_rejected_offers", minimum=2)
+    limits = data.setdefault("max_rejected_offers_by_product", [])
+    for index, item in enumerate(_list(limits, "offer.max_rejected_offers_by_product")):
+        where = f"offer.max_rejected_offers_by_product[{index}]"
+        obj = _object(item, where)
+        unknown = set(obj) - {"when", "value"}
+        if unknown:
+            raise SpecError(f"{where} has unknown keys: {sorted(unknown)}")
+        _int(_required(obj, "value", where), f"{where}.value", minimum=2)
+        _validate_when(obj.get("when", []), f"{where}.when")
 
 
 def load_spec(path: str | Path) -> PhoneAgentSpec:

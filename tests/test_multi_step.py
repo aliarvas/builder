@@ -11,8 +11,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from builder import build
+from builder.prompts import (
+    CONVERSATION_NO_TOOL_RULE, CONVERSATION_TOOL_RULE_TEMPLATE, render_prompt,
+)
 from builder.spec import (
-    CLOSE_STATE_NAMES, HANGUP_CLOSE_STATES, OFFER_ADJUST, OFFER_UNITS, OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
+    CLOSE_STATE_NAMES, HANGUP_CLOSE_STATES, OFFER_ADJUST, OFFER_NEXT_WEEKDAY, OFFER_UNITS,
+    OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
 )
 from builder.tools_from_openapi import CALL_VARIABLES, tools_from_openapi
 from builder.workflow import build_spec_workflow, close_table, source_steps, workflow_prompt_estimates
@@ -24,15 +28,15 @@ FIXTURES = (
     ROOT / "tests/fixtures/spec-brief-b.json",
     ROOT / "tests/fixtures/spec-synthetic.json",
 )
+OPENAPI_FIXTURES = (
+    ROOT / "build-the-builder-v2/tools/openapi.json",
+    ROOT / "build-the-builder-v2/tools/openapi.json",
+    ROOT / "tests/fixtures/openapi-synthetic.json",
+)
 
 
-def kit_tools(spec=None):
-    document = json.loads((ROOT / "build-the-builder-v2/tools/openapi.json").read_text(encoding="utf-8"))
-    if spec is not None:
-        # The synthetic bank uses its own outcome codes; give its OpenAPI a matching enum.
-        schema = document["paths"]["/close_call"]["post"]["requestBody"]["content"]["application/json"]["schema"]
-        enum = schema["properties"]["outcome"]["enum"]
-        enum.extend(item.outcome for item in spec.outcomes if item.outcome not in enum)
+def kit_tools(index=0):
+    document = json.loads(OPENAPI_FIXTURES[index].read_text(encoding="utf-8"))
     return tools_from_openapi(document)
 
 
@@ -157,7 +161,7 @@ class OfferCheckTests(unittest.TestCase):
 
     def run_offer(self, index, products, now, date, amount, number=None, state=None):
         spec = load_spec(FIXTURES[index])
-        nodes = build_spec_workflow(spec, kit_tools(spec if index == 2 else None))["nodes"]
+        nodes = build_spec_workflow(spec, kit_tools(index))["nodes"]
         variables = {spec.account.data["products_variable"]: json.dumps(products), "now": now}
         exec(code_of(nodes["offer_setup"]), {"vars": variables})
         variables.update(state or {})
@@ -177,7 +181,7 @@ class OfferCheckTests(unittest.TestCase):
     def test_code_shape(self):
         for index in range(len(FIXTURES)):
             spec = load_spec(FIXTURES[index])
-            nodes = build_spec_workflow(spec, kit_tools(spec if index == 2 else None))["nodes"]
+            nodes = build_spec_workflow(spec, kit_tools(index))["nodes"]
             for key in ("offer_setup", "check_offer"):
                 code = code_of(nodes[key])
                 compile(code, key, "exec")
@@ -264,6 +268,7 @@ class OfferCheckTests(unittest.TestCase):
             "tomorrow": ("ok", "2026-10-15"),
             "this Friday": ("ok", "2026-10-16"),
             "next Monday": ("ok", "2026-10-19"),
+            "next Friday": ("ok", "2026-10-23"),
             "Friday next week": ("ok", "2026-10-23"),
             "next week Friday": ("ok", "2026-10-23"),
             "Monday the week after next": ("date_not_business_day", "2026-10-27"),
@@ -283,13 +288,29 @@ class OfferCheckTests(unittest.TestCase):
                 else:
                     self.assertEqual(resolved, result["offer_suggested_date"])
 
-        ambiguous = self.run_offer(0, [CARD], "2026-10-14T11:00", "next Friday", 95)
+        ambiguous = self.run_offer(2, [{"product_id": "n-1", "past_due": 100, "days_late": 3}], "2030-12-30T09:00", "next Wednesday", 60)
         self.assertEqual("date_ambiguous", ambiguous["offer_verdict"])
-        self.assertEqual("Do you mean Friday 16 October?", ambiguous["offer_message"])
+        self.assertEqual("Do you mean Wednesday 1 January?", ambiguous["offer_message"])
         self.assertEqual({}, json.loads(ambiguous["offers_accepted"]))
         self.assertVerdict(
             self.run_offer(0, [CARD], "2026-10-14T11:00", "next week", 95), "missing"
         )
+
+        this_week = self.run_offer(0, [CARD], "2026-10-14T11:00", "this Monday", 95)
+        self.assertVerdict(this_week, "date_too_early", "2026-10-14")
+
+        same_weekday = self.run_offer(0, [CARD], "2026-10-16T11:00", "next Friday", 95)
+        self.assertEqual("2026-10-23", json.loads(same_weekday["offers_accepted"])["1"]["date"])
+
+        upcoming_data = json.loads(FIXTURES[0].read_text(encoding="utf-8"))
+        upcoming_data["offer"]["next_weekday"] = "upcoming"
+        upcoming_spec = parse_spec(upcoming_data)
+        upcoming_nodes = build_spec_workflow(upcoming_spec, kit_tools())["nodes"]
+        upcoming = {upcoming_spec.account.data["products_variable"]: json.dumps([CARD]), "now": "2026-10-14T11:00"}
+        exec(code_of(upcoming_nodes["offer_setup"]), {"vars": upcoming})
+        upcoming.update({"offer_date": "next Friday", "offer_amount": 95})
+        exec(code_of(upcoming_nodes["check_offer"]), {"vars": upcoming})
+        self.assertEqual("2026-10-16", json.loads(upcoming["offers_accepted"])["1"]["date"])
 
     def test_amount_kinds_use_spec_derived_limits(self):
         cases = ((CARD, "full", 95.0), (CARD, "minimum", 28.5), (LOAN, "minimum", 150.0))
@@ -331,15 +352,85 @@ class OfferCheckTests(unittest.TestCase):
         variables = self.run_offer(0, [CARD], "2026-10-26T10:00", "2026-10-23", 95)
         self.assertVerdict(variables, "date_too_early", "2026-10-27")
 
-    def test_rejections_count_distinct_offers_up_to_the_spec_limit(self):
+    def test_rejection_limit_is_selected_by_product_band(self):
         now = "2026-10-14T11:00"
+        early = self.run_offer(0, [CARD], now, "2026-11-03", 95)
+        self.assertEqual((1, "rejected"), (early["offer_rejections"], early["offer_progress"]))
+        self.assertVerdict(early, "date_too_late", "2026-11-02")
+
         state = {}
         progress = []
-        for date in ("2026-11-03", "2026-11-03", "2026-11-04", "2026-11-05"):
-            variables = self.run_offer(0, [CARD], now, date, 95, state=state)
-            state = {key: variables[key] for key in ("offer_rejections", "offer_last_signature")}
+        for date in ("2026-10-26", "2026-10-26", "2026-10-27", "2026-10-28"):
+            variables = self.run_offer(0, [LOAN], now, date, 150, state=state)
+            state = {key: variables[key] for key in (
+                "offer_rejections", "offer_last_signature", "offer_rejections_by_product",
+                "offer_last_signatures_by_product", "offers_noted",
+            )}
             progress.append((variables["offer_rejections"], variables["offer_progress"]))
-        self.assertEqual([(1, "rejected"), (1, "rejected"), (2, "rejected"), (3, "limit")], progress)
+        self.assertEqual(
+            [(1, "rejected"), (1, "rejected"), (2, "rejected"), (3, "limit")], progress
+        )
+
+    def test_rejections_are_counted_per_product(self):
+        now = "2026-10-14T11:00"
+        products = [LOAN, dict(LOAN, product_id="p-loan-2")]
+        first = self.run_offer(1, products, now, "2026-10-26", 150, number=1)
+        state = {key: first[key] for key in (
+            "offer_rejections_by_product", "offer_last_signatures_by_product",
+        )}
+        second = self.run_offer(1, products, now, "2026-10-26", 150, number=2, state=state)
+        self.assertEqual("rejected", first["offer_progress"])
+        self.assertEqual("rejected", second["offer_progress"])
+        self.assertEqual({"1": 1, "2": 1}, json.loads(second["offer_rejections_by_product"]))
+
+    def test_exhausted_product_is_noted_and_other_products_continue(self):
+        now = "2026-10-14T11:00"
+        products = [CARD, LOAN]
+        first = self.run_offer(1, products, now, "2026-11-03", 95, number=1)
+        state = {key: first[key] for key in (
+            "offer_rejections_by_product", "offer_last_signatures_by_product", "offers_noted",
+        )}
+        exhausted = self.run_offer(1, products, now, "2026-11-04", 95, number=1, state=state)
+        self.assertEqual([1], json.loads(exhausted["offers_noted"]))
+        self.assertEqual("more", exhausted["offer_progress"])
+
+        continued = self.run_offer(1, products, now, "2026-10-20", 150, number=2, state={
+            "offers_noted": exhausted["offers_noted"],
+            "offer_rejections_by_product": exhausted["offer_rejections_by_product"],
+            "offer_last_signatures_by_product": exhausted["offer_last_signatures_by_product"],
+        })
+        self.assertEqual("ready", continued["offer_progress"])
+        self.assertEqual("confirm_record", build_spec_workflow(
+            load_spec(FIXTURES[1]), kit_tools(1)
+        )["nodes"]["check_offer"]["transitions"][0]["target_node"])
+
+    def test_all_exhausted_products_close_only_after_the_last_product(self):
+        now = "2026-10-14T11:00"
+        products = [CARD, dict(CARD, product_id="p-card-2")]
+        state = {}
+        for number in (1, 2):
+            for date in ("2026-11-03", "2026-11-04"):
+                variables = self.run_offer(1, products, now, date, 95, number=number, state=state)
+                state = {key: variables[key] for key in (
+                    "offer_rejections_by_product", "offer_last_signatures_by_product", "offers_noted",
+                )}
+            expected = "more" if number == 1 else "limit"
+            self.assertEqual(expected, variables["offer_progress"])
+        self.assertEqual([1, 2], json.loads(variables["offers_noted"]))
+
+    def test_legacy_scalar_rejection_limit_remains_the_fallback(self):
+        data = json.loads(FIXTURES[2].read_text(encoding="utf-8"))
+        data["offer"].pop("max_rejected_offers_by_product", None)
+        spec = parse_spec(data)
+        nodes = build_spec_workflow(spec, kit_tools(2))["nodes"]
+        item = {"product_id": "n-1", "past_due": 100, "days_late": 3}
+        variables = {spec.account.data["products_variable"]: json.dumps([item]), "now": "2030-12-30T09:00"}
+        exec(code_of(nodes["offer_setup"]), {"vars": variables})
+        for date in ("2031-01-21", "2031-01-22"):
+            variables.update({"offer_date": date, "offer_amount": 60})
+            exec(code_of(nodes["check_offer"]), {"vars": variables})
+        self.assertEqual(2, variables["offer_rejections"])
+        self.assertEqual("limit", variables["offer_progress"])
 
     def test_synthetic_rules_differ_from_the_practice_briefs(self):
         now = "2030-12-30T09:00"  # Monday; only Sunday is non-business, 2031-01-01 is a holiday
@@ -396,7 +487,10 @@ class OfferCheckTests(unittest.TestCase):
             (("non_business_weekdays",), [0], "at least 1"),
             (("latest", 0, "unit"), "weeks", "unit must be one of"),
             (("min_amount", 0), {"field": "x", "value": 1}, "exactly one of field or value"),
-            (("max_rejected_offers",), 0, "max_rejected_offers"),
+            (("max_rejected_offers",), 1, "at least 2"),
+            (("next_weekday",), "sometimes", "next_weekday"),
+            (("max_rejected_offers_by_product",), [{"value": 1}], "at least 2"),
+            (("max_rejected_offers_by_product",), [{"value": 2, "when": [{"field": "x"}]}], "needs one of"),
             (("latest", 0, "when", 0), {"field": "x"}, "needs one of"),
         ]
         for path, value, message in broken:
@@ -409,16 +503,37 @@ class OfferCheckTests(unittest.TestCase):
                 with self.assertRaisesRegex(SpecError, message):
                     parse_spec(data)
 
+        legacy = json.loads(json.dumps(base))
+        legacy["offer"].pop("next_weekday", None)
+        legacy["offer"].pop("max_rejected_offers_by_product", None)
+        offer = parse_spec(legacy).offer.data
+        self.assertEqual("ask", offer["next_weekday"])
+        self.assertEqual([], offer["max_rejected_offers_by_product"])
+
 
 class MultiStepWorkflowTests(unittest.TestCase):
     def render(self, index=0):
         spec = load_spec(FIXTURES[index])
-        return build_spec_workflow(spec, kit_tools(spec if index == 2 else None))
+        return build_spec_workflow(spec, kit_tools(index))
 
     def test_outcome_outside_close_call_enum_is_rejected(self):
         spec = load_spec(FIXTURES[2])
         with self.assertRaisesRegex(SpecError, "close_call enum"):
             build_spec_workflow(spec, kit_tools())
+
+    def test_synthetic_openapi_is_kit_copy_with_matching_close_enums(self):
+        kit = json.loads(OPENAPI_FIXTURES[0].read_text(encoding="utf-8"))
+        synthetic = json.loads(OPENAPI_FIXTURES[2].read_text(encoding="utf-8"))
+        spec = load_spec(FIXTURES[2])
+        kit_properties = kit["paths"]["/close_call"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+        synthetic_properties = synthetic["paths"]["/close_call"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+        expected_outcomes = sorted({row.outcome for row in spec.outcomes})
+        expected_reasons = sorted({row.reason for row in spec.outcomes if row.reason})
+        self.assertEqual(expected_outcomes, sorted(synthetic_properties["outcome"]["enum"]))
+        self.assertEqual(expected_reasons, sorted(synthetic_properties["reason"]["enum"]))
+        kit_properties["outcome"]["enum"] = synthetic_properties["outcome"]["enum"]
+        kit_properties["reason"]["enum"] = synthetic_properties["reason"]["enum"]
+        self.assertEqual(kit, synthetic)
 
     def test_all_fixtures_render_without_null_or_agent_config(self):
         for index, path in enumerate(FIXTURES):
@@ -431,6 +546,26 @@ class MultiStepWorkflowTests(unittest.TestCase):
                     self.assertEqual(key, node["name"])
                     if "tools" in node:
                         self.assertEqual("conversation", node["node_type"])
+
+    def test_every_conversation_prompt_has_its_exact_tool_policy(self):
+        for index, path in enumerate(FIXTURES):
+            workflow = self.render(index)
+            for key, node in {**workflow["nodes"], **workflow["global_nodes"]}.items():
+                if node["node_type"] != "conversation":
+                    continue
+                prompts = [node["task_message"]]
+                if "loop_prompt" in node:
+                    prompts.append(node["loop_prompt"])
+                names = tool_names(node)
+                for prompt in prompts:
+                    with self.subTest(fixture=path.name, node=key, tools=names):
+                        if not names:
+                            self.assertIn(CONVERSATION_NO_TOOL_RULE.text, prompt)
+                        for name in names:
+                            self.assertIn(name, prompt)
+                            self.assertIn(
+                                render_prompt(CONVERSATION_TOOL_RULE_TEMPLATE, tool_name=name), prompt
+                            )
 
     def test_reachability_and_terminal_shape(self):
         for index in range(len(FIXTURES)):
@@ -1322,16 +1457,16 @@ class MultiStepWorkflowTests(unittest.TestCase):
         # Skeleton vocabulary, derived from the code that defines it.
         required_framework_terms = {
             "third_party", "identity", "negotiate", "confirm_record",
-        } | set(CLOSE_STATE_NAMES) | set(OFFER_UNITS) | set(OFFER_ADJUST)
+        } | set(CLOSE_STATE_NAMES) | set(OFFER_UNITS) | set(OFFER_ADJUST) | set(OFFER_NEXT_WEEKDAY)
         # Call variable names are a kit contract (STARTER-KIT-FACTS), not brief data.
         allowed_fixed_tools = allowed_fixed_tools | CALL_VARIABLES
         # Common words allowed only in the files that use them for their own meaning.
         file_scoped = {
-            "type": {"tools_from_openapi.py", "workflow.py"},       # JSON schema / Freya node keyword
+            "type": {"tools_from_openapi.py", "workflow.py", "llm.py"},  # JSON schema / Freya node / Anthropic block keyword
             "default": {"spec.py", "tools_from_openapi.py", "workflow.py"},  # schema default, default row
             "close": {"spec.py", "workflow.py"},                     # special path then=close
             "return": {"spec.py", "workflow.py"},                    # special path then=return
-            "failed": {"build.py", "freya.py"},                      # trace / API status words
+            "failed": {"build.py", "freya.py", "llm.py", "extract.py"},  # trace / model status words
         }
         leaked = {
             value for value in fixture_values

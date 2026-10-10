@@ -511,3 +511,93 @@ def tools_from_openapi(
             }
         )
     return tools
+
+
+def _contract_fields(document: dict[str, Any], schema: Any, depth: int = 0) -> dict[str, Any]:
+    """Compact field view of an object schema: type, enum, description, nested items."""
+    try:
+        schema = _merge_all_of(document, _resolve_local_ref(document, schema), "contract", None)
+    except Exception:
+        return {}
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+    fields: dict[str, Any] = {}
+    for name, raw in properties.items():
+        try:
+            prop = _merge_all_of(document, _resolve_local_ref(document, raw), "contract", None)
+        except Exception:
+            prop = {}
+        if not isinstance(prop, dict):
+            prop = {}
+        entry: dict[str, Any] = {"type": prop.get("type") or ""}
+        if isinstance(prop.get("enum"), list):
+            entry["enum"] = list(prop["enum"])
+        if prop.get("format"):
+            entry["format"] = prop["format"]
+        if prop.get("description"):
+            entry["description"] = str(prop["description"])
+        if name in required:
+            entry["required"] = True
+        if depth < 3:
+            if prop.get("type") == "array":
+                items = _contract_fields(document, prop.get("items", {}), depth + 1)
+                if items:
+                    entry["items"] = items
+            elif prop.get("type") == "object" or isinstance(prop.get("properties"), dict):
+                nested = _contract_fields(document, prop, depth + 1)
+                if nested:
+                    entry["properties"] = nested
+        fields[str(name)] = entry
+    return fields
+
+
+def _response_schema(document: dict[str, Any], operation: dict[str, Any]) -> Any:
+    responses = operation.get("responses")
+    if not isinstance(responses, dict):
+        return {}
+    for code in ("200", "201", 200, 201):
+        response = responses.get(code)
+        if response is None:
+            continue
+        try:
+            response = _resolve_local_ref(document, response)
+            content = response.get("content", {}) if isinstance(response, dict) else {}
+            media = content.get("application/json") or (next(iter(content.values())) if content else {})
+            return _resolve_local_ref(document, media).get("schema", {})
+        except Exception:
+            return {}
+    return {}
+
+
+def tool_contract(document: dict[str, Any]) -> dict[str, Any]:
+    """Tool name -> {summary, request fields, response fields}, using the same names as
+    ``tools_from_openapi``. Builder-time input for spec extraction and its validation."""
+    paths = document.get("paths")
+    if not isinstance(paths, dict):
+        return {}
+    contract: dict[str, Any] = {}
+    used: set[str] = set()
+    for index, (raw_path, raw_item) in enumerate(paths.items(), start=1):
+        try:
+            item = _resolve_local_ref(document, raw_item)
+            if not isinstance(item, dict) or "post" not in item:
+                continue
+            operation = _resolve_local_ref(document, item["post"])
+        except Exception:
+            continue
+        if not isinstance(operation, dict):
+            operation = {}
+        name = _unique_tool_name(str(raw_path), used, index, None)
+        contract[name] = {
+            "summary": str(operation.get("summary") or operation.get("description") or ""),
+            "request": _contract_fields(document, _request_schema(document, operation, str(raw_path), None)),
+            "response": _contract_fields(document, _response_schema(document, operation)),
+        }
+    return contract
+
+
+def contract_field_kind(entry: Any) -> str:
+    """JSON schema type of one ``tool_contract`` field entry ('' when unknown)."""
+    return str(entry.get("type") or "") if isinstance(entry, dict) else ""

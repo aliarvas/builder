@@ -1,0 +1,17 @@
+outcome_code,reason_code,used_when,policy_ref
+promise,,at least one promise was recorded,9.4/9.5
+paid,,customer says the late amount was already paid,10.1
+transferred,restructuring,new plan or lower instalments requested,10.3
+transferred,human,customer insists on a person,10.4
+transferred,support,hardship and customer accepts support,8.9
+no_promise,refused,attempts used up or customer refuses to talk twice,8.8/10.5
+no_promise,hardship,hardship and customer declines support,8.9
+no_promise,dispute,customer disputes the debt or product,10.2
+no_promise,service_error,promise could not be recorded after the retry,9.4
+not_verified,failed,three wrong security answers,5.4
+not_verified,declined,customer declines verification,5.5
+not_reached,callback,callback booked with a third party,4.2
+not_reached,no_callback,no valid callback time,4.3
+not_reached,wrong_number,number does not belong to the customer,4.4
+not_reached,deceased,customer has died,4.5
+not_reached,unclear,still unclear who answered after the second ask,email 5 Oct

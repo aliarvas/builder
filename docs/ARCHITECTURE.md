@@ -82,7 +82,7 @@ Both inputs can be messy: the brief (raw mail, memo that changes a policy, code 
 ## Components
 
 - **Entry** (`builder/build.py`): parses the arguments, runs the pipeline, prints the result. No policy logic.
-- **Extractor:** brief text to typed rules and parameter tables. The only place brief text is interpreted. Uses a model; every call goes to the trace. Must tolerate raw material (mail, memo, code list) and later documents overriding earlier ones.
+- **Extractor:** brief text to typed rules and parameter tables. The only place brief text is interpreted. Uses a model; every call goes to the trace. Must tolerate raw material (mail, memo, code list) and later documents overriding earlier ones. Implemented in `builder/extract.py` (T-006): four parallel section calls, code validation with at most two repair rounds, one coverage call plus one targeted re-ask; output `traces/<slot>.spec.json`. `build.py` extracts unless `--spec` (written spec) or `--single-step` (legacy) is given.
 - **Resolver/validator:** override order, conflicts, missing information, tool existence.
 - **Tool binder:** tool descriptors (fields, enums, required) from the OpenAPI file; never hardcoded field names.
 - **Renderer (Freya adapter):** IR to workflow JSON; create/update/publish/export. See [`FREYA-INTEGRATION.md`](FREYA-INTEGRATION.md).

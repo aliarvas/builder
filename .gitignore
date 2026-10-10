@@ -26,3 +26,4 @@ build-the-builder-v2/__pycache__/
 traces/*.print.log
 traces/*.validate.log
 traces/*.failed.log
+traces/*.spec.failed.json

@@ -185,12 +185,17 @@ def resolve_offer_day(value):
                     continue
                 if candidate >= start and candidate.weekday() == weekday:
                     return candidate
-        delta = (weekday - start.weekday()) % 7
         if 'next ' + weekday_names[weekday] in text:
+            if OFFER.get('next_weekday', 'ask') == 'following_week':
+                next_monday = start + datetime.timedelta(days=(7 - start.weekday()))
+                return next_monday + datetime.timedelta(days=weekday)
+            delta = (weekday - start.weekday()) % 7
             delta = delta or 7
         elif 'this ' + weekday_names[weekday] in text:
-            delta = delta if delta else 0
+            this_monday = start - datetime.timedelta(days=start.weekday())
+            return this_monday + datetime.timedelta(days=weekday)
         else:
+            delta = (weekday - start.weekday()) % 7
             delta = delta or 7
         return start + datetime.timedelta(days=delta)
     month_aliases = dict()
@@ -219,6 +224,8 @@ def resolve_offer_day(value):
 
 def ambiguous_next_weekday(value, day):
     if day is None:
+        return False
+    if OFFER.get('next_weekday', 'ask') != 'ask':
         return False
     text = normalized_date_text(value)
     if 'next week' in text or 'week after next' in text:
@@ -327,6 +334,11 @@ def amount_limit(product, rules):
     return round(base * float(rule.get('share', 1)), 2)
 
 
+def rejected_offer_limit(product):
+    rule = first_rule(product, OFFER.get('max_rejected_offers_by_product', []))
+    return int(rule.get('value')) if rule is not None else int(OFFER['max_rejected_offers'])
+
+
 def earliest_counted():
     return add_days(today(), OFFER['earliest'])
 
@@ -431,6 +443,8 @@ vars['offer_message'] = 'No offer has been checked yet.'
 vars['offer_verdict'] = 'none'
 vars['offer_rejections'] = 0
 vars['offer_last_signature'] = ''
+vars['offer_rejections_by_product'] = json.dumps(dict())
+vars['offer_last_signatures_by_product'] = json.dumps(dict())
 vars[CONFIG['amount_kind_var']] = ''
 vars[CONFIG['progress']] = 'none'
 """
@@ -441,6 +455,7 @@ suggest_day = None
 suggest_amount = None
 number = None
 progress = 'rejected'
+product = None
 try:
     products = load_products()
     raw_number = vars.get(CONFIG['product_var'])
@@ -500,15 +515,40 @@ try:
             progress = 'ready' if len(handled_numbers(accepted)) >= len(products) else 'more'
     signature = str(number) + '|' + str(vars.get(CONFIG['date_var'])) + '|' + str(vars.get(CONFIG['amount_var'])) + '|' + str(vars.get(CONFIG['amount_kind_var']))
     if verdict not in ('ok', 'missing', 'product_unknown', 'date_ambiguous'):
+        rejection_key = str(number)
+        rejection_counts = vars.get('offer_rejections_by_product')
+        last_signatures = vars.get('offer_last_signatures_by_product')
+        for name, value in (('counts', rejection_counts), ('signatures', last_signatures)):
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except Exception:
+                    value = None
+            if name == 'counts':
+                rejection_counts = value if isinstance(value, dict) else dict()
+            else:
+                last_signatures = value if isinstance(value, dict) else dict()
         try:
-            rejections = int(vars.get('offer_rejections') or 0)
+            rejections = int(rejection_counts.get(rejection_key) or 0)
         except Exception:
             rejections = 0
-        if signature != str(vars.get('offer_last_signature') or ''):
+        if signature != str(last_signatures.get(rejection_key) or ''):
             rejections += 1
+        rejection_counts[rejection_key] = rejections
+        last_signatures[rejection_key] = signature
+        vars['offer_rejections_by_product'] = json.dumps(rejection_counts)
+        vars['offer_last_signatures_by_product'] = json.dumps(last_signatures)
         vars['offer_rejections'] = rejections
-        if rejections >= int(OFFER['max_rejected_offers']):
-            progress = 'limit'
+        if rejections >= rejected_offer_limit(product):
+            noted = noted_numbers()
+            if number not in noted:
+                noted.append(number)
+            vars[CONFIG['noted']] = json.dumps(noted)
+            accepted = accepted_offers()
+            if len(handled_numbers(accepted)) >= len(products):
+                progress = 'ready' if accepted else 'limit'
+            else:
+                progress = 'more'
     vars['offer_last_signature'] = signature
 except Exception:
     verdict = 'missing'

@@ -30,6 +30,78 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-040: Extraction leaves internal call-end states and newer offer fields empty
+
+- **Date:** 2026-10-10
+- **Brief / case:** live extraction of Brief A, Brief A+B, `tests/briefs/raw-a`, `tests/briefs/changed-a` (T-006, T-006b)
+- **Run:** `traces/t006-brief-a.spec.json`, `traces/t006-brief-b.spec.json`, `traces/t006b-raw-a.spec.json`, `traces/t006b-changed-a.spec.json`
+- **Symptom:** All four extractions succeeded (128–189 s) and got the critical values right: the memo override in raw-a and the changed field names and codes in changed-a, with no Brief A values leaking. But states the brief never names stay unmapped: `account_failed`, `offer_limit`, `hangup_unverified`, and an opening decline. They then fall to the `default` row. The newer offer fields `next_weekday` and `max_rejected_offers_by_product` (T-005g) are never extracted.
+- **Root cause:** The extraction prompts predate T-005g, and they do not ask the model to map framework states that have no wording in the brief.
+- **Category:** extraction
+- **Fix / lesson:** Extend the extraction prompts and validation for the T-005g fields. For framework states, ask the model to map each one to the closest brief row, and record that it was derived (provenance), not quoted. Then rerun the four comparisons.
+- **Status:** open
+- **Retest:** -
+
+### F-039: Offer-schema fixture migration left extraction snapshots stale
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-005g full offline suite
+- **Run:** local `python3 -m unittest`; no Freya request
+- **Symptom:** The first full run had seven failures: recorded extraction output and its reference snapshot still had the scalar-only offer shape, downstream evidence tests stopped on that mismatch, and the leakage test treated the new weekday-policy enum as brief data.
+- **Root cause:** The renderer fixtures were migrated before the independent extraction snapshots and generic-enum allowlist. The extraction implementation and prompts were intentionally out of scope.
+- **Category:** other
+- **Fix / lesson:** Migrate every offline fixture that represents the same spec contract, while keeping extraction code unchanged; classify schema enum vocabulary as framework data in the leakage test.
+- **Status:** fixed (T-005g, not committed)
+- **Retest:** Full offline suite passed after the fixture migration.
+
+### F-038: New fixture-copy assertion treated enum order as semantic
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-005f full offline suite
+- **Run:** local `python3 -m unittest`; no Freya request
+- **Symptom:** The first full run had two failures: the new synthetic OpenAPI copy test rejected a matching enum in a different order, and the prompt documentation freshness test reported the newly added templates were not generated yet.
+- **Root cause:** The fixture test normalized the expected values before performing a whole-document equality check, accidentally making enum order significant. Prompt documentation regeneration had intentionally not yet run.
+- **Category:** other
+- **Fix / lesson:** Check enum membership independently, then preserve the fixture's order while comparing the remaining OpenAPI document. Regenerate the prompt catalog before the final suite.
+- **Status:** fixed (T-005f, not committed)
+- **Retest:** Full offline suite passed, 132/132.
+
+### F-037: Parallel extraction calls failed on the model's temperature rejection (race in the fallback)
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, first live extraction (T-006)
+- **Run:** `traces/t006-brief-a.failed.log`
+- **Symptom:** The build stopped with `HTTP 400: temperature is deprecated for this model` on the `flow` call, although the client has a fallback that resends without the temperature setting. The `opening_identity` call of the same run succeeded.
+- **Root cause:** The four extraction calls run in parallel and share one "send temperature" flag. The first call to receive the 400 cleared the flag and retried. The second call received its own 400 a moment later, saw the flag already cleared, treated the error as unrelated and gave up. The fallback depends on shared state that parallel calls change under each other.
+- **Category:** other (builder client)
+- **Fix / lesson:** Decide per request, not from shared state: if the request that failed carried the setting and the error names it, retry that request without it, whatever the flag says. Better still, do not send the setting to a model that has deprecated it. Parallel code must not use a first-error flag as its only guard.
+- **Status:** fixed offline (T-006 fix): the resend is decided by the failed request's own payload, the shared setting is changed under a lock, and the pinned model gets no temperature at all (trace line `model_settings`). An offline test fails four parallel requests together and checks that all four are resent; with the old shared-flag check it errors.
+- **Retest:** pending (live extraction run by the CTO)
+
+### F-036: First extraction prompt draft carried practice-brief examples
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-006, `builder/prompts.py` extraction prompts
+- **Run:** offline, during development (no model call)
+- **Symptom:** The first draft of the extraction prompts used examples taken from the practice briefs (situations named with the briefs' reason codes and two customer questions from Brief A). A hidden brief could be pushed toward the practice briefs' rules.
+- **Root cause:** Examples were picked from the briefs at hand instead of described in general domain words. The existing leak test only catches whole string literals, not words inside a long prompt.
+- **Category:** extraction
+- **Fix / lesson:** Examples rewritten in general words. New test: no extraction prompt contains a fixture or tool-enum code, a practice-brief example word or an ISO date.
+- **Status:** fixed offline (T-006)
+- **Retest:** -
+
+### F-035: Extraction code tripped the fixture-value leak test
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-006, `test_builder_string_literals_do_not_embed_fixture_values`
+- **Run:** offline `python3 -m unittest`
+- **Symptom:** The leak test flagged two literals in the new extraction code: the content-block keyword of the model API and a placeholder word used for a missing schema type.
+- **Root cause:** Both words also occur as fixture values. The API keyword is protocol vocabulary, not brief data; the placeholder was an unnecessary default.
+- **Category:** other
+- **Fix / lesson:** API content blocks are built in one helper in `builder/llm.py`, which is added to the file-scoped allowance for that keyword (same reason as the OpenAPI module); the placeholder became an empty string. Builder-chosen variable names for the extracted spec were picked so they match no fixture value.
+- **Status:** fixed offline (T-006)
+- **Retest:** full offline suite passes
+
 ### F-034: Relative “next week” dates could resolve to the current week
 
 - **Date:** 2026-10-10

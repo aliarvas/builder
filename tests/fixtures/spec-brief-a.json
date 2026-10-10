@@ -529,6 +529,29 @@
         "field": "past_due"
       }
     ],
-    "max_rejected_offers": 3
+    "max_rejected_offers": 2,
+    "next_weekday": "following_week",
+    "max_rejected_offers_by_product": [
+      {
+        "when": [
+          {
+            "field": "days_late",
+            "min": 1,
+            "max": 7
+          }
+        ],
+        "value": 2
+      },
+      {
+        "when": [
+          {
+            "field": "days_late",
+            "min": 8,
+            "max": 45
+          }
+        ],
+        "value": 3
+      }
+    ]
   }
 }

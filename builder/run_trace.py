@@ -11,6 +11,8 @@ from typing import Any
 
 
 FREYA_KEY_PATTERN = re.compile(r"fak_[A-Za-z0-9_-]+")
+ANTHROPIC_KEY_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+SECRET_ENV_NAMES = ("FREYA_API_KEY", "FREYA_BANK_TEAM_KEY", "ANTHROPIC_API_KEY")
 
 
 def utc_now() -> str:
@@ -25,7 +27,7 @@ class TraceWriter:
         self.lines = [f"start_utc: {started_at or utc_now()}"]
         self._secret_values = tuple(
             value
-            for name in ("FREYA_API_KEY", "FREYA_BANK_TEAM_KEY")
+            for name in SECRET_ENV_NAMES
             if (value := os.environ.get(name))
         )
 
@@ -33,6 +35,7 @@ class TraceWriter:
         text = str(value).replace("\r", " ").replace("\n", " ")
         for secret in self._secret_values:
             text = text.replace(secret, "[REDACTED]")
+        text = ANTHROPIC_KEY_PATTERN.sub("[REDACTED]", text)
         return FREYA_KEY_PATTERN.sub("[REDACTED]", text)
 
     def add(self, key: str, value: Any) -> None:
@@ -42,10 +45,18 @@ class TraceWriter:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         self.add("input", f"{path} sha256={digest}")
 
-    def add_model_call(self, model: str, purpose: str, duration_seconds: float) -> None:
+    def add_model_call(
+        self, model: str, purpose: str, duration_seconds: float,
+        input_tokens: int | None = None, output_tokens: int | None = None, cache_read_tokens: int | None = None,
+    ) -> None:
+        tokens = ""
+        if input_tokens is not None:
+            tokens = f" input_tokens={input_tokens} output_tokens={output_tokens or 0}"
+            if cache_read_tokens:
+                tokens += f" cache_read_tokens={cache_read_tokens}"
         self.add(
             "model_call",
-            f"model={model} purpose={purpose} duration_seconds={duration_seconds:.3f}",
+            f"model={model} purpose={purpose}{tokens} duration_seconds={duration_seconds:.3f}",
         )
 
     def finish(self, status: str = "ok") -> None:

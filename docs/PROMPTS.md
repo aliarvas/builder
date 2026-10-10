@@ -282,3 +282,263 @@ If it did not return ok true, do not say anything was recorded or completed.
 You asked: {ask}
 Wait for the answer. Do not call any tool and do not promise anything.
 ```
+
+## CONVERSATION_NO_TOOL_RULE
+
+- Purpose: Explicitly forbids tool calls in a conversation step that exposes no tools.
+- Receiver: phone agent
+- Used at: builder/workflow.py — every tool-free conversation task_message and loop_prompt
+- Approximate tokens: ~17 (characters ÷ 4)
+
+```text
+Tool-use rule for this turn: No tool call is allowed in this turn.
+```
+
+## CONVERSATION_TOOL_RULE_TEMPLATE
+
+- Purpose: Names an exposed conversation tool exactly and states its call condition.
+- Receiver: phone agent
+- Used at: builder/workflow.py — every tool-enabled conversation task_message and loop_prompt
+- Approximate tokens: ~47 static + `{tool_name}` characters ÷ 4 at runtime
+
+```text
+Tool-use rule for this turn: Call {tool_name} only when the customer's response meets this step's stated condition for that action and all required tool inputs are known; do not call it otherwise.
+```
+
+## EXTRACTION_SYSTEM_PROMPT
+
+- Purpose: Sets the builder model's job: turn a bank collections brief into spec data with sources.
+- Receiver: builder model
+- Used at: builder/extract.py — system prompt of every extraction call
+- Approximate tokens: ~274 (characters ÷ 4)
+
+```text
+You turn a bank's collections brief into structured data for an outbound phone agent. A program builds the agent from your data, so every value must be exact.
+- Use only the documents given. Never invent a rule, value, outcome, reason, queue, date or sentence. If the documents give no value for a field, follow the field's fallback instruction and say so in sources.
+- The documents come in order. A later document, memo or correction overrides an earlier one: use only the newer value and list the change in overrides.
+- Every rule has a source: a short verbatim excerpt (at most 25 words) copied from the documents, so a reader can find it with a text search.
+- Do no arithmetic. Store counts, units and conditions as data; code computes dates and amounts.
+- Codes and enum values are copied exactly as written (same spelling and case). Tool field names come only from the tool contract.
+- Rule texts are short instructions to the phone agent, in English, one idea each. Sentences the agent must say word for word are copied exactly.
+- Reply with one JSON object only: no prose, no code fence.
+```
+
+## EXTRACTION_CONTEXT_TEMPLATE
+
+- Purpose: Shared first message of every extraction call: the documents, the tool contract and the call variables.
+- Receiver: builder model
+- Used at: builder/extract.py — shared, cached context block
+- Approximate tokens: ~202 static + `{documents}` characters ÷ 4 + `{contract}` characters ÷ 4 + `{call_variables}` characters ÷ 4 at runtime
+
+```text
+# DOCUMENTS (in order; later overrides earlier)
+
+{documents}
+
+# TOOL CONTRACT (from the OpenAPI file)
+
+{contract}
+
+# CALL VARIABLES (known when the call starts)
+
+{call_variables}
+
+# PHONE AGENT SKELETON
+
+The program builds these steps; your data fills them: opening (introduction, find out who answered) -> third_party (someone else answered) or identity (security questions with the identity tool) -> account (fetch the late products) -> negotiate (get a date and an amount per product; code checks each offer against the date and amount rules) -> confirm_record (read back, confirm, record each promise) -> closing (one goodbye sentence, then the closing tool once). Special paths (for example a transfer request) can interrupt the steps they are available in. The closing outcome comes from a table that maps call-end states to outcome rows.
+```
+
+## EXTRACT_OPENING_IDENTITY_TASK
+
+- Purpose: Extracts the agent identity, opening, third-party handling, identity check and global rules.
+- Receiver: builder model
+- Used at: builder/extract.py — extraction call 'opening_identity'
+- Approximate tokens: ~789 (characters ÷ 4)
+
+```text
+Extract the sections agent, opening, third_party, identity and global_rules. RULE means {"text": "...", "source": "verbatim excerpt"}.
+Return this JSON shape:
+{
+ "agent": {"name": "how the agent presents itself", "language": "language of the call", "introduction": RULE (what the first sentence must say: who is calling, for whom, recording notice)},
+ "opening": {
+  "rules": [RULE] (other opening rules: what may be said before verification, how to answer questions about who or what is calling),
+  "confirmation_question": RULE (how to ask whether the intended customer is speaking),
+  "unclear_instruction": RULE (what to do when the answer does not confirm it),
+  "forbidden_before_verification": ["word or topic that must not be said before identity is verified"],
+  "address_with": ["call variable names used to address the customer, in spoken order"],
+  "max_unclear_asks": integer (how many times in total the confirmation question is asked, first ask included, before the call closes as unclear),
+  "answers": [{"value": "snake_case code", "meaning": "...", "route": "verify | other_person | ask_again | end", "outcome": "...", "reason": "...", "source": "..."}]
+   (every kind of answer to the confirmation question. route verify: the customer confirmed, go to the identity check. other_person: someone else answered. ask_again: unclear, ask again. end: the call closes right away; outcome and reason are the closing-table values for it, reason "" when the table has none. Exactly one value with route ask_again. Do not add a value for a bare greeting; the program adds it.)
+ },
+ "third_party": {"rules": [RULE], "intents": [{"value": "snake_case code", "meaning": "...", "route": "stay | end", "outcome": "...", "reason": "...", "source": "..."}]}
+   (what the person who is not the customer may want. route end: the call closes with that outcome and reason, with no tool. A callback that is booked with a tool keeps route stay: the program closes it from the tool result.)
+ "identity": {
+  "rules": [RULE] (limits, refusal handling, what never to do before all questions pass),
+  "questions": [{"field": "value of the identity tool's question selector enum", "ask": RULE, "answer_format": RULE (how to convert the spoken answer into the tool format)}] (in the order asked),
+  "verified_field": "identity tool response field (boolean) that is true when the whole check passed",
+  "attempts_left_field": "identity tool response field (integer) with the wrong answers or attempts left",
+  "answer_verified_field": "identity tool response field (boolean) for the answer just checked",
+  "failed_answer_instruction": RULE (what to do after a failed answer, including any hint the tool returns),
+  "exhausted_say": RULE (what to tell the customer when no attempts are left)
+ },
+ "global_rules": [RULE] (rules for the whole call: honesty, questions the agent cannot answer, repeated refusals to talk, recording claims, goodbye before the closing tool),
+ "sources": {"opening.max_unclear_asks": "excerpt or fallback: why", "opening.forbidden_before_verification": "excerpt"},
+ "overrides": [{"newer": "excerpt", "older": "excerpt", "effect": "..."}]
+}
+```
+
+## EXTRACT_FLOW_TASK
+
+- Purpose: Extracts the account, negotiation and confirmation sections.
+- Receiver: builder model
+- Used at: builder/extract.py — extraction call 'flow'
+- Approximate tokens: ~499 (characters ÷ 4)
+
+```text
+Extract the sections account, negotiation and confirmation. RULE means {"text": "...", "source": "verbatim excerpt"}.
+Date limits, amount limits and the offer limit are extracted elsewhere; here keep only the conversation rules.
+Return this JSON shape:
+{
+ "account": {"rules": [RULE] (how to state the debt and the products, in which order), "products_field": "account tool response field (array) with the late products", "product_id_field": "field of one product item that identifies it for the promise tool"},
+ "negotiation": {"rules": [RULE] (what to ask first, what counts as a refusal, persuasion attempts and what each proposes, what never to offer, per-product handling),
+  "intents": [{"value": "snake_case code", "meaning": "...", "route": "readback | end | stay", "outcome": "...", "reason": "...", "source": "..."}]
+   (the customer's state after each turn. route readback: an agreed date and amount are ready to read back. end: the customer refuses any arrangement after the allowed attempts; give the closing-table outcome and reason. stay: keep negotiating. At least one readback and one end value.)},
+ "confirmation": {"rules": [RULE] (read-back, explicit confirmation, changes, one promise per product, what to say after a recorded promise, what to do when recording fails),
+  "promise_product_id_field": "promise tool request field for the product id",
+  "promise_date_field": "promise tool request field for the date",
+  "promise_amount_field": "promise tool request field for the amount",
+  "max_attempts_per_product": integer (recording attempts per product, the first one included),
+  "intents": [{"value": "snake_case code", "meaning": "...", "route": "record | change"}]
+   (record: the customer clearly confirmed the read-back. change: the customer wants a different date or amount, or rejects the read-back.)},
+ "sources": {"confirmation.max_attempts_per_product": "excerpt or fallback: why"},
+ "overrides": [{"newer": "excerpt", "older": "excerpt", "effect": "..."}]
+}
+```
+
+## EXTRACT_OFFER_TASK
+
+- Purpose: Extracts the date and amount rules that code uses to check every offer.
+- Receiver: builder model
+- Used at: builder/extract.py — extraction call 'offer'
+- Approximate tokens: ~500 (characters ÷ 4)
+
+```text
+Extract the section offer: the calendar, the date limits and the amount limits a promise must meet. Code evaluates them against the call's current date; you only copy the rule data. RULE means {"text": "...", "source": "verbatim excerpt"}.
+Return this JSON shape:
+{
+ "offer": {
+  "rules": [RULE] (date and amount rules the agent must also follow in conversation: vague periods, this/next weekday meaning, what to propose when a date or amount is not allowed),
+  "today_variable": "call variable with the current date and time",
+  "non_business_weekdays": [ISO weekday numbers, 1 = Monday ... 7 = Sunday],
+  "holidays": ["YYYY-MM-DD", every non-business date listed],
+  "promise_date_must_be_business_day": true or false,
+  "earliest": {"days": integer, "unit": "business | calendar"} (first allowed promise date counted from today; 0 calendar days means today),
+  "latest": [{"when": [CONDITION], "days": integer, "unit": "business | calendar"}] (the latest allowed date, counted from today; ordered, the first rule whose conditions match the product applies; omit when for a rule that applies to every product),
+  "latest_on_non_business_day": "previous | next | keep" (when a calendar-day latest date is not a business day),
+  "min_amount": [{"when": [CONDITION], "field": "product field"} or {"when": [CONDITION], "value": number}, optional "share": fraction of the field or value],
+  "max_amount": [same shape as min_amount],
+  "max_rejected_offers": integer (distinct customer offers that fail these checks before the call closes; use the brief's limit on attempts or proposals if it gives one)
+ },
+ CONDITION is {"field": "product field", and one or more of "min": number, "max": number, "equals": value, "in": [values]} (min and max are inclusive). Product fields come from the account tool's product items in the tool contract.
+ "sources": {"offer.<field>": "excerpt or fallback: why", one entry per field above},
+ "overrides": [{"newer": "excerpt", "older": "excerpt", "effect": "..."}]
+}
+```
+
+## EXTRACT_OUTCOMES_TASK
+
+- Purpose: Extracts the closing table, the special paths and the closing tool fields.
+- Receiver: builder model
+- Used at: builder/extract.py — extraction call 'outcomes'
+- Approximate tokens: ~529 static + `{states}` characters ÷ 4 at runtime
+
+```text
+Extract the sections outcomes, special_paths and closing. RULE means {"text": "...", "source": "verbatim excerpt"}.
+Return this JSON shape:
+{
+ "closing": {"rules": [RULE], "outcome_field": "closing tool request field for the outcome", "reason_field": "closing tool request field for the reason"},
+ "outcomes": [{"outcome": "...", "reason": "... or \"\"", "when": RULE, "say": RULE (the goodbye sentence said before the closing tool; include every sentence the brief requires in that situation), "wins_over_promise": true or false (true only if this row is used even after a promise was recorded), "states": ["call-end state names below that close with this row"]}]
+   (one row per outcome and reason pair the brief allows; every pair from the closing table.)
+ "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (said word for word), "ask": RULE (optional: a question asked once before acting, for example whether the agent can help first), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]
+   (situations that interrupt the normal flow, for example: the customer says the payment was already made, denies the debt, reports financial difficulty, asks for a different plan or for a person; or a note on one product. tool_args holds only values the brief fixes; fields the conversation must fill are left out. then close: the call closes with outcome and reason, which must be a row above. then return: the agent goes back to the step it came from (outcome and reason are still required; repeat a row's values). Do not use the identity, account, promise or closing tools here. available_in lists only steps where the situation may happen: never before identity is verified if it would disclose the account.)
+ "sources": {},
+ "overrides": [{"newer": "excerpt", "older": "excerpt", "effect": "..."}]
+}
+Call-end states (map each required state to exactly one row; an optional state left out uses the row of "default"):
+{states}
+```
+
+## CLOSE_STATE_GUIDE
+
+- Purpose: Meaning of each fixed call-end state, listed in the outcomes extraction call.
+- Receiver: builder model
+- Used at: builder/extract.py — {states} in EXTRACT_OUTCOMES_TASK
+- Approximate tokens: ~262 (characters ÷ 4)
+
+```text
+- opening_unclear (required): who answered stayed unclear after the allowed asks.
+- callback_scheduled (required): the callback tool booked a callback.
+- callback_failed: a callback could not be booked.
+- identity_failed (required): no identity attempts are left.
+- promise_recorded (required): at least one promise was recorded.
+- promise_failed (required): recording a promise failed on every allowed attempt.
+- account_failed: the account could not be fetched.
+- offer_limit: too many offers failed the date and amount checks.
+- turn_limit: the conversation ran too long without progress.
+- special_tool_failed: a special path's tool failed.
+- hangup: the verified customer ended the call before the closing step.
+- hangup_unverified: the call ended before identity was verified.
+- default (required): the call ends in a way no other state covers, usually no promise.
+Route values that end the call (opening answers, third-party intents, negotiation intents with route end) are mapped through their own outcome and reason; do not list them here.
+```
+
+## EXTRACT_REPAIR_TEMPLATE
+
+- Purpose: Sends code-validation errors back for one extraction call.
+- Receiver: builder model
+- Used at: builder/extract.py — repair round (same conversation)
+- Approximate tokens: ~40 static + `{errors}` characters ÷ 4 at runtime
+
+```text
+Code validation found these problems in your JSON:
+{errors}
+Fix them using the documents. Change nothing else. Return the complete corrected JSON object, same shape.
+```
+
+## COVERAGE_TASK_TEMPLATE
+
+- Purpose: Maps every brief item to the spec path that covers it, or marks it not relevant or missing.
+- Receiver: builder model
+- Used at: builder/extract.py — coverage call
+- Approximate tokens: ~152 static + `{items}` characters ÷ 4 + `{spec}` characters ÷ 4 at runtime
+
+```text
+Below are the numbered items of the documents and the extracted spec. For every item decide:
+- covered: the spec carries its meaning. Give the spec paths, for example "opening.rules[0]", "offer.holidays" or "special_paths[2]".
+- not_relevant: it gives no instruction to the phone agent (titles, background, examples already covered, notes about other documents).
+- missing: it is an instruction or value the phone agent needs and no spec path carries it.
+Return {"items": [{"id": number, "status": "covered | not_relevant | missing", "paths": ["..."]}]} with every item id exactly once.
+
+# ITEMS
+{items}
+
+# SPEC
+{spec}
+```
+
+## COVERAGE_FOLLOWUP_TEMPLATE
+
+- Purpose: Asks once for spec additions that cover the items the coverage call found missing.
+- Receiver: builder model
+- Used at: builder/extract.py — targeted coverage re-ask
+- Approximate tokens: ~158 static + `{items}` characters ÷ 4 + `{spec}` characters ÷ 4 at runtime
+
+```text
+These document items are not covered by the spec below:
+{items}
+
+For each item, either add it to the spec or explain why the phone agent does not need it. Return {"additions": [{"items": [ids], "target": "<stage>.rules | global_rules | special_paths | outcomes", "value": RULE or a full special path or outcome row in the spec's shape}], "not_relevant": [{"item": id, "why": "..."}]}. Stages: opening, third_party, identity, account, negotiation, confirmation, offer, closing. RULE means {"text": "...", "source": "verbatim excerpt"}. Prefer a short rule in the step where it applies; use global_rules only for whole-call rules.
+
+# SPEC
+{spec}
+```

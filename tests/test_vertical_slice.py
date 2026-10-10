@@ -537,7 +537,7 @@ class CLITests(unittest.TestCase):
             with patch("builder.build.freya.validate_workflow") as validate, patch.dict(
                 os.environ, {}, clear=True
             ), working_directory(directory), redirect_stdout(stdout), redirect_stderr(stderr):
-                result = build.main([str(brief), str(spec), "--print"])
+                result = build.main([str(brief), str(spec), "--print", "--single-step"])
             self.assertEqual(0, result)
             parsed = json.loads(stdout.getvalue())
             self.assertEqual("call", parsed["initial_node"])
@@ -552,7 +552,7 @@ class CLITests(unittest.TestCase):
             with patch.dict(os.environ, {"FREYA_API_KEY": "fak_test"}, clear=True), working_directory(
                 directory
             ), patch("builder.build.freya.validate_workflow", return_value={}) as validate, redirect_stdout(stdout):
-                result = build.main([str(brief), str(spec), "--validate", "--slot", "validation-slot"])
+                result = build.main([str(brief), str(spec), "--validate", "--slot", "validation-slot", "--single-step"])
             self.assertEqual(0, result)
             validate.assert_called_once()
             self.assertIn("validate: ok", stdout.getvalue())
@@ -566,7 +566,7 @@ class CLITests(unittest.TestCase):
             good = traces / "stable.log"
             good.write_text("known-good\n", encoding="utf-8")
             with patch.dict(os.environ, {}, clear=True), working_directory(directory), redirect_stderr(StringIO()):
-                result = build.main([str(brief), str(spec), "--slot", "stable"])
+                result = build.main([str(brief), str(spec), "--slot", "stable", "--single-step"])
             self.assertEqual(1, result)
             self.assertEqual("known-good\n", good.read_text(encoding="utf-8"))
             self.assertTrue((traces / "stable.failed.log").exists())
@@ -587,7 +587,7 @@ class CLITests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True), working_directory(directory), patch(
                 "builder.build.tools_from_openapi", side_effect=KeyboardInterrupt
             ), redirect_stderr(StringIO()), self.assertRaises(KeyboardInterrupt):
-                build.main([str(brief), str(spec), "--slot", "stable"])
+                build.main([str(brief), str(spec), "--slot", "stable", "--single-step"])
             self.assertEqual("known-good\n", good.read_text(encoding="utf-8"))
             self.assertIn("status: failed", (traces / "stable.failed.log").read_text(encoding="utf-8"))
 
@@ -609,7 +609,7 @@ class CLITests(unittest.TestCase):
             ]["schema"]["properties"]["outcome_v2"].pop("type")
             spec.write_text(json.dumps(document), encoding="utf-8")
             with working_directory(directory), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                result = build.main([str(brief), str(spec), "--print", "--slot", "warning-case"])
+                result = build.main([str(brief), str(spec), "--print", "--slot", "warning-case", "--single-step"])
             self.assertEqual(0, result)
             trace = Path(directory, "traces/warning-case.print.log").read_text(encoding="utf-8")
             self.assertIn("warning:", trace)
