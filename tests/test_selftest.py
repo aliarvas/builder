@@ -560,8 +560,49 @@ class TurnStateTests(unittest.TestCase):
         self.assertEqual(TURN_STATE_LOST, _turn_state(stale, before, "answer"))
         ended = {"messages": [self.user(), event("node_enter", node="end_call")], "endedReason": "end_call"}
         self.assertEqual(TURN_PROCESSED, _turn_state(ended, before, "answer"))
+        multi_step = {"messages": [
+            self.user(), event("node_enter", node="account"), event("node_enter", node="offer_setup"),
+            event("node_enter", node="negotiate"),
+            {"role": "assistant", "messageId": "a", "message": "You owe", "nodeId": "negotiate"},
+        ]}
+        self.assertEqual(TURN_PROCESSED, _turn_state(multi_step, before, "answer"))
         replayed = {"messages": [{"role": "user", "messageId": "old", "message": "answer"}]}
         self.assertEqual(TURN_ABSENT, _turn_state(replayed, before, "answer"))
+
+
+    def closing_turn(self, ended=True):
+        return {"messages": [
+            self.user("bye"), event("node_enter", node="closing"), event("node_enter", node="closing_say"),
+            {"role": "assistant", "messageId": "a", "message": "Goodbye.", "nodeId": "closing_say"},
+            event("node_enter", node="close_attempt"), event("node_enter", node="close_record"),
+            event("function_call_start", function="close_call"), event("node_enter", node="end_call"),
+        ], "endedReason": "end_call" if ended else None}
+
+    def test_closing_turn_ending_in_silent_steps_is_processed(self):
+        # Review F-045-046 finding 1: the turn speaks in closing_say, then runs silent steps.
+        self.assertEqual(TURN_PROCESSED, _turn_state(self.closing_turn(), {"old"}, "bye"))
+        self.assertEqual(TURN_PROCESSED, _turn_state(self.closing_turn(ended=False), {"old"}, "bye"))
+
+    def test_5xx_on_closing_turn_completes_the_case(self):
+        test = self
+
+        class ClosingFailsWith504(FakeClient):
+            def chat_message(self, workflow_id, message, variables, call_id=None, timeout_seconds=120):
+                if message == "bye":
+                    self.chat_calls += 1
+                    self.call["messages"].extend(test.closing_turn()["messages"][1:])
+                    self.call["messages"].insert(1, test.user("bye"))
+                    self.call["endedReason"] = "end_call"
+                    raise RuntimeError("POST /api/v2/chat/message -> 504: timeout")
+                return super().chat_message(
+                    workflow_id, message, variables, call_id, timeout_seconds=timeout_seconds
+                )
+
+        client = ClosingFailsWith504({"messages": []})
+        case = SelfTestCase("close", ("hello", "bye"), {}, ("closing_say", "end_call"), ("close_call",), True)
+        result = _run_case(client, "workflow", case, 100, lambda: 1)
+        self.assertEqual("pass", result.result, result.reason)
+        self.assertEqual(2, client.chat_calls)
 
 
 class BuildSelfTestIntegrationTests(unittest.TestCase):

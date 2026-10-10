@@ -22,3 +22,30 @@ F-045 ve F-046 düzeltmeleri doğru ve genel. F-049 durum ayrımı mantıklı, a
 
 ## Kurallara uyum
 Yalnızca `selftest.py` ve testi değişmiş; brief değeri yok; Freya/model isteği yok. Rapordaki TO-CONFIRM'ler geçerli: ajan `verify_identity`'yi bu cevaplarla çağırıyor mu, üç vaka `identity`/`third_party`'yi ulaşılmış gösteriyor mu, gerçek bir 5xx kaydı fixture olarak saklanmalı.
+
+---
+
+# Fix kontrolü (bulgu 1: işlenmiş kapanış turu 5xx sonrası; rapor: tasks/DOCS-sync-report.md "Fix", bölüm 1)
+
+Kod düzenlemedim, Freya ve modele istek atmadım. `python3 -m unittest`: 245 test geçiyor.
+
+## Karar: merge edilebilir
+Bulgu 1 kapandı; önceki durumlar korunmuş.
+
+## Doğrulama
+`_turn_state` artık referans olarak turun girdiği son adım yerine, kullanıcı mesajından sonra **konuşan** son girilen adımı kullanıyor; hiçbir girilen adım konuşmadıysa bitmiş çağrı (ya da adım değişimi olmayan tur) işlenmiş sayılıyor, açık çağrı son girilen adımla karşılaştırılıyor. Önceki sentetik kayıtlarımı yeniden çalıştırdım:
+
+| Kayıt | Önce | Şimdi |
+|---|---|---|
+| Kapanış turu (`closing_say` konuştu, sessiz `close_attempt`, `close_record`, `end_call`), çağrı bitmiş | `turn_state_lost` | **`turn_processed`** |
+| Aynı kayıt, çağrı bitti işareti yok | `turn_state_lost` | **`turn_processed`** |
+| Çok adımlı normal tur (kimlik cevabı → sessiz `account` → `negotiate` konuşur) | `turn_processed` | `turn_processed` |
+| Yanıtsız tur (yalnızca sessiz `account` girildi) | `turn_state_lost` | `turn_state_lost` |
+| F-049 bayat adım (araç çalıştı, `negotiate`'a girildi, son konuşulan hâlâ `identity`) | `turn_state_lost` | `turn_state_lost` |
+| Bitmiş çağrı, mesaj var, adım girişi yok | — | `turn_processed` |
+| Mesaj kayıtta yok | `turn_absent` | `turn_absent` |
+
+Yeni testler (kapanış turu sessiz adımlarla, bitmiş/bitmemiş; kapanış turunda 504 → vaka `pass`, yeniden gönderme yok; çok adımlı tur) ve eski durum-kaybı testleri geçiyor. Yan etki yok: F-049 tasarım ilkesi (araçlar çalışmış olabileceği için durum kaybında yeniden gönderme yok) korunmuş.
+
+## Not (bilgi)
+Güncel resmî çalıştırma (`traces/brief-a.log`, sürüm 12) self-test'te iki vakanın `pass`, `third_party_close`'un `platform_error` ("close step entered but no close_call event visible in the call record") olduğunu gösteriyor. Yani motorun çalıştırdığı `pre_actions` ile kapanış çağrıları kayıtta `function_call_start` olayı üretmiyor (T-007b TO-CONFIRM 2'nin cevabı); `_close_problem` bu durumu doğru şekilde `platform_error` olarak ayırıyor. Kapanışın gerçekten çalıştığını kanıtlamak için `close_record` düğüm girişi ve `end_call` kullanıldığından, bu vakanın "pass" verebilmesi için kapanış kanıtını `node_enter close_record` + `end_call` (ve ledger) üzerinden de kabul etmek düşünülebilir; ayrı bir iş.

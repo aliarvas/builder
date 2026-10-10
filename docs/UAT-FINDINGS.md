@@ -30,6 +30,23 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-051: Offer check never runs when the customer gives only a date; the model invents limits
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-07 chat on version 12
+- **Run:** customer `c_45f705f0-891`, scratchpad `pub07v12.json`
+- **Symptom:** The agent proposed "the full payment of 540". The customer answered only with dates ("the week after next", "Monday the 26th", "the 27th works"). `offer_amount` stayed empty, so the route to `check_offer` (date AND amount set) never matched. The agent then:
+  - printed "thought `_call:check_offer{amount: 540.0, date: "2026-10-26", product_number: 1}`" to the customer;
+  - claimed "Tuesday, October 27th is after the latest possible date; the latest is Monday, November 2nd". This is false and self-contradictory.
+  No promise was recorded and the ledger failed.
+- **Root cause:** (1) The amount is taken only from the customer's words, but in this brief the agent proposes every amount, so a customer who only names a date accepts the proposed amount. (2) The negotiate prompt lets the model reason about dates and limits when the code verdict is missing (`offer_verdict = none`), and the model treats the code step's name as a tool. Also `offer_setup` writes a value the `offer_amount_kind` enum rejects ("rejected by schema validation").
+- **Category:** routing / honesty
+- **Fix / lesson:** Route to `check_offer` when a date is set. A missing amount defaults to the amount the agent last proposed: track the proposed kind (full by default, minimum after a floor offer) in state, and let the code fill the number. The negotiate prompt must never state a date or amount limit that is not in `offer_message`, and must not name internal steps. Fix the enum reset in `offer_setup` (write an allowed value or leave the variable unset).
+- **Status:** open
+- **Retest:** -
+
+Also seen in this run: no 502 at the end of identity (F-050 fix works live); the debt statement and the first persuasion were correct; the Turkish platform filler appeared once more during a slow turn (F-043).
+
 ### F-050: A fixed spoken line on the account api step crashes the turn (502) and rolls the call back
 
 - **Date:** 2026-10-11

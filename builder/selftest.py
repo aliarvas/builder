@@ -204,10 +204,13 @@ def _last_node(call: dict[str, Any]) -> str | None:
 def _turn_state(call: dict[str, Any], before_ids: set[str], message: str) -> str:
     """After a 5xx: was the turn recorded, and did the call state move with it (F-023, F-049)?
 
-    A turn is processed only when the user message is new in the record, an assistant reply
-    follows it, and the latest step agrees with the last step the turn entered. A turn that
-    ran (reply or events after it) but left the call on an older step is state-lost: the
-    platform kept the tools but dropped the node and variables, so neither resending nor
+    A turn is processed when the user message is new in the record, an assistant reply
+    follows it (or the call ended), and the latest spoken step agrees with the step the
+    turn ended in. Silent steps (code, api, end_call) never speak, so the reference is the
+    last step the turn entered that also spoke after the message; when none of them spoke,
+    an ended call counts as processed and an open call is compared with the last entered
+    step. A turn that ran but left the call on an older step is state-lost: the platform
+    kept the tools but dropped the node and variables, so neither resending nor
     continuing is safe.
     """
     messages = [item for item in call.get("messages", []) if isinstance(item, dict)] if isinstance(call, dict) else []
@@ -220,15 +223,28 @@ def _turn_state(call: dict[str, Any], before_ids: set[str], message: str) -> str
     if index is None:
         return TURN_ABSENT
     after = messages[index + 1:]
+    ended = _ended(call)
     replied = any(item.get("role") in {"assistant", "bot"} for item in after)
+    if not replied and not ended:
+        return TURN_STATE_LOST
     entered = [
         str(event.get("node")) for event in _system_events({"messages": after})
         if event.get("event") == "node_enter" and event.get("node")
     ]
+    spoke = {
+        node for node in (
+            _message_node(item) for item in after if item.get("role") in {"assistant", "bot"}
+        ) if node
+    }
+    speaking_entered = [node for node in entered if node in spoke]
     last = _last_node(call)
-    if not replied and not _ended(call):
-        return TURN_STATE_LOST
-    if entered and last is not None and last != entered[-1]:
+    if speaking_entered:
+        reference = speaking_entered[-1]
+    elif ended or not entered:
+        return TURN_PROCESSED
+    else:
+        reference = entered[-1]
+    if last is not None and last != reference:
         return TURN_STATE_LOST
     return TURN_PROCESSED
 
