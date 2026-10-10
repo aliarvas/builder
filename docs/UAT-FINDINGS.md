@@ -30,6 +30,92 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-031: Closing chain runs again when the conversation resumes after the call ended
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-07 chat test (version 8)
+- **Run:** workflow `b0bdd6e6`, version 8, customer `c_27bca007-28e`, call in scratchpad `pub07v8.json`
+- **Symptom:** After the agent said goodbye and `end_call` ran, the chat route still accepted user messages. Each message resumed in `closing_say` and ran `close_attempt → close_record` again. The bank answered "the call is already closed" (`ok:false`), the chain retried, and the ledger ended with 17 `close_call` calls (1 good, 16 refused). Several turns timed out (504).
+- **Root cause:** In chat, `end_call` is "deferred" and a later message resumes the conversation at the last speaking step. The closing chain does not check whether the close was already recorded. In a real call the line is gone after `end_call`, so this is mostly a chat-route effect, but a judge or simulation could still send a last line.
+- **Category:** tool-call
+- **Fix / lesson:** The closing chain must skip `close_call` when a close was already recorded (`close_call_ok` true), as the hang-up hook already does, and go straight to `end_call`. The test driver must stop sending after the agent ends the call.
+- **Status:** open
+- **Retest:** -
+
+### F-030: Agent said the payment was recorded when nothing was recorded
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-01 chat test (version 8)
+- **Run:** customer `c_b3228de7-b42`, call `8d87e16c-6325-43f1-98c3-fdf45d0a9900`
+- **Symptom:** After the offer check rejected the offer (`product_unknown`), the agent in `negotiate` said "I have recorded your payment of 420 for today ... goodbye". No promise was recorded. This is an honesty failure.
+- **Root cause:** The `negotiate` prompt does not forbid claiming a recording, and the check's message ("ask which product") was not voiced. The model filled the gap with a success sentence.
+- **Category:** honesty
+- **Fix / lesson:** Generic rule in every step without the promise tool: never say a payment, promise, note or callback was recorded; only the step that ran the tool and got `ok` true may say so. `negotiate` must voice the check result (`offer_message`) when the verdict is not `ok`.
+- **Status:** open
+- **Retest:** -
+
+### F-029: "I can't pay today" was treated as a refusal and the call was closed
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-07 chat test (version 8)
+- **Run:** customer `c_27bca007-28e`
+- **Symptom:** The customer said "I can't pay today." The extractor set `negotiation_intent = refusal`, and the agent closed the call with `no_promise/refused`. The script expected it to ask for another date.
+- **Root cause:** The `refusal` value has no clear description. "Not today" is a reason to ask for another date, not a refusal to pay.
+- **Category:** extraction
+- **Fix / lesson:** Describe the intent values precisely: `refusal` only when the customer refuses any payment or arrangement after being asked for alternatives. "Not today", "not now" and "I don't know when" are not refusals. Consider requiring at least one counter-question before a refusal can close.
+- **Status:** open
+- **Retest:** -
+
+### F-028: Offer setup did not find the products (flattened account variables)
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-01 chat test (version 8)
+- **Run:** customer `c_b3228de7-b42`
+- **Symptom:** `products_facts = "No products were returned."` and the offer check answered `product_unknown` for a single-product customer, so a valid offer was never accepted.
+- **Root cause:** Answered TO-CONFIRM: the engine stores the account result in code `vars` as flattened keys (`account_response.data.products.0.product_id`, `.past_due`, ...), not as a list. The setup code looked for a list or JSON string.
+- **Category:** tool-call
+- **Fix / lesson:** Rebuild the product list from the flattened `<node>_response.data.<list>.<i>.<field>` keys (keep the list and JSON-string forms as fallbacks). Check every other code step that reads a tool result the same way (product-number hook, promise progress). With one product, the product choice must default to it.
+- **Status:** open
+- **Retest:** -
+
+### F-027: Spoken amount words ("the full amount") not turned into a number
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-01 chat test (version 8)
+- **Run:** customer `c_b3228de7-b42`
+- **Symptom:** "I can pay the full amount today" left `offer_amount` empty, so the offer check never ran and the agent asked again for a date.
+- **Root cause:** The extractor only takes numbers. "The full amount", "the minimum", "half" refer to account values the extractor does not see.
+- **Category:** extraction
+- **Fix / lesson:** Add an amount-kind value (full, minimum, other) to the extraction, and let the offer code turn it into the number from the account facts. Or give the extractor the per-product amounts in its prompt.
+- **Status:** open
+- **Retest:** -
+
+### F-026: "Today" extracted as the real date instead of the call's date
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-01 chat test (version 8)
+- **Run:** customer `c_b3228de7-b42`
+- **Symptom:** "today" became `2026-10-10` (the real clock), while the call's `now` is `2026-10-14`. The offer would be judged against the wrong day.
+- **Root cause:** The extractor resolves relative dates with the engine's real clock (`{{date.today}}`, `system.*`), not with the call variable `now`. The kit warns that the system dates are the real clock.
+- **Category:** date-logic
+- **Fix / lesson:** Give the extractor the call's date (the `now` call variable, named in the spec or detected) and the computed `today_text` in the extraction description, or extract a relative phrase plus weekday and resolve it in the offer code from `now`. Never trust the engine's date for business logic.
+- **Status:** open
+- **Retest:** -
+
+### F-025: Internal product id read aloud to the customer
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-07 chat test (version 8)
+- **Run:** customer `c_27bca007-28e`
+- **Symptom:** "You have a personal loan, product p1, which is 5 days late."
+- **Root cause:** The model read the raw account result because `products_facts` was empty (F-028). The facts text for the customer should never contain internal ids.
+- **Category:** policy
+- **Fix / lesson:** Fixed by F-028 plus a generic rule: never say internal ids; refer to products by type and the spec's customer-facing label (e.g. last digits).
+- **Status:** open
+- **Retest:** -
+
+Verified in the same tests: greeting "Hello?" and "Hello? Who is this?" did not consume an unclear attempt and the introduction was said once (T-005d). Identity passed with two tool calls and `get_account` only after `all_verified` (F-009 retest pass). Hang-up close worked (F-012): ending the PUB-01 call mid-negotiation produced exactly one `close_call` with the default row, sent by the end-of-call tool.
+
 ### F-024: Generic step text was passed through a dict whose key equals a spec value
 
 - **Date:** 2026-10-10
@@ -185,8 +271,8 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** The closing tool is only a model tool inside the conversation step. Nothing runs it when the call ends another way.
 - **Category:** tool-call
 - **Fix / lesson:** Make sure an outcome is recorded on every path, including customer hang-up (for example an end-of-call lifecycle step with an outcome computed from call state). Must not double-record when the agent already closed.
-- **Status:** fixed offline (T-005c): a top-level end-of-call lifecycle tool sends `close_call` with an outcome computed by the same code and outcome table as the closing chain (last call-end state, recorded promise, `hangup_unverified` / `hangup` rows if the spec has them, else the default row). It is skipped when the closing chain already sent `close_call`, so it never double-records. Every field has a literal or call-variable default, so no model call fills it. TO-CONFIRM in an approved test: that the lifecycle tool fires on a customer hang-up, that its pre-hook sees the call variables, and that the skip (empty URL) sends nothing.
-- **Retest:** -
+- **Status:** fixed (62a6284)
+- **Retest:** 2026-10-10 PUB-01 chat, version 8: call ended mid-negotiation, end-of-call tool sent exactly one `close_call` (`no_promise/refused`, default row).
 
 ### F-011: Deadline computed with the wrong band; holiday rule not applied
 
@@ -221,8 +307,8 @@ Verified in the same test: the Freya editor warning "unresolved variables (`fiel
 - **Root cause:** One step holds all tools; nothing removes the identity tool once verification is complete. The model repeated the call on its own.
 - **Category:** routing
 - **Fix / lesson:** Separate identity step that is left on `all_verified` from the tool result, so the identity tool is no longer available afterwards (T-004).
-- **Status:** fixed in code (T-004/T-005a/T-005b), not yet retested in chat
-- **Retest:** pending: PUB-01 (happy path)
+- **Status:** fixed (656cb40)
+- **Retest:** 2026-10-10 PUB-01 chat, version 8 (customer `c_b3228de7-b42`): two identity calls, then `get_account`; no identity call after `all_verified`.
 
 ### F-008: Promise tool first called with an invented product id
 
