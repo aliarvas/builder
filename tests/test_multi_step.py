@@ -209,7 +209,7 @@ class OfferCheckTests(unittest.TestCase):
             (LOAN, "2026-10-26", 150, "date_too_late", "2026-10-23", ""),
             (LOAN, "2026-10-20", 100, "amount_too_low", "", 150.0),
             (CARD, "next week", 95, "missing", "", ""),
-            (CARD, "2026-10-16", "", "missing", "", ""),
+            (CARD, "2026-10-16", "", "ok", "", ""),  # F-051: only a date takes the proposed (full) amount
         ]
         for product, date, amount, verdict, day, money in cases:
             with self.subTest(product=product["type"], date=date, amount=amount):
@@ -494,8 +494,9 @@ class OfferCheckTests(unittest.TestCase):
         self.assertEqual("check_offer", first["target_node"])
         rendered = json.dumps(first)
         self.assertIn('"variable": "offer_date", "operator": "is_set"', rendered)
-        self.assertIn('"variable": "offer_amount", "operator": "not_equals", "operand": ""', rendered)
-        self.assertIn('"variable": "offer_amount_kind", "operator": "equals", "operand": "full"', rendered)
+        # F-051: a date alone routes to the check; the amount may come from the agent's proposal.
+        self.assertNotIn('"offer_amount"', rendered)
+        self.assertNotIn('"offer_amount_kind"', rendered)
         types = {item["name"]: item["type"] for item in nodes["negotiate"]["extraction_schema"]}
         self.assertEqual("string", types["offer_date"])
         self.assertEqual("float", types["offer_amount"])
@@ -864,7 +865,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertIn("say the last offer check message", task)
         self.assertIn("never say a payment or promise was recorded", task)
         self.assertIn("Never read an internal id", task)
-        self.assertIn("cannot pay on one date", task)
+        self.assertIn("Not paying on one date is not a refusal", task)
         self.assertIn("create_promise returned ok true", workflow["system_prompt"])
         intent = next(
             item for item in workflow["nodes"]["negotiate"]["extraction_schema"]

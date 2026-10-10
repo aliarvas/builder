@@ -32,7 +32,7 @@ from .prompts import (
 )
 from .offer_check import (
     OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED_COUNT,
-    OFFER_AMOUNT_KIND, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
+    OFFER_AMOUNT_KIND, OFFER_PROPOSED_KIND, AMOUNT_KINDS, AMOUNT_KIND_NONE, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
     promise_values_hook, special_noted_code,
 )
 from .spec import ENFORCEMENT_CHECKS, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
@@ -1118,18 +1118,12 @@ def _render_spec_workflow(
             rules=_rule_lines(plan.rules("negotiate")),
         ), [], [
             {
-                "target_node": "check_offer", "description": "The customer named a date and an amount",
+                # F-051: a date is enough. Without an amount the check uses the amount the
+                # agent last proposed, so a customer who only names a date is checked too.
+                "target_node": "check_offer", "description": "The customer named a date",
                 "condition": {"logic": "or", "conditions": [{"logic": "and", "conditions": [
                     {"variable": OFFER_DATE, "operator": "is_set"},
                     _condition(OFFER_DATE, "not_equals", ""),
-                    {"logic": "or", "conditions": [
-                        {"logic": "and", "conditions": [
-                            {"variable": OFFER_AMOUNT, "operator": "is_set"},
-                            _condition(OFFER_AMOUNT, "not_equals", ""),
-                        ]},
-                        _condition(OFFER_AMOUNT_KIND, "equals", "full"),
-                        _condition(OFFER_AMOUNT_KIND, "equals", "minimum"),
-                    ]},
                 ]}]},
             },
             *(
@@ -1252,8 +1246,13 @@ def _render_spec_workflow(
         "min_confidence": 0.7,
     }, {
         "name": OFFER_AMOUNT_KIND, "type": "string",
-        "description": "Meaning of the offered amount: full for the full or entire amount; minimum for the minimum, required instalment, or instalment amount; other for a numeric or different amount. Empty if no amount is offered.",
-        "enum_values": ["full", "minimum", "other"],
+        "description": "Meaning of the amount in the customer's last message: full for the full or entire amount; minimum for the minimum, required instalment, or instalment amount; other for a numeric or different amount; none if the customer names no amount.",
+        "enum_values": [*AMOUNT_KINDS, AMOUNT_KIND_NONE],
+        "min_confidence": 0.7,
+    }, {
+        "name": OFFER_PROPOSED_KIND, "type": "string",
+        "description": "Which amount the agent proposed most recently in this conversation: full for the full amount due; minimum for the minimum or floor amount. Keep the previous value if the agent proposed no new amount.",
+        "enum_values": ["full", "minimum"],
         "min_confidence": 0.7,
     }, {
         "name": OFFER_PRODUCT, "type": "integer",

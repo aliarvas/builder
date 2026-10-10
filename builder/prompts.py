@@ -182,16 +182,18 @@ NEGOTIATION_TASK_TEMPLATE = PromptDefinition(
     "NEGOTIATION_TASK_TEMPLATE", "Discusses the account and obtains a date and an amount per product.", "phone agent",
     "builder/workflow.py — negotiate",
     "Today is {{today_text}}. Account facts, computed by the bank system:\n{{products_facts}}\n"
-    "Use only these dates and amounts; never compute a deadline or a minimum yourself. "
-    "Never read an internal id or the raw account result aloud; use the product type, customer-facing label, "
-    "and list number. Refer to a product by its number when there are several.\n"
+    "Use only these facts; never compute a date or an amount yourself. Never read an internal id or the raw "
+    "account result aloud; name each product as the account facts say, never by a list number.\n"
     "Last offer verdict: {{offer_verdict}}. Last offer check: {{offer_message}}\n"
     "Offers accepted so far: {{offers_summary}}\n"
-    "If the last offer verdict is not ok, say the last offer check message before asking anything else. "
-    "A checked or accepted offer is not recorded: never say a payment or promise was recorded here.\n"
-    "Get a concrete date and amount from the customer. When the last offer check names a date or "
-    "an amount, offer exactly that. If they cannot pay on one date, ask for another date; that alone is not "
-    "a refusal.\nRules:\n{rules}",
+    "The bank system checks every date and amount the customer names. Verdict neither ok nor none: say the last "
+    "offer check message first. Verdict none: propose or ask, but never say whether a date or an amount is allowed. "
+    "Never state a limit yourself; say one only when the last offer check names it. Never mention internal step, "
+    "tool or variable names, and never write code.\n"
+    "A checked offer is not recorded: never say a payment or promise was recorded here.\n"
+    "Get a concrete date and amount. When the last offer check names a date or an amount, offer exactly that. "
+    "If the customer names only a date, the amount you last proposed applies. Not paying on one date is not a "
+    "refusal: ask for another date.\nRules:\n{rules}",
     ("{rules}",),
 )
 OFFER_VERDICT_MESSAGES = PromptDefinition(

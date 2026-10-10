@@ -17,6 +17,12 @@ from .spec import PhoneAgentSpec
 OFFER_DATE = "offer_date"
 OFFER_AMOUNT = "offer_amount"
 OFFER_AMOUNT_KIND = "offer_amount_kind"
+# F-051: the amount the agent last proposed (full or minimum). A customer who names only a
+# date accepts it. Written by extraction (from the agent's last proposal) and by the offer check.
+OFFER_PROPOSED_KIND = "offer_proposed_kind"
+AMOUNT_KINDS = ("full", "minimum", "other")
+# Written instead of "" to reset the amount kind: the platform rejects a value outside the enum.
+AMOUNT_KIND_NONE = "none"
 OFFER_PRODUCT = "offer_product_number"
 OFFER_PROGRESS = "offer_progress"
 OFFERS_ACCEPTED = "offers_accepted"
@@ -491,7 +497,8 @@ vars['offer_rejections'] = 0
 vars['offer_last_signature'] = ''
 vars['offer_rejections_by_product'] = json.dumps(dict())
 vars['offer_last_signatures_by_product'] = json.dumps(dict())
-vars[CONFIG['amount_kind_var']] = ''
+vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
+vars[CONFIG['proposed_kind_var']] = 'full'
 vars[CONFIG['progress']] = 'none'
 """
 
@@ -523,6 +530,11 @@ try:
         product = products[number - 1]
         earliest, latest, low, high = limits(product)
         amount_kind = str(vars.get(CONFIG['amount_kind_var']) or '').strip().lower()
+        if amount is None and amount_kind not in ('full', 'minimum', 'other'):
+            # Only a date: the customer takes the amount the agent last proposed (full by default).
+            amount_kind = str(vars.get(CONFIG['proposed_kind_var']) or 'full').strip().lower()
+            if amount_kind not in ('full', 'minimum'):
+                amount_kind = 'full'
         if amount is None and amount_kind == 'full':
             amount = high
         elif amount is None and amount_kind == 'minimum':
@@ -545,9 +557,11 @@ try:
         elif low is not None and amount < low - 0.005:
             verdict = 'amount_too_low'
             suggest_amount = low
+            vars[CONFIG['proposed_kind_var']] = 'minimum'
         elif high is not None and amount > high + 0.005:
             verdict = 'amount_too_high'
             suggest_amount = high
+            vars[CONFIG['proposed_kind_var']] = 'full'
         else:
             verdict = 'ok'
             accepted = accepted_offers()
@@ -612,7 +626,7 @@ vars['offer_suggested_amount'] = suggest_amount if suggest_amount is not None el
 vars[CONFIG['progress']] = progress
 vars[CONFIG['date_var']] = ''
 vars[CONFIG['amount_var']] = ''
-vars[CONFIG['amount_kind_var']] = ''
+vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
 for name in CONFIG['reset']:
     vars[name] = ''
 """
@@ -674,6 +688,7 @@ def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, 
         "accepted": OFFERS_ACCEPTED, "accepted_count": OFFERS_ACCEPTED_COUNT, "noted": OFFERS_NOTED,
         "progress": OFFER_PROGRESS, "product_var": OFFER_PRODUCT, "date_var": OFFER_DATE,
         "amount_var": OFFER_AMOUNT, "amount_kind_var": OFFER_AMOUNT_KIND,
+        "proposed_kind_var": OFFER_PROPOSED_KIND, "kind_none": AMOUNT_KIND_NONE,
         "number_field": spec.confirmation.data["product_number_field"],
         "id_field": spec.confirmation.data["promise_product_id_field"],
         "date_field": spec.confirmation.data["promise_date_field"],

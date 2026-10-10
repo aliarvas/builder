@@ -198,16 +198,17 @@ Rules:
 - Purpose: Discusses the account and obtains a date and an amount per product.
 - Receiver: phone agent
 - Used at: builder/workflow.py — negotiate
-- Approximate tokens: ~219 static + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~276 static + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Today is {{today_text}}. Account facts, computed by the bank system:
 {{products_facts}}
-Use only these dates and amounts; never compute a deadline or a minimum yourself. Never read an internal id or the raw account result aloud; use the product type, customer-facing label, and list number. Refer to a product by its number when there are several.
+Use only these facts; never compute a date or an amount yourself. Never read an internal id or the raw account result aloud; name each product as the account facts say, never by a list number.
 Last offer verdict: {{offer_verdict}}. Last offer check: {{offer_message}}
 Offers accepted so far: {{offers_summary}}
-If the last offer verdict is not ok, say the last offer check message before asking anything else. A checked or accepted offer is not recorded: never say a payment or promise was recorded here.
-Get a concrete date and amount from the customer. When the last offer check names a date or an amount, offer exactly that. If they cannot pay on one date, ask for another date; that alone is not a refusal.
+The bank system checks every date and amount the customer names. Verdict neither ok nor none: say the last offer check message first. Verdict none: propose or ask, but never say whether a date or an amount is allowed. Never state a limit yourself; say one only when the last offer check names it. Never mention internal step, tool or variable names, and never write code.
+A checked offer is not recorded: never say a payment or promise was recorded here.
+Get a concrete date and amount. When the last offer check names a date or an amount, offer exactly that. If the customer names only a date, the amount you last proposed applies. Not paying on one date is not a refusal: ask for another date.
 Rules:
 {rules}
 ```
