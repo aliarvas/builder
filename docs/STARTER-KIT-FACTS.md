@@ -1,9 +1,11 @@
 # Starter Kit and Competition Facts
 
 **Owner:** Verified facts about the competition and the Freya platform  
-**Sources:** Official page https://www.freyavoice.ai/hackathon (read 2026-10-10) and the starter kit in `build-the-builder/` (README, `docs/`, `freya.py`, `tools/`, `briefs/`, `public-test-set.json`). Where they differ, the kit is newer and wins; the difference is listed in "Conflicts".
+**Sources:** Official page https://www.freyavoice.ai/hackathon (read 2026-10-10) and the starter kit in `build-the-builder-v2/` (README, `docs/`, `freya.py`, `tools/`, `briefs/`, `public-test-set.json`). Where they differ, the kit is newer and wins; the difference is listed in "Conflicts".
 
-Only facts here. Design choices live in the owner documents. Detail pages of the kit stay authoritative for the workflow format: `build-the-builder/docs/workflow-format.md`, `tools-and-code.md`, `api.md`.
+`[VERIFIED]` Kit version: `build-the-builder-v2/` holds **kit v3** (`VERSION` = 3, 10 October 2026) and is the current kit. The v1 kit folder was removed from the repo on 2026-10-10. Compared with v1, only the README and `examples/` changed: `minimal_builder.py` was replaced by `examples/base-agent.json` (2-step, 4-tool example agent), `examples/agent_builder.py` (Claude Agent SDK builder that writes `traces/<time>.jsonl`) and the skill `.claude/skills/build-phone-agent/SKILL.md`. `docs/`, `tools/`, `briefs/`, `freya.py` and `public-test-set.json` are identical. Submission and trace rules did not change.
+
+Only facts here. Design choices live in the owner documents. Detail pages of the kit stay authoritative for the workflow format: `build-the-builder-v2/docs/workflow-format.md`, `tools-and-code.md`, `api.md`.
 
 ## Competition
 
@@ -20,9 +22,9 @@ Only facts here. Design choices live in the owner documents. Detail pages of the
 - `[VERIFIED]` Seven tools, names fixed: `verify_identity`, `get_account`, `create_promise`, `add_note`, `schedule_callback`, `transfer_to_agent`, `close_call`. In a final brief their fields and allowed values may change; each final brief ships its own tool API file.
 - `[VERIFIED]` The bank API does not enforce the brief. It records a promise on a holiday or past a deadline without complaint.
 
-## Kit contents (in `build-the-builder/`)
+## Kit contents (in `build-the-builder-v2/`)
 
-`README.md`; `briefs/brief-a.md` (47 rules, one product), `briefs/brief-b.md` (up to three products, builds on A); `tools/openapi.json`; `public-test-set.json` (13 cases); `examples/minimal_builder.py`; `freya.py`; `tools/run_cases.py`, `tools/score.py`; `docs/workflow-format.md`, `docs/tools-and-code.md`, `docs/api.md`; `env.example`.
+`README.md`; `VERSION`; `briefs/brief-a.md` (47 rules, one product), `briefs/brief-b.md` (up to three products, builds on A); `tools/openapi.json`; `public-test-set.json` (13 cases); `examples/base-agent.json` (2-step example agent; 2/13 in the organizers' run); `examples/agent_builder.py` (Claude Agent SDK builder; needs `pip install claude-agent-sdk` and a Claude login or `ANTHROPIC_API_KEY`; default model `claude-opus-5-5`; 10/10 on Brief A in one organizer run); `.claude/skills/build-phone-agent/SKILL.md`; `freya.py`; `tools/run_cases.py`, `tools/score.py`; `docs/workflow-format.md`, `docs/tools-and-code.md`, `docs/api.md`; `env.example`.
 
 ## Environment
 
@@ -100,7 +102,8 @@ Sat 10 Oct 10:00 kit and keys. Sun 17:00 hidden briefs open. Sun 20:00 submissio
 - `[VERIFIED]` `public-test-set.json`: 13 cases (PUB-01..10 for Brief A, PUB-11..13 for Brief B), all with `now` = `2026-10-14T11:00`. Each has identity answers, products, a customer script, `expected` bank records and `checks` for the judge. PUB-10 injects a fault (`create_promise` fails the first time).
 - `[VERIFIED]` Families: happy path, third party, identity failure, dates (after deadline, vague then holiday), hardship, amounts (floor), already paid, restructuring, tool failure, multi-product (all, some, deadline differs).
 - `[VERIFIED]` `run_cases.py <agent_id> --brief A|B [--reps 3] [--style pieces|corrects|talkative|asks_back|in_words] [--only IDS] [--out file]`. Prints pass/fail per case, tool calls, failure reasons; median slowest agent turn (warning above 10 s).
-- `[VERIFIED]` The sample builder passes about half of Brief A and not the same half each run.
+- `[VERIFIED]` v1 sample builder (`minimal_builder.py`, removed in v2): about half of Brief A, not the same half each run. Our own run: 6/10.
+- `[VERIFIED]` v3 example builder `agent_builder.py`: Claude reads the brief, writes the workflow, saves it, runs the practice customers in the foreground and fixes failures at most three times. Its self-test uses `run_cases.py --brief A|B`, i.e. the public practice cases, which do not exist for a hidden brief. Organizers report 10/10 on Brief A in one run.
 
 ## Conflicts between sources (kit wins)
 

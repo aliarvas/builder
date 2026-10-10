@@ -3,7 +3,7 @@
 **Owner:** Freya boundary, verified provider behavior and adapter  
 **Read when:** Touching authentication, workflow payloads, agent lifecycle, simulations or provider errors
 
-Facts and the API table are in [`STARTER-KIT-FACTS.md`](STARTER-KIT-FACTS.md). The workflow JSON itself is specified in `build-the-builder/docs/workflow-format.md` and `tools-and-code.md`; follow those, do not paraphrase them here.
+Facts and the API table are in [`STARTER-KIT-FACTS.md`](STARTER-KIT-FACTS.md). The workflow JSON itself is specified in `build-the-builder-v2/docs/workflow-format.md` and `tools-and-code.md`; follow those, do not paraphrase them here.
 
 ## Adapter responsibilities
 
@@ -40,7 +40,7 @@ The adapter must not read the brief, invent policy, or silently drop a critical 
 ## First vertical slice
 
 1. `cp env.example env.sh`, fill keys, `source env.sh`.
-2. `python3 examples/minimal_builder.py briefs/brief-a.md`; note `agent_id`.
+2. Done 2026-10-10 with the v1 sample builder (workflow `50dafbaa...`, baseline 6/10). In the v3 kit the equivalent is saving `examples/base-agent.json` or running `examples/agent_builder.py`.
 3. `python3 tools/run_cases.py <agent_id> --brief A`; record the baseline in `docs/EVALUATION-AND-TESTING.md` results.
 4. Build `builder/build.py` reproducing the minimal builder but reading tools from the OpenAPI file, then export a workflow. This proves the contract end to end.
 5. Only then add the structured pipeline.

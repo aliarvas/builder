@@ -10,7 +10,7 @@ This is the only document every development agent must read. Read the linked doc
 
 ## Source-of-truth order
 
-1. Official hackathon page, rules and starter kit (`build-the-builder/`). If they differ, the newer kit wins.
+1. Official hackathon page, rules and starter kit (`build-the-builder-v2/`). If they differ, the newer kit wins.
 2. `docs/STARTER-KIT-FACTS.md`: verified facts distilled from (1).
 3. Topic owner documents listed below.
 4. `docs/REFERENCE-NOTES.md`.
@@ -31,6 +31,7 @@ Status labels:
 4. **Honesty.** Never let the agent claim something was recorded when the tool call failed.
 5. **Stay inside limits.** 30 minutes per brief including self-tests, update the workflow in place (cap is 10 per the page, 200 per the kit), only the bank's tool API, fixed phone-agent model, `agent_config` omitted. Python 3.10+, standard library.
 6. **Traceable and reproducible.** Every builder run writes a trace. A fresh checkout must reproduce the result with one command.
+7. **Log every failure as a finding.** When the builder or an agent it built fails, record why in [`docs/UAT-FINDINGS.md`](docs/UAT-FINDINGS.md): symptom, root cause, fix, status. Words, not code. This is our UAT data.
 
 ## Do not build
 
@@ -49,12 +50,13 @@ Status labels:
 - Any Freya-facing change: [`docs/FREYA-INTEGRATION.md`](docs/FREYA-INTEGRATION.md)
 - Collections behavior and guardrails: [`docs/COLLECTIONS-POLICY.md`](docs/COLLECTIONS-POLICY.md)
 - Tests, practice cases, optimization: [`docs/EVALUATION-AND-TESTING.md`](docs/EVALUATION-AND-TESTING.md)
+- Recording a failure and its cause: [`docs/UAT-FINDINGS.md`](docs/UAT-FINDINGS.md)
 - Before declaring work complete or submitting: [`docs/DEFINITION-OF-DONE.md`](docs/DEFINITION-OF-DONE.md)
 - Deferred ideas, not required: [`docs/REFERENCE-NOTES.md`](docs/REFERENCE-NOTES.md)
 
 ## Kit location
 
-The starter kit is in `build-the-builder/` (README, `docs/workflow-format.md`, `docs/tools-and-code.md`, `docs/api.md`, `freya.py`, practice briefs and cases). Read its workflow docs before touching rendering code.
+The starter kit is in `build-the-builder-v2/` (README, `docs/workflow-format.md`, `docs/tools-and-code.md`, `docs/api.md`, `freya.py`, practice briefs and cases). Read its workflow docs before touching rendering code.
 
 ## Kickoff rule
 

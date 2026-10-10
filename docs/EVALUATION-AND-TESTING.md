@@ -23,7 +23,7 @@ A case passes only if all three pass: **outcome** (bank ledger correct, promise 
 
 ### L3 — Practice cases on Freya
 
-- Tool: `build-the-builder/tools/run_cases.py <agent_id> --brief A|B` with `public-test-set.json` (13 cases, `now` = 2026-10-14T11:00). It scores the bank ledger (`tools/score.py`) plus a judge verdict per case.
+- Tool: `build-the-builder-v2/tools/run_cases.py <agent_id> --brief A|B` with `public-test-set.json` (13 cases, `now` = 2026-10-14T11:00). It scores the bank ledger (`tools/score.py`) plus a judge verdict per case.
 - Options: `--reps 3` (a case counts only if all runs pass, as in the final), `--only PUB-07,...`, `--out results/run.json`, and customer styles `--style pieces|corrects|talkative|asks_back|in_words`. Always test each style; the final customers talk like that.
 - Simulations queue one at a time (3 to 11 minutes per 10 cases). Treat a green single run as a hint.
 - The tool prints the median slowest agent turn; above 10 s the platform model was slow and the score is unreliable. Rerun later.
@@ -60,3 +60,11 @@ baseline score
 ## Evidence kept per run
 
 Builder commit, brief hash, Freya workflow/agent IDs, per-case results, failure labels, and the trace required by the submission. Remove keys and customer-like data.
+
+## Results log
+
+| Date (UTC) | Builder | Brief | Runs | Passed | Failed cases and labels |
+|---|---|---|---|---|---|
+| 2026-10-10 11:12 | kit `examples/minimal_builder.py` (one node, brief as prompt) | A | 1 | 6/10 | PUB-02 missing tool call (no `schedule_callback`, no `close_call`); PUB-03 identity error (`get_account` before verification, check ended after one wrong answer); PUB-07 date error (offered 21 Oct instead of next business day 27 Oct after holiday); PUB-09 missing tool call (no `transfer_to_agent`, no `close_call`) |
+
+Baseline conclusions: the single-node agent fails on tool-call discipline (says it does something but does not call the tool, skips `close_call`), on counting (identity attempts) and on date arithmetic. These match the planned structure: separate nodes with scoped tools, counters and date facts computed in code.

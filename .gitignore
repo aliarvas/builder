@@ -15,7 +15,11 @@ mlruns/
 # Secrets and local state
 env.sh
 *.env
-build-the-builder/env.sh
-build-the-builder/.freya-agents.json
-build-the-builder/.personas.json
-build-the-builder/results/
+.freya-agents.json
+build-the-builder-v2/env.sh
+build-the-builder-v2/.freya-agents.json
+build-the-builder-v2/.personas.json
+build-the-builder-v2/results/
+build-the-builder-v2/traces/
+build-the-builder-v2/out/
+build-the-builder-v2/__pycache__/
