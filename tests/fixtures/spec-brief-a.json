@@ -127,7 +127,9 @@
     ],
     "products_field": "products",
     "products_variable": "account_products",
-    "product_id_field": "product_id"
+    "product_id_field": "product_id",
+    "product_kind_field": "type",
+    "product_label_field": "card_last4"
   },
   "negotiation": {
     "rules": [

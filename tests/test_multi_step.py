@@ -239,8 +239,10 @@ class OfferCheckTests(unittest.TestCase):
         })
         self.assertEqual("ready", second["offer_progress"])
         self.assertEqual(2, second["offers_accepted_count"])
+        # F-044: spoken read-back; the bracketed number is for the promise tool only.
         self.assertEqual(
-            "Product 1: 95.00 on Friday 2026-10-16; Product 2: 150.00 on Tuesday 2026-10-20",
+            "credit card ending 0377: 95 on Friday, 16 October [product number 1]; "
+            "personal loan: 150 on Tuesday, 20 October [product number 2]",
             second["offers_summary"],
         )
         accepted = json.loads(second["offers_accepted"])

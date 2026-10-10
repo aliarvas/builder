@@ -238,13 +238,24 @@ amount_too_high: That amount is more than the amount due. Offer [amount].
 - Purpose: Reads back and records a confirmed arrangement.
 - Receiver: phone agent
 - Used at: builder/workflow.py — confirm_record
-- Approximate tokens: ~73 static + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~99 static + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Checked offers: {{offers_summary}}
-Read these back exactly and ask for a clear confirmation. After a clear yes, call the promise tool once per product, giving only its product number. Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.
+Read these back in these words and ask for a clear confirmation. The product number in square brackets is only for the promise tool: never say it to the customer. After a clear yes, call the promise tool once per product, giving only its product number. Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.
 Rules:
 {rules}
+```
+
+## ACCOUNT_WAIT_LINE
+
+- Purpose: Fixed line spoken while the account is fetched, when the spec gives none (F-043).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/workflow.py — account step on_enter
+- Approximate tokens: ~13 (characters ÷ 4)
+
+```text
+Thank you. One moment while I check your account.
 ```
 
 ## CLOSING_FALLBACK_SAY
@@ -328,7 +339,7 @@ You turn a bank's collections brief into structured data for an outbound phone a
 - Purpose: Shared first message of every extraction call: the documents, the tool contract and the call variables.
 - Receiver: builder model
 - Used at: builder/extract.py — shared, cached context block
-- Approximate tokens: ~202 static + `{documents}` characters ÷ 4 + `{contract}` characters ÷ 4 + `{call_variables}` characters ÷ 4 at runtime
+- Approximate tokens: ~535 static + `{documents}` characters ÷ 4 + `{contract}` characters ÷ 4 + `{call_variables}` characters ÷ 4 at runtime
 
 ```text
 # DOCUMENTS (in order; later overrides earlier)
@@ -346,6 +357,18 @@ You turn a bank's collections brief into structured data for an outbound phone a
 # PHONE AGENT SKELETON
 
 The program builds these steps; your data fills them: opening (introduction, find out who answered) -> third_party (someone else answered) or identity (security questions with the identity tool) -> account (fetch the late products) -> negotiate (get a date and an amount per product; code checks each offer against the date and amount rules) -> confirm_record (read back, confirm, record each promise) -> closing (one goodbye sentence, then the closing tool once). Special paths (for example a transfer request) can interrupt the steps they are available in. The closing outcome comes from a table that maps call-end states to outcome rows.
+
+# RULES THE PROGRAM ALREADY ENFORCES
+
+Any RULE may carry "enforced_by" when program code already guarantees exactly that rule. Such a rule can be left out of the phone agent's prompt to save room; it stays in the spec. Allowed values:
+- offer_dates: a promise date before the earliest or after the latest allowed date is rejected and the allowed date is offered; each product's deadline is computed.
+- business_days: a date that is not a business day or is a holiday is rejected and the next business day is offered.
+- offer_amounts: an amount below the floor or above the maximum is rejected and the limit is offered; an amount in between is accepted.
+- weekday_reading: how "next <weekday>" and "this <weekday>" become a date.
+- invalid_offer_limit: a product is given up after too many offers that fail these checks.
+- identity_attempts: wrong identity answers are counted and the check stops when none are left.
+- closing_outcome: the closing table picks the outcome and reason; the goodbye sentence is said first; the closing tool is called exactly once and last; a row marked to win over a promise wins.
+Leave enforced_by out for anything the agent must say, ask, propose or decide, and for closing logic the table cannot express. A rule that covers two checks, or a check and an instruction, is split into separate rules.
 ```
 
 ## EXTRACT_OPENING_IDENTITY_TASK
@@ -353,13 +376,13 @@ The program builds these steps; your data fills them: opening (introduction, fin
 - Purpose: Extracts the agent identity, opening, third-party handling, identity check and global rules.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'opening_identity'
-- Approximate tokens: ~869 (characters ÷ 4)
+- Approximate tokens: ~933 (characters ÷ 4)
 
 ```text
-Extract the sections agent, opening, third_party, identity and global_rules. RULE means {"text": "...", "source": "verbatim excerpt"}.
+Extract the sections agent, opening, third_party, identity and global_rules. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
 Return this JSON shape:
 {
- "agent": {"name": "how the agent presents itself", "language": "language of the call", "introduction": RULE (what the first sentence must say: who is calling, for whom, recording notice)},
+ "agent": {"name": "how the agent presents itself", "language": "language of the call", "introduction": RULE (what the first sentence must say: who is calling, for whom, recording notice), "wait_line": "one short sentence in the language of the call, said while the account is looked up after identity is verified, for example a thank-you and a request to wait; no debt details"},
  "opening": {
   "rules": [RULE] (other opening rules: what may be said before verification, how to answer questions about who or what is calling),
   "confirmation_question": RULE (how to ask whether the intended customer is speaking),
@@ -392,14 +415,14 @@ Return this JSON shape:
 - Purpose: Extracts the account, negotiation and confirmation sections.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'flow'
-- Approximate tokens: ~577 (characters ÷ 4)
+- Approximate tokens: ~642 (characters ÷ 4)
 
 ```text
-Extract the sections account, negotiation and confirmation. RULE means {"text": "...", "source": "verbatim excerpt"}.
+Extract the sections account, negotiation and confirmation. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
 Date limits, amount limits and the offer limit are extracted elsewhere; here keep only the conversation rules.
 Return this JSON shape:
 {
- "account": {"rules": [RULE] (how to state the debt and the products, in which order), "products_field": "account tool response field (array) with the late products", "product_id_field": "field of one product item that identifies it for the promise tool"},
+ "account": {"rules": [RULE] (how to state the debt and the products, in which order), "products_field": "account tool response field (array) with the late products", "product_id_field": "field of one product item that identifies it for the promise tool", "product_kind_field": "product item field with the kind of product, or """, "product_label_field": "product item field the customer recognises the product by, such as its last digits, or """},
  "negotiation": {"rules": [RULE] (what to ask first, what counts as a refusal, persuasion attempts and what each proposes, what never to offer, per-product handling),
   "intents": [{"value": "snake_case code", "meaning": "...", "route": "readback | end | stay", "outcome": "...", "reason": "...", "source": "..."}]
    (the customer's state after each turn. route readback: an agreed date and amount are ready to read back. end: the customer refuses any arrangement after the allowed attempts; give the closing-table outcome and reason. stay: keep negotiating. At least one readback and one end value. Only refusing to pay or to talk may use route end. Situations with their own sentence or tool (the payment was already made, the debt is denied, a transfer is requested, financial difficulty) are special paths, extracted elsewhere: never list them here, or the call would close without the sentence or the tool.)},
@@ -420,10 +443,10 @@ Return this JSON shape:
 - Purpose: Extracts the date and amount rules that code uses to check every offer.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'offer'
-- Approximate tokens: ~726 (characters ÷ 4)
+- Approximate tokens: ~743 (characters ÷ 4)
 
 ```text
-Extract the section offer: the calendar, the date limits and the amount limits a promise must meet. Code evaluates them against the call's current date; you only copy the rule data. RULE means {"text": "...", "source": "verbatim excerpt"}.
+Extract the section offer: the calendar, the date limits and the amount limits a promise must meet. Code evaluates them against the call's current date; you only copy the rule data. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
 Return this JSON shape:
 {
  "offer": {
@@ -452,13 +475,13 @@ Return this JSON shape:
 - Purpose: Extracts the closing table, the special paths and the closing tool fields.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'outcomes'
-- Approximate tokens: ~837 static + `{states}` characters ÷ 4 at runtime
+- Approximate tokens: ~901 static + `{states}` characters ÷ 4 at runtime
 
 ```text
-Extract the sections outcomes, special_paths and closing. RULE means {"text": "...", "source": "verbatim excerpt"}.
+Extract the sections outcomes, special_paths and closing. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
 Return this JSON shape:
 {
- "closing": {"rules": [RULE], "outcome_field": "closing tool request field for the outcome", "reason_field": "closing tool request field for the reason"},
+ "closing": {"rules": [RULE] (how the call ends; most are enforced_by closing_outcome. An instruction for what the agent does during the call, such as notes or transfers, belongs to the step where it happens, not here), "outcome_field": "closing tool request field for the outcome", "reason_field": "closing tool request field for the reason"},
  "outcomes": [{"outcome": "...", "reason": "... or \"\"", "when": RULE, "say": RULE (the goodbye sentence said before the closing tool; include every sentence the brief requires in that situation), "wins_over_promise": true or false (true only if this row is used even after a promise was recorded), "states": ["call-end state names below that close with this row"]}]
    (one row per outcome and reason pair the brief allows; every pair from the closing table.)
  "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (said word for word), "ask": RULE (optional; leave the key out unless the documents require one question before acting, for example whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer and waits for the answer, so it must be one question ending with "?", never an instruction), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]
@@ -541,13 +564,13 @@ Return {"items": [{"id": number, "status": "covered | not_relevant | missing", "
 - Purpose: Asks once for spec additions that cover the items the coverage call found missing.
 - Receiver: builder model
 - Used at: builder/extract.py — targeted coverage re-ask
-- Approximate tokens: ~158 static + `{items}` characters ÷ 4 + `{spec}` characters ÷ 4 at runtime
+- Approximate tokens: ~175 static + `{items}` characters ÷ 4 + `{spec}` characters ÷ 4 at runtime
 
 ```text
 These document items are not covered by the spec below:
 {items}
 
-For each item, either add it to the spec or explain why the phone agent does not need it. Return {"additions": [{"items": [ids], "target": "<stage>.rules | global_rules | special_paths | outcomes", "value": RULE or a full special path or outcome row in the spec's shape}], "not_relevant": [{"item": id, "why": "..."}]}. Stages: opening, third_party, identity, account, negotiation, confirmation, offer, closing. RULE means {"text": "...", "source": "verbatim excerpt"}. Prefer a short rule in the step where it applies; use global_rules only for whole-call rules.
+For each item, either add it to the spec or explain why the phone agent does not need it. Return {"additions": [{"items": [ids], "target": "<stage>.rules | global_rules | special_paths | outcomes", "value": RULE or a full special path or outcome row in the spec's shape}], "not_relevant": [{"item": id, "why": "..."}]}. Stages: opening, third_party, identity, account, negotiation, confirmation, offer, closing. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}. Prefer a short rule in the step where it applies; use global_rules only for whole-call rules.
 
 # SPEC
 {spec}

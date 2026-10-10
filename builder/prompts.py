@@ -213,10 +213,16 @@ OFFER_VERDICT_MESSAGES = PromptDefinition(
 CONFIRM_TASK_TEMPLATE = PromptDefinition(
     "CONFIRM_TASK_TEMPLATE", "Reads back and records a confirmed arrangement.", "phone agent",
     "builder/workflow.py — confirm_record",
-    "Checked offers: {{offers_summary}}\nRead these back exactly and ask for a clear confirmation. "
+    "Checked offers: {{offers_summary}}\nRead these back in these words and ask for a clear confirmation. "
+    "The product number in square brackets is only for the promise tool: never say it to the customer. "
     "After a clear yes, call the promise tool once per product, giving only its product number. "
     "Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.\nRules:\n{rules}",
     ("{rules}",),
+)
+ACCOUNT_WAIT_LINE = PromptDefinition(
+    "ACCOUNT_WAIT_LINE", "Fixed line spoken while the account is fetched, when the spec gives none (F-043).",
+    "phone agent (fixed spoken line)", "builder/workflow.py — account step on_enter",
+    "Thank you. One moment while I check your account.",
 )
 CLOSING_FALLBACK_SAY = PromptDefinition(
     "CLOSING_FALLBACK_SAY", "Spoken goodbye when the matched outcome row has an empty closing sentence.", "phone agent (fixed spoken line)",
@@ -295,11 +301,26 @@ EXTRACTION_CONTEXT_TEMPLATE = PromptDefinition(
     "offer against the date and amount rules) -> confirm_record (read back, confirm, record each promise) -> "
     "closing (one goodbye sentence, then the closing tool once). Special paths (for example a transfer "
     "request) can interrupt the steps they are available in. The closing outcome comes from a table that maps "
-    "call-end states to outcome rows.",
+    "call-end states to outcome rows.\n\n"
+    "# RULES THE PROGRAM ALREADY ENFORCES\n\n"
+    "Any RULE may carry \"enforced_by\" when program code already guarantees exactly that rule. Such a rule can "
+    "be left out of the phone agent's prompt to save room; it stays in the spec. Allowed values:\n"
+    "- offer_dates: a promise date before the earliest or after the latest allowed date is rejected and the allowed "
+    "date is offered; each product's deadline is computed.\n"
+    "- business_days: a date that is not a business day or is a holiday is rejected and the next business day is offered.\n"
+    "- offer_amounts: an amount below the floor or above the maximum is rejected and the limit is offered; an amount "
+    "in between is accepted.\n"
+    "- weekday_reading: how \"next <weekday>\" and \"this <weekday>\" become a date.\n"
+    "- invalid_offer_limit: a product is given up after too many offers that fail these checks.\n"
+    "- identity_attempts: wrong identity answers are counted and the check stops when none are left.\n"
+    "- closing_outcome: the closing table picks the outcome and reason; the goodbye sentence is said first; the "
+    "closing tool is called exactly once and last; a row marked to win over a promise wins.\n"
+    "Leave enforced_by out for anything the agent must say, ask, propose or decide, and for closing logic the table "
+    "cannot express. A rule that covers two checks, or a check and an instruction, is split into separate rules.",
     ("{documents}", "{contract}", "{call_variables}"),
 )
 
-_RULE_SHAPE = '{"text": "...", "source": "verbatim excerpt"}'
+_RULE_SHAPE = '{"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}'
 
 EXTRACT_OPENING_IDENTITY_TASK = PromptDefinition(
     "EXTRACT_OPENING_IDENTITY_TASK",
@@ -309,7 +330,9 @@ EXTRACT_OPENING_IDENTITY_TASK = PromptDefinition(
     "Return this JSON shape:\n"
     "{\n"
     ' "agent": {"name": "how the agent presents itself", "language": "language of the call", '
-    '"introduction": RULE (what the first sentence must say: who is calling, for whom, recording notice)},\n'
+    '"introduction": RULE (what the first sentence must say: who is calling, for whom, recording notice), '
+    '"wait_line": "one short sentence in the language of the call, said while the account is looked up after '
+    'identity is verified, for example a thank-you and a request to wait; no debt details"},\n'
     ' "opening": {\n'
     '  "rules": [RULE] (other opening rules: what may be said before verification, how to answer questions '
     'about who or what is calling),\n'
@@ -361,7 +384,10 @@ EXTRACT_FLOW_TASK = PromptDefinition(
     "{\n"
     ' "account": {"rules": [RULE] (how to state the debt and the products, in which order), '
     '"products_field": "account tool response field (array) with the late products", '
-    '"product_id_field": "field of one product item that identifies it for the promise tool"},\n'
+    '"product_id_field": "field of one product item that identifies it for the promise tool", '
+    '"product_kind_field": "product item field with the kind of product, or \"\"", '
+    '"product_label_field": "product item field the customer recognises the product by, such as its last digits, '
+    'or \"\""},\n'
     ' "negotiation": {"rules": [RULE] (what to ask first, what counts as a refusal, persuasion attempts and what each '
     "proposes, what never to offer, per-product handling),\n"
     '  "intents": [{"value": "snake_case code", "meaning": "...", "route": "readback | end | stay", '
@@ -437,7 +463,9 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     "Extract the sections outcomes, special_paths and closing. RULE means " + _RULE_SHAPE + ".\n"
     "Return this JSON shape:\n"
     "{\n"
-    ' "closing": {"rules": [RULE], "outcome_field": "closing tool request field for the outcome", '
+    ' "closing": {"rules": [RULE] (how the call ends; most are enforced_by closing_outcome. An instruction for '
+    "what the agent does during the call, such as notes or transfers, belongs to the step where it happens, not here), "
+    '"outcome_field": "closing tool request field for the outcome", '
     '"reason_field": "closing tool request field for the reason"},\n'
     ' "outcomes": [{"outcome": "...", "reason": "... or \\"\\"", "when": RULE, "say": RULE (the goodbye sentence '
     "said before the closing tool; include every sentence the brief requires in that situation), "
@@ -555,6 +583,7 @@ PROMPTS = (
     NEGOTIATION_TASK_TEMPLATE,
     OFFER_VERDICT_MESSAGES,
     CONFIRM_TASK_TEMPLATE,
+    ACCOUNT_WAIT_LINE,
     CLOSING_FALLBACK_SAY,
     SPECIAL_PATH_TASK_TEMPLATE,
     SPECIAL_ASK_TASK_TEMPLATE,

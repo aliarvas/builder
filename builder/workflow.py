@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from .prompts import (
+    ACCOUNT_WAIT_LINE,
     CLOSING_FALLBACK_SAY,
     CONVERSATION_NO_TOOL_RULE,
     CONVERSATION_TOOL_RULE_TEMPLATE,
@@ -31,7 +32,7 @@ from .offer_check import (
     OFFER_AMOUNT_KIND, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
     promise_values_hook, special_noted_code,
 )
-from .spec import OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
+from .spec import ENFORCEMENT_CHECKS, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
 from .tools_from_openapi import CALL_VARIABLES
 
 
@@ -920,13 +921,10 @@ def _check_identity_fields(
         warnings.append(message)
 
 
-def build_spec_workflow(
-    spec: PhoneAgentSpec, tools: list[dict[str, Any]], warnings: list[str] | None = None
+def _render_spec_workflow(
+    spec: PhoneAgentSpec, tools: list[dict[str, Any]], warnings: list[str] | None, plan: "RulePlan",
 ) -> dict[str, Any]:
-    """Render the deterministic skeleton from a validated spec and OpenAPI tools.
-
-    Non-fatal problems are appended to ``warnings`` (written to the trace by build.py).
-    """
+    """Render the skeleton with the step and global rules chosen by ``plan``."""
     by_name = _tool_index(tools)
     _check_identity_fields(spec, by_name["verify_identity"], warnings)
     close_body = by_name["close_call"]["function"]["parameters"]["properties"]["body"].get("properties", {})
@@ -1017,7 +1015,7 @@ def build_spec_workflow(
         question=opening["confirmation_question"]["text"],
         unclear=opening["unclear_instruction"]["text"],
         forbidden=", ".join(opening["forbidden_before_verification"]),
-        rules=_rule_lines(spec.opening.rules),
+        rules=_rule_lines(plan.rules("opening")),
     )
     unclear_limit = opening["max_unclear_asks"] - 1
     nodes: dict[str, Any] = {
@@ -1042,7 +1040,7 @@ def build_spec_workflow(
             {"target_node": "opening_reask", "description": "Ask once more", "condition": {"operator": "always"}},
         ]),
         "third_party": _conversation("third_party", render_prompt(
-            THIRD_PARTY_TASK_TEMPLATE, rules=_rule_lines(spec.third_party.rules)
+            THIRD_PARTY_TASK_TEMPLATE, rules=_rule_lines(plan.rules("third_party"))
         ), [callback_tool], [
             to_closing("callback_scheduled", "Callback was scheduled"),
             to_closing("callback_failed", "Callback could not be scheduled"),
@@ -1054,7 +1052,7 @@ def build_spec_workflow(
             failed_answer=identity["failed_answer_instruction"]["text"],
             attempts_left=identity["attempts_left_field"],
             exhausted_say=identity["exhausted_say"]["text"],
-            rules=_rule_lines(spec.identity.rules),
+            rules=_rule_lines(plan.rules("identity")),
         ), [identity_tool], [
             _transition("account", "Identity verified", [
                 _condition("identity_verified", "equals", value) for value in ("true", "True")
@@ -1062,7 +1060,9 @@ def build_spec_workflow(
             to_closing("identity_failed", "No identity attempts remain"),
         ]),
         "account": {
-            "name": "account", "node_type": "api_request", "on_enter": {"type": "silent"},
+            # F-043: a fixed line covers the account lookup, so the platform adds no filler of its own.
+            "name": "account", "node_type": "api_request",
+            "on_enter": {"type": "tts", "text": spec.agent.wait_line or ACCOUNT_WAIT_LINE.text},
             "passthrough": True, "passthrough_default_transition": "offer_setup",
             "pre_actions": [account_tool],
             "response_mapping": [{
@@ -1090,7 +1090,7 @@ def build_spec_workflow(
         ]),
         "negotiate": _conversation("negotiate", render_prompt(
             NEGOTIATION_TASK_TEMPLATE,
-            rules=_rule_lines(spec.account.rules + spec.negotiation.rules + spec.offer.rules),
+            rules=_rule_lines(plan.rules("negotiate")),
         ), [], [
             {
                 "target_node": "check_offer", "description": "The customer named a date and an amount",
@@ -1124,7 +1124,7 @@ def build_spec_workflow(
             ),
         ]),
         "confirm_record": _conversation("confirm_record", render_prompt(
-            CONFIRM_TASK_TEMPLATE, rules=_rule_lines(spec.confirmation.rules)
+            CONFIRM_TASK_TEMPLATE, rules=_rule_lines(plan.rules("confirm_record"))
         ), [promise_tool], [
             _transition("negotiate", "Customer revised or rejected the read-back", [
                 _condition(confirmation["intent_variable"], "equals", value)
@@ -1270,7 +1270,7 @@ def build_spec_workflow(
             agent_name=spec.agent.name,
             language=spec.agent.language,
             introduction=spec.agent.introduction.text,
-            rules=_rule_lines(spec.global_rules),
+            rules=_rule_lines(plan.rules(GLOBAL)),
         ),
         "nodes": nodes,
         "global_nodes": global_nodes,
@@ -1281,6 +1281,227 @@ def build_spec_workflow(
             "title": "Mx", "now": "2000-01-03T12:00",
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Prompt budget (T-009): every spec rule ends up somewhere, and the trace says where.
+# ---------------------------------------------------------------------------
+
+PROMPT_TARGET_TOKENS = 1200
+PROMPT_HARD_LIMIT_TOKENS = 1500
+GLOBAL = "global"
+# Step prompt -> spec sections whose rules it shows. Closing rules have no step prompt:
+# a rule not guaranteed by the closing code goes to the global prompt.
+RULE_STEPS = {
+    "opening": ("opening",),
+    "third_party": ("third_party",),
+    "identity": ("identity",),
+    "negotiate": ("account", "negotiation", "offer"),
+    "confirm_record": ("confirmation",),
+    GLOBAL: ("global", "closing"),
+}
+# Nodes rendered from a plan step's rules (opening_reask repeats the opening rules).
+STEP_NODES = {
+    "opening": ("opening", "opening_reask"), "third_party": ("third_party",), "identity": ("identity",),
+    "negotiate": ("negotiate",), "confirm_record": ("confirm_record",),
+}
+_FILLER = re.compile(r"\b(?:the|a|an|that)\b")
+
+
+def enforcement_available(spec: PhoneAgentSpec, check: str) -> bool:
+    """True when the generated code really performs ``check`` for this spec."""
+    offer = spec.offer.data
+    return {
+        "offer_dates": True,  # earliest is required; latest rules may be empty (no latest date)
+        "business_days": bool(offer.get("promise_date_must_be_business_day")),
+        "offer_amounts": bool(offer.get("min_amount") or offer.get("max_amount")),
+        "weekday_reading": offer.get("next_weekday", "ask") != "ask",
+        "invalid_offer_limit": True,
+        "identity_attempts": True,
+        "closing_outcome": True,
+    }.get(check, False)
+
+
+def _sentences(text: str) -> frozenset[str]:
+    return frozenset(filter(None, (_norm_rule(part) for part in re.split(r"(?<=[.!?;])\s+", text))))
+
+
+def _norm_rule(text: str) -> str:
+    text = re.sub(r"[^a-z0-9<> ]+", " ", text.lower())
+    return re.sub(r"\s+", " ", _FILLER.sub(" ", text)).strip()
+
+
+class RulePlan:
+    """Where each spec rule goes: a step prompt, the global prompt, or code only."""
+
+    def __init__(self, spec: PhoneAgentSpec) -> None:
+        self.spec = spec
+        sections = {
+            "opening": spec.opening.rules, "third_party": spec.third_party.rules, "identity": spec.identity.rules,
+            "account": spec.account.rules, "negotiation": spec.negotiation.rules,
+            "confirmation": spec.confirmation.rules, "offer": spec.offer.rules,
+            "global": spec.global_rules, "closing": spec.closing.rules,
+        }
+        # (rule id, rule, step it is rendered in, or None when it is not in any prompt)
+        self.entries: list[list[Any]] = []
+        self.notes: dict[str, str] = {}
+        for step, names in RULE_STEPS.items():
+            for name in names:
+                for index, rule in enumerate(sections[name]):
+                    key = f"global_rules[{index}]" if name == "global" else f"{name}.rules[{index}]"
+                    self.entries.append([key, rule, step])
+                    self.notes[key] = "closing rule, not guaranteed by code" if name == "closing" else "its section"
+        # Closing rules guaranteed by the closing code never needed a prompt.
+        for entry in self.entries:
+            if entry[0].startswith("closing.") and self._code_ok(entry[1]):
+                self._to_code(entry)
+
+    def _code_ok(self, rule: Rule) -> bool:
+        return bool(rule.enforced_by) and enforcement_available(self.spec, rule.enforced_by)
+
+    def _to_code(self, entry: list[Any]) -> None:
+        entry[2] = None
+        self.notes[entry[0]] = f"code: {entry[1].enforced_by}"
+
+    def rules(self, step: str) -> tuple[Rule, ...]:
+        return tuple(rule for _, rule, where in self.entries if where == step)
+
+    def drop_code_enforced(self, steps: set[str]) -> int:
+        moved = 0
+        for entry in self.entries:
+            if entry[2] in steps and self._code_ok(entry[1]):
+                self._to_code(entry)
+                moved += 1
+        return moved
+
+    def drop_duplicates(self, steps: set[str]) -> int:
+        """Remove a step rule whose every sentence appears word for word (ignoring case,
+        punctuation and articles) in another rule of the same step or in a global rule, which
+        every step prompt includes. Whole sentences only: a part of a sentence can change its
+        meaning ("offer the floor" inside "do not offer the floor")."""
+        moved = 0
+        for entry in self.entries:
+            key, rule, where = entry
+            if where not in steps:
+                continue
+            mine = _sentences(rule.text)
+            for other_key, other, other_where in self.entries:
+                if other_key == key or other_where not in (where, GLOBAL) or not mine:
+                    continue
+                if where == GLOBAL and other_where != GLOBAL:
+                    continue
+                theirs = _sentences(other.text)
+                if mine <= theirs and (mine != theirs or other_where != where or self._before(other_key, key)):
+                    entry[2] = None
+                    place = "global prompt" if other_where == GLOBAL else f"step {other_where}"
+                    self.notes[key] = f"duplicate of {other_key} ({place})"
+                    moved += 1
+                    break
+        return moved
+
+    def _before(self, first: str, second: str) -> bool:
+        keys = [entry[0] for entry in self.entries]
+        return keys.index(first) < keys.index(second)
+
+    def move_shared_to_global(self) -> int:
+        """A rule whose wording appears in two or more step prompts is said once, globally."""
+        by_text: dict[str, list[list[Any]]] = {}
+        for entry in self.entries:
+            if entry[2] not in (None, GLOBAL):
+                by_text.setdefault(_norm_rule(entry[1].text), []).append(entry)
+        moved = 0
+        for entries in by_text.values():
+            if len({entry[2] for entry in entries}) < 2:
+                continue
+            steps = sorted({entry[2] for entry in entries})
+            entries[0][2] = GLOBAL
+            self.notes[entries[0][0]] = f"moved: was in {', '.join(steps)}"
+            for entry in entries[1:]:
+                entry[2] = None
+                self.notes[entry[0]] = f"duplicate of {entries[0][0]} (global prompt)"
+            moved += len(entries)
+        return moved
+
+    def placements(self) -> list[str]:
+        lines = []
+        for key, rule, where in self.entries:
+            place = "global prompt" if where == GLOBAL else f"step {where}" if where else "not in a prompt"
+            note = self.notes[key]
+            if where and rule.enforced_by:
+                note += (f"; code also enforces {rule.enforced_by}, kept: within budget" if self._code_ok(rule)
+                         else f"; tagged {rule.enforced_by} but this spec has no data for that check, kept")
+            lines.append(f"{key} -> {place} ({note}): {rule.text[:80]}")
+        return lines
+
+
+def build_spec_workflow(
+    spec: PhoneAgentSpec, tools: list[dict[str, Any]], warnings: list[str] | None = None,
+    placements: list[str] | None = None, *,
+    target_tokens: int = PROMPT_TARGET_TOKENS, hard_limit_tokens: int = PROMPT_HARD_LIMIT_TOKENS,
+) -> dict[str, Any]:
+    """Render the deterministic skeleton from a validated spec and OpenAPI tools.
+
+    Prompt budget: a step over ``target_tokens`` first loses rules the generated code
+    guarantees, then duplicate wording, then rules shared by several steps move to the
+    global prompt. A step still over ``hard_limit_tokens`` fails the build; no policy rule
+    is cut. Non-fatal problems go to ``warnings``; ``placements`` receives one line per rule
+    (where it ended up) and the per-step budget summary.
+    """
+    plan = RulePlan(spec)
+
+    def render() -> tuple[dict[str, Any], list[str], dict[str, int]]:
+        found: list[str] = []
+        workflow = _render_spec_workflow(spec, tools, found, plan)
+        return workflow, found, workflow_prompt_estimates(workflow)
+
+    workflow, found, estimates = render()
+    before = dict(estimates)
+    stages: list[str] = []
+
+    def over_steps(limit: int) -> set[str]:
+        over_nodes = {key for key, value in estimates.items() if value > limit}
+        steps = {step for step, keys in STEP_NODES.items() if over_nodes & set(keys)}
+        # Every prompt includes the global rules: any step over the limit can shrink them too.
+        return steps | ({GLOBAL} if over_nodes else set())
+
+    for name, stage in (
+        ("code-enforced rules left out", plan.drop_code_enforced),
+        ("duplicate wording removed", plan.drop_duplicates),
+    ):
+        steps = over_steps(target_tokens)
+        if not steps:
+            break
+        if stage(steps):
+            stages.append(name)
+            workflow, found, estimates = render()
+    if over_steps(target_tokens) and plan.move_shared_to_global():
+        stages.append("shared rules moved to the global prompt")
+        workflow, found, estimates = render()
+
+    if warnings is not None:
+        warnings.extend(found)
+    if placements is not None:
+        placements.extend(plan.placements())
+        for key in sorted(estimates):
+            if before[key] != estimates[key] or estimates[key] > target_tokens:
+                placements.append(f"budget {key}: ~{before[key]} -> ~{estimates[key]} tokens "
+                                  f"(target {target_tokens}, limit {hard_limit_tokens})")
+        if stages:
+            placements.append("budget stages: " + "; ".join(stages))
+    over_limit = {key: value for key, value in estimates.items() if value > hard_limit_tokens}
+    if over_limit:
+        raise SpecError(
+            "prompt budget exceeded after leaving out code-enforced rules, removing duplicates and moving "
+            "shared rules to the global prompt (no policy rule is cut): "
+            + ", ".join(f"{key} ~{value} tokens" for key, value in sorted(over_limit.items()))
+            + f" > {hard_limit_tokens}. Shorten the brief's rules for these steps or raise the limit."
+        )
+    if warnings is not None:
+        for key, value in sorted(estimates.items()):
+            if value > target_tokens:
+                warnings.append(f"{key}: prompt ~{value} tokens is over the target {target_tokens} "
+                                f"(limit {hard_limit_tokens})")
+    return workflow
 
 
 def workflow_prompt_estimates(workflow: dict[str, Any]) -> dict[str, int]:

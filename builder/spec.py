@@ -14,10 +14,21 @@ class SpecError(ValueError):
     """Raised when a phone-agent spec is invalid."""
 
 
+# Checks that generated code performs. A rule tagged with one of them (``enforced_by``)
+# may be left out of a step prompt when the budget requires it (T-009); it stays in the spec
+# and in the trace. Each check is available only when the spec carries its data
+# (``enforcement_available`` in builder/workflow.py).
+ENFORCEMENT_CHECKS = (
+    "offer_dates", "business_days", "offer_amounts", "weekday_reading", "invalid_offer_limit",
+    "identity_attempts", "closing_outcome",
+)
+
+
 @dataclass(frozen=True)
 class Rule:
     text: str
     source: str
+    enforced_by: str = ""
 
 
 @dataclass(frozen=True)
@@ -25,6 +36,9 @@ class AgentSpec:
     name: str
     language: str
     introduction: Rule
+    # Short fixed line spoken while the account is fetched (F-043); empty: the builder's
+    # English default. Written in the call's language.
+    wait_line: str = ""
 
 
 @dataclass(frozen=True)
@@ -117,9 +131,13 @@ def _flag(obj: dict[str, Any], key: str, path: str) -> bool:
 
 def _rule(value: Any, path: str) -> Rule:
     obj = _object(value, path)
+    enforced_by = obj.get("enforced_by") or ""
+    if enforced_by not in ("", *ENFORCEMENT_CHECKS):
+        raise SpecError(f"{path}.enforced_by must be one of {list(ENFORCEMENT_CHECKS)} or absent")
     return Rule(
         _string(_required(obj, "text", path), f"{path}.text"),
         _string(_required(obj, "source", path), f"{path}.source", empty=True),
+        enforced_by,
     )
 
 
@@ -151,6 +169,7 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
         _string(_required(agent_data, "name", "agent"), "agent.name"),
         _string(_required(agent_data, "language", "agent"), "agent.language"),
         _rule(_required(agent_data, "introduction", "agent"), "agent.introduction"),
+        _string(agent_data.get("wait_line", ""), "agent.wait_line", empty=True).strip(),
     )
     stages = {name: _stage(root, name) for name in (
         "opening", "third_party", "identity", "account", "negotiation", "confirmation", "closing",
@@ -257,6 +276,10 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
                 _rule(raw, f"{stage_name}.{key}")
             else:
                 _string(raw, f"{stage_name}.{key}")
+    # Optional (F-044): product fields that name a product to the customer.
+    for key in ("product_kind_field", "product_label_field"):
+        if key in stages["account"].data:
+            _string(stages["account"].data[key], f"account.{key}", empty=True)
     max_attempts = _required(stages["confirmation"].data, "max_attempts_per_product", "confirmation")
     if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or max_attempts < 1:
         raise SpecError("confirmation.max_attempts_per_product must be a positive integer")

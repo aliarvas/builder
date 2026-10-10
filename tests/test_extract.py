@@ -340,6 +340,16 @@ class FrameworkStateAndOfferFieldTests(unittest.TestCase):
         issues = [value for key, value in logs if key == "extract_issue"]
         self.assertTrue(any(value.startswith("round=0 [outcomes] special_paths[0].ask") for value in issues))
 
+    def test_product_naming_fields_are_carried_and_checked(self):
+        result, _, _ = run()
+        self.assertEqual("type", result.spec.account.data["product_kind_field"])
+        self.assertEqual("card_last4", result.spec.account.data["product_label_field"])
+        spec = copy.deepcopy(FIXTURE_A)
+        spec["account"]["product_label_field"] = "last_digits"
+        self.assertIn("account.product_label_field: must be a field of one product item", self.check(BRIEF_A[0][1], spec))
+        spec["account"]["product_label_field"] = ""
+        self.assertNotIn("product_label_field", self.check(BRIEF_A[0][1], spec))
+
     def test_compare_treats_an_unmapped_optional_state_as_the_default_row(self):
         explicit = copy.deepcopy(FIXTURE_A)
         refused = next(row for row in explicit["outcomes"] if "default" in row["on"])

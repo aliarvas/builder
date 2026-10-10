@@ -30,6 +30,48 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-044: Read-back sounds machine-made ("Product 1", ISO date, "420.00")
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-01 chat, version 10 (extracted spec)
+- **Run:** customer `c_de6c4d55-76e`, scratchpad `pub01v10.json`
+- **Symptom:** "For Product 1, the amount is 420.00 and the date is Wednesday 2026-10-14. Do you confirm?" The ledger passed, but a judge may count this as unclear communication. The customer never heard "Product 1" before.
+- **Root cause:** The confirmation summary is built from the offer-check variables (`offers_summary`) with internal numbering and raw ISO date and amount formats.
+- **Category:** policy
+- **Fix / lesson:** Use the customer-facing product label (type + the spec's label field, e.g. last digits), a spoken date ("Wednesday, 14 October"), and an amount without needless decimals. Generic formatting, no brief values.
+- **Status:** fixed offline (F-043/044 task). The read-back says the customer-facing name (product kind in words plus the spec's label field, e.g. "credit card ending 4821"; without those fields "the first product"), a spoken date ("Friday, 16 October", the year only when it is not this year) and the amount without needless decimals. The product number stays in square brackets for the promise tool only, and the confirm prompt says never to say it. New optional spec fields: `account.product_kind_field`, `account.product_label_field` (extracted and checked against the account tool's product fields).
+- **Retest:** pending (chat: PUB-01 read-back)
+
+### F-043: Platform filler "Bir saniye lütfen." (Turkish) spoken during a step change
+
+- **Date:** 2026-10-10
+- **Brief / case:** Brief A, PUB-01 chat, version 10
+- **Run:** customer `c_de6c4d55-76e`
+- **Symptom:** After identity passed, while `account → offer_setup → negotiate` ran, the transcript shows an extra assistant line "Bir saniye lütfen." ("One moment please" in Turkish), then the English debt statement.
+- **Root cause:** Not in our workflow or code. The platform's default `agent_config` (which the kit says to omit) has `sttConfig.language` and `ttsConfig.language` = `tr`. The platform seems to insert a wait filler in that language when a turn takes long (passthrough api/code steps).
+- **Category:** platform
+- **Fix / lesson:** We may not send `agent_config`. Try a short English fixed line on the first passthrough step after identity (the kit allows "a short fixed line that covers the wait") so the platform does not need a filler, and check whether the filler disappears. Ask the organizers whether the hidden-brief runs use an English default. **[TO-CONFIRM]**
+- **Status:** fixed offline, to be confirmed live. The account lookup step (the first passthrough step after identity) speaks a short fixed line: the spec's `agent.wait_line` (extracted in the call's language), or the builder's English default "Thank you. One moment while I check your account."
+- **Retest:** pending (chat: does the Turkish filler disappear?)
+
+PUB-01 (version 10, extracted spec) **passed the ledger check**: identity two calls, `get_account` after verification, one `create_promise` (p1, 420, 2026-10-14), one `close_call` = `promise`, text-message sentence said after the promise.
+
+### F-042: Closing rules from the spec never reached any prompt
+
+- **Date:** 2026-10-10
+- **Brief / case:** T-009, rendering the live extractions `traces/f040-*.spec.json`
+- **Run:** offline render, no model or Freya call
+- **Symptom:** `closing.rules` (3 to 8 rules per extracted spec) were not rendered anywhere. Most describe what the closing code already does (exactly one close, goodbye first). Some are agent instructions that were simply lost, for example the Brief A+B rule "on any transfer add no notes".
+- **Root cause:** The renderer showed step rules and global rules only. The closing step is code and has no prompt, and nothing accounted for its rules.
+- **Category:** rendering
+- **Fix / lesson:**
+  - Every spec rule now has a placement, written to the trace as a `rule_placement` line.
+  - A closing rule tagged `enforced_by: closing_outcome` needs no prompt; any other closing rule goes to the global prompt.
+  - The extraction prompt asks the model to tag closing rules and to put agent instructions in the step where they apply.
+  - Two Brief A+B closing rules are still not enforced by the skeleton: "every product noted paid closes as paid" and "otherwise the reason of the first non-paid note". They sit in the global prompt, but the agent does not choose the closing outcome. This is a skeleton gap, listed in the T-009 report.
+- **Status:** fixed offline (T-009); skeleton gap open
+- **Retest:** -
+
 ### F-041: Repair rounds filled empty special-path questions with instructions
 
 - **Date:** 2026-10-10

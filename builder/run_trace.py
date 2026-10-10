@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ class TraceWriter:
     def __init__(self, path: Path, started_at: str | None = None) -> None:
         self.path = path
         self.lines = [f"start_utc: {started_at or utc_now()}"]
+        self._started_monotonic = time.monotonic()
         self._secret_values = tuple(
             value
             for name in SECRET_ENV_NAMES
@@ -60,6 +62,7 @@ class TraceWriter:
         )
 
     def finish(self, status: str = "ok") -> None:
+        self.add("total_duration_seconds", f"{time.monotonic() - self._started_monotonic:.3f}")
         self.add("status", status)
         self.add("end_utc", utc_now())
         self.path.parent.mkdir(parents=True, exist_ok=True)

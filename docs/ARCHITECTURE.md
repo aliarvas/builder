@@ -119,7 +119,7 @@ The kit folder `build-the-builder-v2/` is reference material. Copy the parts the
 
 ## Constraints that shape the design
 
-- **Prompt budget:** each step's dialogue prompt (`system_prompt` + `role_message` + `task_message`) stays within 500 to 1,500 tokens (Freya guidance, see [`STARTER-KIT-FACTS.md`](STARTER-KIT-FACTS.md)). The whole brief is never pasted into one step. Each step gets only the rules for its stage, rewritten short, with computed facts (dates, amounts) filled in by code. The builder measures every step and fails or splits when a step is over budget.
+- **Prompt budget:** each step's dialogue prompt (`system_prompt` + `role_message` + `task_message`) stays within 500 to 1,500 tokens (Freya guidance, see [`STARTER-KIT-FACTS.md`](STARTER-KIT-FACTS.md)). The whole brief is never pasted into one step. Each step gets only the rules for its stage, rewritten short, with computed facts (dates, amounts) filled in by code. The builder measures every step and fails or splits when a step is over budget. Implemented in `build_spec_workflow` (T-009): target 1,200 and hard limit 1,500 tokens. Over the target, a step first leaves out rules tagged `enforced_by` whose check the spec supports, then duplicate sentences, then rules shared by several steps move to the global prompt. Over the hard limit the build fails. Every rule's placement is a `rule_placement` trace line.
 
 - 30 minutes per brief including self-tests; a ten-case simulation takes 3 to 11 minutes, and simulations queue one at a time. Budget at most one or two self-test runs.
 - Build time is a tie-breaker: few model calls, parallel where independent.

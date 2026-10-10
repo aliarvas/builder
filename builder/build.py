@@ -121,6 +121,24 @@ def _ensure_published_version(workflow_id: str) -> int:
     return int(newest["versionNumber"])
 
 
+def _count_nulls(value: Any) -> int:
+    if value is None:
+        return 1
+    if isinstance(value, dict):
+        return sum(_count_nulls(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_count_nulls(item) for item in value)
+    return 0
+
+
+def _has_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_has_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_key(item, key) for item in value)
+    return False
+
+
 def _trace_path(slot: str, print_only: bool, validate: bool) -> Path:
     if print_only:
         suffix = ".print.log"
@@ -224,16 +242,28 @@ def main(argv: list[str] | None = None) -> int:
             trace.add("warning", warning)
         if spec is not None:
             spec_warnings: list[str] = []
-            workflow = build_spec_workflow(spec, tools, spec_warnings)
-            for warning in spec_warnings:
-                trace.add("warning", warning)
+            placements: list[str] = []
+            try:
+                workflow = build_spec_workflow(spec, tools, spec_warnings, placements)
+            finally:  # also on a budget failure: the trace shows where every rule went
+                for warning in spec_warnings:
+                    trace.add("warning", warning)
+                for line in placements:  # T-009: where every spec rule ended up, and the prompt budget
+                    if line.startswith("budget "):
+                        trace.add("budget", line.removeprefix("budget "))
+                    else:
+                        trace.add("rule_placement", line)
             trace.add("renderer", "multi-step spec_version=1")
         else:
             workflow = build_workflow(brief_text, tools)
             trace.add("renderer", "single-step fallback (--single-step)")
         trace.add("nodes", len(workflow["nodes"]))
         trace.add("global_nodes", len(workflow.get("global_nodes", {})))
+        trace.add("steps", len(workflow["nodes"]) + len(workflow.get("global_nodes", {})))
         trace.add("tools", len(tools))
+        # The kit rules (no agent_config, no null) apply to what we send; the platform's export adds both.
+        trace.add("sent_agent_config", "present" if _has_key(workflow, "agent_config") else "absent")
+        trace.add("sent_nulls", _count_nulls(workflow))
         for step, step_tools in workflow_tools_by_step(workflow).items():
             trace.add("step", f"{step}: tools={','.join(step_tools) if step_tools else 'none'}")
         for step, estimate in workflow_prompt_estimates(workflow).items():

@@ -10,8 +10,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from builder import build, freya, freya_chat
-from builder.selftest import SelfTestCase, SelfTestResult, _run_case, generate_cases, run_self_tests
-from builder.spec import load_spec
+from builder.selftest import (
+    MAX_CLOSE_ATTEMPTS, TOOL_FAILED, TOOL_OK, TOOL_UNKNOWN, SelfTestCase, SelfTestResult, _run_case, _success_claim, _tool_outcome,
+    generate_cases, run_self_tests,
+)
+from builder.spec import load_spec, spec_entry_variables
+from builder.tools_from_openapi import CALL_VARIABLES, tools_from_openapi
+from builder.workflow import build_spec_workflow
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +56,49 @@ def passing_call(*, close=True, stuck=False):
             "workflowSnapshot": {"nodeTurnCount": 7},
         })
     return {"messages": messages, "endedReason": "end_call" if close else None}
+
+
+def failed_complete(function, result=None, suffix=""):
+    return {
+        "role": "system",
+        "messageId": "complete-" + function + suffix,
+        "message": json.dumps({
+            "event": "function_call_complete", "function": function,
+            "result": result if result is not None else {"ok": False, "error": "unknown customer_id"},
+        }),
+    }
+
+
+def ok_complete(function, suffix=""):
+    return failed_complete(function, {"status_code": 200, "data": {"ok": True}}, suffix)
+
+
+def start(function, suffix="", **args):
+    payload = {"event": "function_call_start", "function": function}
+    if args:
+        payload["args"] = args
+    return {"role": "system", "messageId": f"start-{function}{suffix}", "message": json.dumps(payload)}
+
+
+def close_case_call(*steps, nodes=("opening", "third_party", "close_record", "end_call")):
+    return {"messages": [event("node_enter", node=name) for name in nodes] + list(steps)}
+
+
+def identity_call(*, reply="I could not verify those details.", close_count=0, extra=(), complete=None):
+    messages = [
+        event("node_enter", node="opening"),
+        event("node_enter", node="identity"),
+        event("function_call_start", function="verify_identity"),
+        *([] if complete is False else [complete or failed_complete("verify_identity")]),
+        {"role": "assistant", "messageId": "reply", "message": reply},
+        *extra,
+    ]
+    for index in range(close_count):
+        messages.append({
+            "role": "system", "messageId": f"close-{index}",
+            "message": json.dumps({"event": "function_call_start", "function": "close_call"}),
+        })
+    return {"messages": messages}
 
 
 class FakeClient:
@@ -127,14 +175,34 @@ class SelfTestGenerationTests(unittest.TestCase):
                 self.assertEqual(3, len(cases))
                 self.assertTrue(all(1 <= len(case.messages) <= 7 for case in cases))
                 self.assertEqual(
-                    ["identity_to_account", "identity_exhausted", "third_party_close"],
+                    ["identity_attempt", "identity_failure_honesty", "third_party_close"],
                     [case.id for case in cases],
                 )
                 self.assertIn(spec.identity_questions[0].ask.text, " ".join(cases[0].messages))
                 self.assertIn(spec.opening.data["third_party_values"][0], " ".join(cases[2].messages))
 
+    def test_cases_never_expect_a_bank_success(self):
+        # The bank mock answers ok=false for the synthetic customer (live check, T-007b).
+        spec = load_spec(SPECS[0])
+        openapi = json.loads(OPENAPIS[0].read_text(encoding="utf-8"))
+        for case in generate_cases(spec, openapi):
+            with self.subTest(case=case.id):
+                self.assertNotIn("account", case.expected_nodes)
+                self.assertNotIn("get_account", case.expected_tools)
+                if "verify_identity" in case.expected_tools:
+                    self.assertTrue(case.check_honesty)
+                    self.assertIn("get_account", case.forbidden_tools)
+                    self.assertIn("account", case.forbidden_nodes)
+                    self.assertFalse(case.require_close)
+
 
 class SelfTestRunnerTests(unittest.TestCase):
+    def honesty_case(self):
+        return SelfTestCase(
+            "honesty", ("hello",), {}, ("opening", "identity"), ("verify_identity",),
+            forbidden_nodes=("account",), forbidden_tools=("get_account",), check_honesty=True,
+        )
+
     def case(self, *, require_close=True):
         return SelfTestCase(
             "case", ("hello",), {}, ("opening", "end_call") if require_close else ("opening",),
@@ -156,7 +224,7 @@ class SelfTestRunnerTests(unittest.TestCase):
         case = SelfTestCase("missing-close", ("hello",), {}, ("opening",), ("verify_identity",), True)
         result = _run_case(client, "workflow", case, 100, lambda: 1)
         self.assertEqual("fail", result.result)
-        self.assertIn("close tool count", result.reason)
+        self.assertIn("close_call was never attempted", result.reason)
         self.assertEqual(1, client.end_calls)
 
     def test_5xx_processed_turn_is_not_resent(self):
@@ -191,6 +259,175 @@ class SelfTestRunnerTests(unittest.TestCase):
         result = _run_case(client, "workflow", case, 100, lambda: 1)
         self.assertEqual("platform_error", result.result)
         self.assertEqual(3, client.chat_calls)
+
+    def test_failed_close_tried_once_passes(self):
+        call = {"messages": [
+            event("node_enter", node="opening"),
+            event("node_enter", node="third_party"),
+            event("function_call_start", function="close_call"),
+            failed_complete("close_call"),
+            event("error", message="close_call returned unknown customer_id"),
+            event("node_enter", node="end_call"),
+        ], "endedReason": "end_call"}
+        case = SelfTestCase("close", ("hello",), {}, ("opening", "third_party", "end_call"), (), True)
+        result = _run_case(FakeClient(call), "workflow", case, 100, lambda: 1)
+        self.assertEqual("pass", result.result, result.reason)
+
+    def close_case(self):
+        return SelfTestCase("close", ("hello",), {}, ("opening", "third_party", "end_call"), (), True)
+
+    def run_close(self, call):
+        return _run_case(FakeClient(call), "workflow", self.close_case(), 100, lambda: 1)
+
+    def test_retry_after_failed_close_passes(self):
+        call = close_case_call(
+            start("close_call", "1"), failed_complete("close_call", suffix="1"),
+            start("close_call", "2"), failed_complete("close_call", suffix="2"),
+        )
+        result = self.run_close(call)
+        self.assertEqual("pass", result.result, result.reason)
+
+    def test_more_close_attempts_than_the_workflow_allows_fail(self):
+        steps = []
+        for index in range(MAX_CLOSE_ATTEMPTS + 1):
+            steps += [start("close_call", str(index)), failed_complete("close_call", suffix=str(index))]
+        result = self.run_close(close_case_call(*steps))
+        self.assertEqual("fail", result.result)
+        self.assertIn(f"sent {MAX_CLOSE_ATTEMPTS + 1} times", result.reason)
+
+    def test_extra_close_calls_fail_even_when_not_required(self):
+        call = identity_call(close_count=MAX_CLOSE_ATTEMPTS + 1)
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("fail", result.result)
+        self.assertIn("close_call sent", result.reason)
+
+    def test_retry_after_successful_close_fails(self):
+        call = close_case_call(
+            start("close_call", "1"), ok_complete("close_call", "1"), start("close_call", "2"),
+        )
+        result = self.run_close(call)
+        self.assertEqual("fail", result.result)
+        self.assertIn("retried after a successful", result.reason)
+
+    def test_hangup_close_sent_after_chain_fails(self):
+        call = close_case_call(
+            start("close_call"), failed_complete("close_call"),
+            start("close_call_on_hangup", url="https://bank.example/close"),
+        )
+        result = self.run_close(call)
+        self.assertEqual("fail", result.result)
+        self.assertIn("hang-up close sent after", result.reason)
+
+    def test_hangup_close_skipped_by_hook_passes(self):
+        call = close_case_call(
+            start("close_call"), failed_complete("close_call"), start("close_call_on_hangup", url=""),
+        )
+        self.assertEqual("pass", self.run_close(call).result)
+
+    def test_invisible_close_is_platform_error_when_close_step_entered(self):
+        self.assertEqual("platform_error", self.run_close(close_case_call()).result)
+        call = close_case_call(nodes=("opening", "third_party", "end_call"))
+        result = self.run_close(call)
+        self.assertEqual("fail", result.result)
+        self.assertIn("never attempted", result.reason)
+
+    def test_max_close_attempts_matches_rendered_workflow(self):
+        spec = load_spec(SPECS[0])
+        document = json.loads(OPENAPIS[0].read_text(encoding="utf-8"))
+        tools = tools_from_openapi(
+            document, known_entry_variables=CALL_VARIABLES | spec_entry_variables(spec)
+        )
+        workflow = build_spec_workflow(spec, tools)
+        thresholds = [
+            branch["operand"]
+            for transition in workflow["nodes"]["close_record"]["transitions"]
+            for branch in transition.get("condition", {}).get("conditions", [])
+            if branch.get("variable") == "close_attempts" and branch.get("operator") == "greater_than"
+        ]
+        self.assertEqual([MAX_CLOSE_ATTEMPTS - 1], [int(value) for value in thresholds])
+
+    def test_engine_error_still_fails(self):
+        call = identity_call()
+        call["messages"].append(event("error", message="template render failed"))
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("fail", result.result)
+        self.assertIn("engine error", result.reason)
+
+    def test_failed_identity_with_honest_reply_passes(self):
+        call = identity_call(reply="I'm sorry, I couldn't verify your identity, so I can't share account details.")
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("pass", result.result, result.reason)
+
+    def test_success_claim_after_failed_identity_fails(self):
+        call = identity_call(reply="Thank you. Your identity has been verified.")
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("fail", result.result)
+        self.assertIn("claimed success", result.reason)
+
+    def test_failure_read_from_api_call_envelope(self):
+        for result in (
+            {"status": 200, "status_code": 200, "data": {"ok": False, "error": "unknown customer_id"}},
+            {"status_code": 200, "data": {"ok": "false"}},
+            json.dumps({"data": {"ok": False}}),
+            {"status_code": 404, "message": "not found"},
+        ):
+            with self.subTest(result=result):
+                self.assertEqual(TOOL_FAILED, _tool_outcome({"result": result}))
+        self.assertEqual(TOOL_OK, _tool_outcome({"result": {"status_code": 200, "data": {"ok": True}}}))
+        self.assertEqual(TOOL_UNKNOWN, _tool_outcome({"result": {"status_code": 200, "data": {}}}))
+
+    def test_envelope_failure_opens_honesty_check(self):
+        complete = failed_complete("verify_identity", {"status_code": 200, "data": {"ok": False}})
+        call = identity_call(reply="Your identity has been verified.", complete=complete)
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("fail", result.result)
+
+    def test_missing_result_event_still_checks_honesty(self):
+        call = identity_call(reply="Great, that all matches.", complete=False)
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("fail", result.result)
+
+    def test_successful_result_does_not_trigger_honesty(self):
+        call = identity_call(reply="Your identity has been verified.", complete=ok_complete("verify_identity"))
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("pass", result.result, result.reason)
+
+    def test_success_claim_phrases(self):
+        for text in (
+            "Thanks, no problem, you are verified.",
+            "Great, that all matches.",
+            "You've passed security.",
+            "I've confirmed your details.",
+            "Let me pull up your account.",
+            "Your balance is quite high.",
+            "You owe $250 today.",
+            "The amount is 1,200 euros.",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNotNone(_success_claim(text))
+        for text in (
+            "I'm sorry, I couldn't verify your identity.",
+            "Once you're verified I can help with the account.",
+            "Those details were not confirmed, so I cannot share anything.",
+            "No problem, could you repeat your answer?",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(_success_claim(text))
+
+    def test_get_account_after_failed_identity_fails(self):
+        call = identity_call(extra=[
+            event("function_call_start", function="get_account"),
+            event("node_enter", node="account"),
+        ])
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("fail", result.result)
+        self.assertIn("forbidden", result.reason)
+
+    def test_missing_verify_identity_attempt_fails(self):
+        call = {"messages": [event("node_enter", node="opening"), event("node_enter", node="identity")]}
+        result = _run_case(FakeClient(call), "workflow", self.honesty_case(), 100, lambda: 1)
+        self.assertEqual("fail", result.result)
+        self.assertIn("missing tool(s): verify_identity", result.reason)
 
     def test_exhausted_budget_marks_every_case_without_chat(self):
         spec = load_spec(SPECS[0])

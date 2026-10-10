@@ -45,6 +45,9 @@ def _config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, Any]:
         "products_variable": spec.account.data["products_variable"],
         "products_field": spec.account.data["products_field"],
         "product_id_field": spec.account.data["product_id_field"],
+        # Customer-facing product name (F-044); optional spec fields.
+        "kind_field": spec.account.data.get("product_kind_field") or "",
+        "label_field": spec.account.data.get("product_label_field") or "",
         "reset": reset_variables,
         "messages": _verdict_messages(),
     }
@@ -369,6 +372,40 @@ def say_amount(amount):
     return ('%.2f' % amount) if amount is not None else 'none'
 
 
+def say_spoken_day(day):
+    # "Wednesday, 14 October"; the year only when it is not this year.
+    if not day:
+        return 'none'
+    text = WEEKDAYS[day.weekday()] + ', ' + str(day.day) + ' ' + MONTHS[day.month - 1]
+    return text + (' ' + str(day.year) if day.year != today().year else '')
+
+
+def say_spoken_amount(amount):
+    # 420 instead of 420.00; cents only when there are cents.
+    if amount is None:
+        return 'none'
+    if abs(amount - round(amount)) < 0.005:
+        return str(int(round(amount)))
+    return '%.2f' % amount
+
+
+ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth']
+
+
+def product_name(index, product, count):
+    # Customer-facing name: kind in words plus the label field ("credit card ending 4821").
+    kind = product.get(CONFIG['kind_field']) if CONFIG['kind_field'] else None
+    label = product.get(CONFIG['label_field']) if CONFIG['label_field'] else None
+    words = str(kind).replace('_', ' ').strip() if kind not in (None, '') else ''
+    if label not in (None, ''):
+        words = (words or 'product') + ' ending ' + str(label)
+    if words:
+        return words
+    if count > 1 and 1 <= index <= len(ORDINALS):
+        return 'the ' + ORDINALS[index - 1] + ' product'
+    return 'the product'
+
+
 def product_facts(index, product):
     earliest, latest, low, high = limits(product)
     shown = ', '.join(
@@ -378,7 +415,8 @@ def product_facts(index, product):
     return (
         'Product ' + str(index) + ': ' + shown + '. Earliest date ' + say_day(earliest)
         + '; latest date ' + say_day(latest) + '; minimum amount ' + say_amount(low)
-        + '; maximum amount ' + say_amount(high) + '.'
+        + '; maximum amount ' + say_amount(high) + '. Name it to the customer as: '
+        + product_name(index, product, len(load_products())) + '.'
     )
 
 
@@ -420,10 +458,18 @@ def handled_numbers(accepted):
 
 
 def summary(accepted):
+    # Read-back in spoken words (F-044). The product number in brackets is for the promise tool only.
+    products = load_products()
     lines = []
     for key in sorted(accepted, key=lambda item: int(item) if str(item).isdigit() else 0):
         entry = accepted[key]
-        lines.append('Product ' + str(key) + ': ' + say_amount(parse_amount(entry.get('amount'))) + ' on ' + say_day(parse_day(entry.get('date'))))
+        number = int(key) if str(key).isdigit() else 0
+        product = products[number - 1] if 1 <= number <= len(products) else dict()
+        lines.append(
+            product_name(number, product, len(products)) + ': '
+            + say_spoken_amount(parse_amount(entry.get('amount'))) + ' on '
+            + say_spoken_day(parse_day(entry.get('date'))) + ' [product number ' + str(key) + ']'
+        )
     return '; '.join(lines) or 'none'
 """
 

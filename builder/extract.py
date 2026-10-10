@@ -652,6 +652,8 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "products_field": account_in.get("products_field"),
         "products_variable": names["products_variable"],
         "product_id_field": account_in.get("product_id_field"),
+        "product_kind_field": account_in.get("product_kind_field") or "",
+        "product_label_field": account_in.get("product_label_field") or "",
     }
     negotiation_in = flow["negotiation"]
     negotiation = {
@@ -807,6 +809,10 @@ def check_spec_data(spec: dict[str, Any], check: _Checker) -> None:
     product_id = get("account", "product_id_field")
     if products and product_id not in item_fields:
         check.error("account.product_id_field", f"must be a field of one product item: {sorted(item_fields)}")
+    for key in ("product_kind_field", "product_label_field"):  # optional, "" when the items have none
+        value = get("account", key)
+        if products and value and value not in item_fields:
+            check.error(f"account.{key}", f"must be a field of one product item or \"\": {sorted(item_fields)}")
 
     # Promise and closing tool fields.
     for key in ("promise_product_id_field", "promise_date_field", "promise_amount_field"):
