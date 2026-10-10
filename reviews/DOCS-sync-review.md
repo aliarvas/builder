@@ -44,3 +44,64 @@ Belgelerin büyük çoğunluğu koda ve izlere uyuyor ve rapor yöntemi sağlam.
 
 ## Kurallara uyum
 Yalnızca dört belge değişmiş (kod, test ve fixture'a dokunulmamış); Freya/model isteği yok; belgeler anahtar içermiyor.
+
+---
+
+# Fix kontrolü (rapor: tasks/DOCS-sync-report.md "Fix", bölüm 2 ve F-050 sonrası güncellemeler)
+
+Kod düzenlemedim, Freya ve modele istek atmadım. `python3 -m unittest`: 245 test geçiyor (belgedeki sayı da 245).
+
+## Karar: düzeltme gerekli (küçük)
+Önceki incelemenin altı maddesi doğru kapatılmış. Ama belgeler "resmî sürüm 11 koşusu" kanıtına dayanıyor ve o iz dosyası sonradan yeni bir resmî koşuyla (sürüm 12) **üzerine yazılmış**; belgelerdeki sayılar ve atıf eski koşuya ait, güncel `traces/brief-a.log` ile uyuşmuyor. Aşağıda ayrıntı. Tek turluk belge güncellemesi yeterli.
+
+## Önceki maddeler: kapandı
+| # | Madde | Durum |
+|---|---|---|
+| 1 | "F-001..F-004 no longer appear" | **Kapandı.** ARCHITECTURE artık "Evidence is two chat results only": PUB-03 (v5, F-002 yeniden test) ve PUB-01 (v10) defter geçişi; F-001, F-003, F-004 "fixed in code and still to be retested live"; PUB-07 v11 F-050 yüzünden başarısız. |
+| 2 | "committed live run" | **Kapandı.** FREYA-INTEGRATION ve DoD: `traces/` ve `submission/` kanıtları yerel ve **not committed yet** (`git ls-files traces submission` hâlâ boş, iddia doğru). |
+| 3 | "No other module imports `freya`" | **Kapandı.** "Besides `build.py` and `freya_chat.py` …". |
+| 4 | "exactly one close" | **Kapandı.** "At most one successful close; a failed `close_call` is retried once." |
+| 5 | `maxRetries` listesi | **Kapandı.** "Every tool except `get_account` has `maxRetries: 0` (write tools and also `verify_identity`, `schedule_callback`)". |
+| 6 | Eskimiş sayılar/dosya listeleri | **Kapandı.** `spoken.py` boru hattında (extract ve render satırları) ve bileşen tablosunda; `test_spoken_text.py` ve güncel `test_selftest.py`/`test_spoken_output.py` satırları EVALUATION tablosunda; test sayısı 245 (tarihli, "re-count before each commit" notu). |
+| Not | DoD "works" ifadesi | **Kapandı.** "Extraction and rendering work … (not yet a live agent run)"; `f041-raw` 3 eşlenmemiş madde bilgisi eklenmiş. |
+| Not | Commit etiketleri | **Kapandı.** Etiketler d5f6af1 (güncel HEAD), bütçe satırından `[TO-CONFIRM]` kalkmış (davranış commit'te). |
+
+F-050 sonrası eklenenler de koda uyuyor: `account` adımı sessiz (`F-050`), kimlik adımı bekleme cümlesini söylüyor, `identity_check` iskelette, platform notlarında 502 geri alma davranışı, introduction yalnızca açılışta (F-048), `spoken_fallback` uyarısı (F-047); önceki incelemede bunları üretilmiş workflow'larda doğrulamıştım.
+
+## Kalan sorun: sürüm 11 kanıtı artık mevcut dosyada yok
+- Belgeler "official version 11 run, `traces/brief-a.log`, 2026-10-10 20:21 UTC, 183 s (extraction 103 s, self-test ~75 s), self-test 0/3 (F-045/F-046)" diyor (DoD maddeleri 1–3, ARCHITECTURE "Time", FREYA-INTEGRATION "Vertical slice", ARCHITECTURE "official run version 11").
+- Mevcut `traces/brief-a.log` başka bir koşu: **20:39 UTC başlangıç, yayımlanan sürüm 12, toplam 193,2 sn** (çıkarma 103,5 sn, 6 model çağrısı), self-test `identity_attempt` **pass**, `identity_failure_honesty` **pass**, `third_party_close` **platform_error** ("close step entered but no close_call event visible in the call record"), `status: ok`, 24 düğüm + 9 global = 33 adım, `sent_agent_config: absent`, `sent_nulls: 0`. Yani DoD'daki "self-test 0/3" ve "183 s" bu dosyayı doğrulamıyor; kanıt gösterilen yol, anlatılan koşuyu taşımıyor.
+- Bu yeni koşu belgelerde hiç yok ve daha güçlü kanıt: kendim `tools/submission_check.py traces/brief-a.log submission/brief-a.workflow.json --spec traces/brief-a.spec.json --verify-inputs` çalıştırdım → **SUMMARY: PASS (19/19), 2 uyarı** (üçüncü vakanın `platform_error`'ı ve ortam değişkeni taramasının atlanması). Bu, DoD'daki gönderim kapısı için ilk gerçek tam PASS.
+- **Düzeltme:** (a) DoD maddeleri 1–3, ARCHITECTURE "Time" ve FREYA-INTEGRATION "Vertical slice" sayılarını/atıfı güncel koşuya (sürüm 12, 193 s, self-test 2 pass + 1 platform_error, resmî komut) çevir; (b) sürüm 11 sonuçlarını (0/3, F-045/F-046) yalnızca EVALUATION sonuç günlüğü satırında tarihli tarihsel kayıt olarak bırak ve o satırın artık hangi dosyada olmadığını yaz ("trace overwritten by the next run"); (c) gönderim kapısı olarak `submission_check` tam PASS'ını (19/19, 2 uyarı) DoD gönderim maddesine kanıt olarak ekle; (d) `third_party_close` `platform_error` nedeninin (motorun `pre_actions` ile çalıştırdığı `close_call` için `function_call_start` olayı kayıtta görünmüyor) EVALUATION L2 bölümüne eklenmesi.
+- İz dosyalarının üzerine yazılmasını önlemek için her resmî koşunun `--slot` ile ayrı bir ad kullanması (örn. `brief-a-run2`) ya da kanıt iz dosyasının koşudan hemen sonra kopyalanması yararlı olur; DoD'un dayandığı dosya sonraki koşuyla değişiyor.
+
+## Kurallara uyum
+Yalnızca belgeler, `selftest.py` ve testi değişmiş; belgeler anahtar içermiyor; Freya/model isteği yok.
+
+---
+
+# Fix 2 kontrolü (rapor: tasks/DOCS-sync-report.md "Fix 2"; sürüm 12 kanıtı ve F-051)
+
+Kod düzenlemedim, Freya ve modele istek atmadım. `python3 -m unittest`: 255 test geçiyor (claude-dev'in F-051 çalışması dahil değil). Bu tur yalnızca belgeler değişmiş.
+
+## Karar: merge edilebilir
+Önceki turda istediğim dört düzeltme (a–d) ve iz dosyası uyarısı doğru yapılmış; sayılar güncel `traces/brief-a.log` ile birebir uyuşuyor. Kalan tek nokta bilgi düzeyinde.
+
+## Doğrulama
+| Madde | Durum | Kanıt |
+|---|---|---|
+| (a) Sürüm 11 yerine güncel koşu | **Tamam** | `traces/brief-a.log`: başlangıç 2026-10-10 20:39 UTC, yayımlanan sürüm 12, `total_duration_seconds: 193.161`, `status: ok`; çıkarma 103,5 sn, 6 model çağrısı, `unmapped_items=0`; 24 düğüm + 9 global = 33 adım; self-test ≈ 84 sn (24,6 + 38,8 + 20,7). DoD maddeleri 1–3, ARCHITECTURE "Time" (193 s, 103,5 s, ~84 s) ve boru hattı etiketi, FREYA-INTEGRATION "Vertical slice" artık bu sayılar. `negotiate ~1586 -> ~1208` izdeki `budget:` satırıyla aynı. |
+| (b) Sürüm 11 yalnızca tarihçe | **Tamam** | EVALUATION sonuç günlüğü: "version 11 (trace overwritten by the 20:39 run)", 0/3 ve F-045..F-048 nedenleri ayrı satırda; DoD maddesi o satıra işaret ediyor. |
+| (c) Gönderim kapısı kanıtı | **Tamam, doğru dürüstlükte** | DoD gönderim maddesi: sürüm 12 provası `SUMMARY: PASS (19/19, 2 warning(s))` (bu, benim `--require-env` olmadan çalıştırmam), kutu hidden brief'ler ve `--require-env` için açık bırakılmış. |
+| (d) `platform_error` nedeni | **Tamam** | EVALUATION L2: motor `close_call`'ı `close_record` `pre_action`'ı olarak çalıştırıyor ve olay yazmıyor; self-test deneme sayamaz, yalnızca ledger kanıtlar; `[TO-CONFIRM]` başka olayın (`function_call_complete`, `route_evaluated`) bunu taşıyıp taşımadığı. |
+| İz dosyalarının üzerine yazılması | **Tamam** | EVALUATION "Evidence kept per run", DoD girişi ve FREYA-INTEGRATION: `traces/<slot>.log` sonraki koşuyla üzerine yazılır; kanıt koşusundan hemen sonra kopyala ya da yeni `--slot` kullan. |
+| F-051 | **Doğru ve kanıtlı** | UAT'ta F-051 var (PUB-07 v12, yalnızca tarih cevabı → `offer_amount` boş → `check_offer` çalışmadı, model dahili adım çağrısını yazdırıp sınır uydurdu); EVALUATION sonuç günlüğü satırı ve ARCHITECTURE kanıt cümlesi aynı; `open` olarak işaretli ve "F-050 fix held" notu UAT ile uyumlu. |
+| Türkçe dolgu gözlemi | **Doğru** | UAT ("filler appeared once more during a slow turn") ve kayıt dosyasında (`Bir saniye lütfen.` metni var, kendim aradım). FREYA-INTEGRATION'daki `[TO-CONFIRM]` bu gözlemle değiştirilmiş. |
+| Test sayısı | **Kabul** | Belgelerde 245, rapor bunun son commit'in sayısı olduğunu ve F-051 işi commit edilince yeniden sayılacağını söylüyor; şu an 255 çalışıyor (F-051'in yeni testleri). Commit sonrası güncellenmeli. |
+
+## Bilgi notları
+- DoD yalnızca iki koşuya atıf yapıyor (güncel sürüm 12 ve tarihsel 11); iz dosyası kopyalanmadığı sürece bu atıf bir sonraki koşuda yine bozulur. Önerilen kopyalama/`--slot` uyarısı yazılı, uygulanması CTO'nun komut disiplinine bağlı.
+- ARCHITECTURE `[VERIFIED: code, commit d5f6af1; official run version 12]` etiketi, F-051 çalışması commit edilene kadar doğru; commit sonrası etiketi yenileyin.
+
+## Kurallara uyum
+Belgeler anahtar içermiyor; yalnızca belge değişmiş; Freya/model isteği yok.

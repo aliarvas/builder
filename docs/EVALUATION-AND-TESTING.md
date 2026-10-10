@@ -17,7 +17,7 @@ A case passes only if all three pass: **outcome** (bank ledger correct, promise 
 
 ### L1 — Static and offline checks (no Freya, no model) `[VERIFIED: tests]`
 
-`python3 -m unittest` runs every suite in `tests/`. The model is replaced by recorded replies and Freya by fakes.
+`python3 -m unittest` runs every suite in `tests/` (245 tests, all passing on 2026-10-11 after the F-045/046 fix; re-count before each commit). The model is replaced by recorded replies and Freya by fakes.
 
 | Suite | Covers |
 |---|---|
@@ -25,8 +25,9 @@ A case passes only if all three pass: **outcome** (bank ledger correct, promise 
 | `test_multi_step.py` | Spec validation, multi-step graph (reachability, one transition per target, closing chain, hang-up tool, special paths), generated code run in-process, **brief-literal leak scan** of every string in `builder/` against the fixture specs |
 | `test_extract.py` | Parallel group calls, code checks, repair rounds, coverage and follow-up, rejected additions, recorded Brief A replies and the extracted Brief A+B specs (`tests/fixtures/extract/`) |
 | `test_prompt_budget.py` | Budget stages, rule placement, every spec rule placed somewhere (T-009) |
-| `test_spoken_output.py` | Wait line on the account step and the spoken read-back (F-043, F-044) |
-| `test_selftest.py` | Self-test case generation, validation rules, 5xx handling, budget (T-007, T-007b) |
+| `test_spoken_output.py` | Wait line said by the identity step, no passthrough api step speaks (F-043, F-050), spoken read-back (F-044) |
+| `test_spoken_text.py` | `spoken.py` detector, extraction repair and renderer fallback for agent-directed spoken text (F-047), `identity_check` re-entry (F-049), introduction only in the opening (F-048) |
+| `test_selftest.py` | Self-test case generation and plausible answers, reached steps, validation rules, 5xx turn states, budget (T-007, T-007b, F-045, F-046, F-049) |
 | `test_submission_check.py` | Offline submission check, `sent_*` trace lines (T-008) |
 | `test_slots.py` | Stale-slot recovery (F-005) |
 
@@ -38,13 +39,15 @@ Synthetic inputs: `tests/fixtures/spec-synthetic.json` + `openapi-synthetic.json
 
 `builder/selftest.py` runs after publish and export, in at most 6 minutes, through the chat route, one case after another. It is generated from the spec only and never reads practice files. The bank mock answers `ok=false, unknown customer_id` for a synthetic customer (live check, T-007b), so no case expects a bank action to succeed:
 
+Customer answers have the shape of the identity field (a date in words, N digits, a year, a postcode-like value; F-046). A step counts as reached by `node_enter`, a message `nodeId`, a snapshot, or as the initial step once the call has messages (F-045).
+
 - `identity_attempt`: opening -> identity, `verify_identity` attempted; `account` and `get_account` forbidden; no success claim after a failed tool.
 - `identity_failure_honesty`: the same, plus the customer asks whether they are verified and what they owe; a success phrase or a money amount fails it.
 - `third_party_close`: the third-party close reaches `end_call` with 1..`MAX_CLOSE_ATTEMPTS` (2) `close_call` sends, a retry only after a failed attempt, and no hang-up close after the chain.
 
-Each case also fails on an engine `error` event or a step over 6 turns (`MAX_NODE_TURNS`). Tool results are read from `function_call_complete` (top level and the `data` envelope). A 5xx turn is checked in the call record before it is resent (F-023), with at most 2 retries; after that the case is `platform_error`. Sending stops once the call ended (F-031).
+Each case also fails on an engine `error` event or a step over 6 turns (`MAX_NODE_TURNS`). Tool results are read from `function_call_complete` (top level and the `data` envelope). After a 5xx the call record is read before anything is resent (F-023). A turn not in the record is resent, at most 2 times, and is `platform_error` after that. A turn that is in the record but whose latest spoken step does not match the last speaking step it entered (F-049) is `platform_error` and is not resent. Silent steps such as `close_record` and `end_call` do not count for that comparison. Sending stops once the call ended (F-031).
 
-Results are `self_test` and `self_test_summary` trace lines. A failure does not stop the build: there is no automatic repair loop.
+Results are `self_test` and `self_test_summary` trace lines. Live (version 12): `identity_attempt` and `identity_failure_honesty` passed, and `third_party_close` was `platform_error` with "close step entered but no close_call event visible in the call record". The engine runs `close_call` as a `pre_action` of `close_record` and writes no `function_call_start` event for it, so the self-test cannot count the attempts. The ledger is the only proof there, and the self-test has no ledger access. `[TO-CONFIRM]` whether another event (for example `function_call_complete` or `route_evaluated` on `close_record`) carries it. A failure does not stop the build: there is no automatic repair loop.
 
 ### L3 — Practice cases on Freya
 
@@ -94,6 +97,8 @@ baseline score
 
 ## Evidence kept per run
 
+`traces/<slot>.log` is overwritten by the next run on the same slot; copy it, or use a new `--slot`, right after a run that serves as evidence.
+
 The trace holds input hashes, model calls, the spec path, Freya workflow/agent IDs, published version and self-test results. The builder commit, practice-case results and failure labels go in the task report and [`UAT-FINDINGS.md`](UAT-FINDINGS.md). Remove keys and customer-like data.
 
 ## Results log
@@ -104,6 +109,10 @@ The trace holds input hashes, model calls, the spec path, Freya workflow/agent I
 | 2026-10-10 | multi-step, written spec, version 5 | A | 1 chat case (PUB-03) | ledger pass | none (F-002, F-010, F-019, F-020 retested) |
 | 2026-10-10 | multi-step, written spec, version 8 | A | chat cases PUB-01, PUB-07 | not recorded as a score | F-025..F-031 across both cases, e.g. PUB-07 sent 17 `close_call` after the chat resumed past `end_call` (F-031); fixed offline |
 | 2026-10-10 | multi-step, **extracted** spec, version 10 | A | 1 chat case (PUB-01) | ledger pass | read-back wording (F-044) and Turkish platform filler (F-043), both fixed offline, live retest pending |
+| 2026-10-10 20:21 | official command, extracted spec, version 11 (trace overwritten by the 20:39 run) | A | builder self-test, 3 cases | 0/3 | every case "missing node(s): opening" (F-045); placeholder answers, no `verify_identity` (F-046); instruction spoken as the closing line (F-047); introduction repeated (F-048); all fixed offline |
+| 2026-10-11 | version 11 | A | 2 chat runs (PUB-07) | ledger fail | 502 on the turn after identity, call rolled back (F-049, F-050); fixed offline (silent account step, `identity_check`) |
+| 2026-10-10 20:39 | official command, extracted spec, version 12 (`traces/brief-a.log`) | A | builder self-test, 3 cases | 2 pass, 1 `platform_error` | `third_party_close`: `close_call` pre-action not visible as an event (see L2); 193 s total; `submission_check` 19/19 PASS with 2 WARN |
+| 2026-10-11 | version 12 | A | 1 chat run (PUB-07) | ledger fail | **F-051 (open):** the customer gave only dates, `offer_amount` stayed empty, `check_offer` never ran; the model printed an internal step call and invented a date limit. The F-050 fix held (no 502); the Turkish filler appeared once (F-043) |
 
 The single-case rows are chat tests scored on the ledger only, not `run_cases.py` with the judge and three runs. A full scored run of the current builder (13 cases, `--reps 3`) has not been recorded yet.
 
