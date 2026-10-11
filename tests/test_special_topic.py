@@ -151,6 +151,11 @@ class SpecialChoiceTests(unittest.TestCase):
         self.assertEqual(["special_hardship_support_declined"], stay)
         declined = workflow["nodes"]["special_hardship_support_declined"]
         self.assertNotIn("condition", declined)  # a plain step, entered only from the question
+        # Freya rejects "description" on a plain node (live v19 build: "Unrecognized key").
+        self.assertNotIn("description", declined)
+        for key, plain in workflow["nodes"].items():
+            self.assertNotIn("description", plain, key)
+            self.assertNotIn("condition", plain, key)
         ids = {s.id for s in scenarios(spec, NOW)}
         self.assertIn("special_hardship_support_declined", ids)
         # The decline is the hardship close; the ask-first path no longer counts as returning.

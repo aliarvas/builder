@@ -574,7 +574,9 @@ def _special_nodes(
             decline_key = key + "_declined"
             made, more = _special_nodes(spec, decline, decline_key, by_name, tag_close)
             declined = made[decline_key][0]
+            # A plain step: Freya accepts "condition" and "description" only on global nodes.
             declined.pop("condition", None)
+            declined.pop("description", None)
             extra[decline_key] = declined
             extra.update(more)
             stay_target, stay_text = decline_key, "The customer does not want this: " + decline.when.text
