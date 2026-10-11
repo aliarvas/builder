@@ -104,10 +104,10 @@ Fields: {field_details}
 - Purpose: Sets spec-derived identity and global rules for the multi-step phone agent.
 - Receiver: phone agent
 - Used at: builder/workflow.py — spec workflow system_prompt
-- Approximate tokens: ~73 static + `{agent_name}` characters ÷ 4 + `{language}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~89 static + `{agent_name}` characters ÷ 4 + `{language}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
-You are {agent_name}. Speak {language}. Keep every turn concise and truthful. Call at most one tool per message. Never claim an action succeeded, or a note or callback was recorded, unless its tool returned ok true; never say a payment or promise was recorded unless create_promise returned ok true.
+You are {agent_name}. Speak {language}. Keep every turn concise and truthful. Call at most one tool per message. Never claim an action succeeded unless its tool returned ok true. Use the word "recorded" only for an action whose tool returned ok true in this call (a payment or promise: create_promise); for the recording notice say "we are recording this call".
 Global rules:
 {rules}
 ```
@@ -329,6 +329,61 @@ amount_too_high: The amount due on the [product] is [amount]. Could you pay [amo
 The product or products the customer's last message names for this payment, copied in the customer's words (for example the kind of product, the last digits, or "both"). Empty if the message names no product.
 ```
 
+## OFFER_REFUSED_PRODUCTS_DESCRIPTION
+
+- Purpose: The products the customer refuses in the same message, in their words; the code counts a refusal for each (T-027).
+- Receiver: extraction model
+- Used at: builder/product_notes.py — negotiate extraction field offer_refused_product_name (specs with per-product refusals)
+- Approximate tokens: ~52 (characters ÷ 4)
+
+```text
+The product or products the customer's last message refuses to pay, copied in the customer's words (for example the kind of product, the last digits, or "the others"). Empty if the message refuses no product.
+```
+
+## READBACK_LINE
+
+- Purpose: Read-back the confirmation step says on entry, built by code from the checked offers (T-027, PUB-12: the model never read it back and the step waited for a confirmation forever).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/offer_check.py — readback_text, spoken by confirm_record
+- Approximate tokens: ~8 static + `{payments}` characters ÷ 4 at runtime
+
+```text
+I can record {payments}. Do you confirm?
+```
+
+## READBACK_ITEM
+
+- Purpose: One checked offer in the read-back line (T-027).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/offer_check.py — readback_text
+- Approximate tokens: ~7 static + `{amount}` characters ÷ 4 + `{product}` characters ÷ 4 + `{date}` characters ÷ 4 at runtime
+
+```text
+a payment of {amount} for the {product} on {date}
+```
+
+## CONFIRM_READBACK_SAID_LINE
+
+- Purpose: Tells the confirmation step that the program has already said the read-back (T-027).
+- Receiver: phone agent
+- Used at: builder/goodbye.py — confirm_record
+- Approximate tokens: ~46 (characters ÷ 4)
+
+```text
+The program has just said this read-back to the customer: "{{readback_text}}" Do not read it again unless the customer asks; answer the customer and wait for one clear confirmation.
+```
+
+## CUSTOMER_ENDS_CALL_INTENT
+
+- Purpose: Routing intent of the global step for a customer who ends the call during the offer talk (T-027, PUB-12: "Thank you, goodbye" matched no route and the step repeated itself).
+- Receiver: routing model
+- Used at: builder/goodbye.py — global step customer_ends_call
+- Approximate tokens: ~25 (characters ÷ 4)
+
+```text
+The customer only says goodbye or thanks to end the call, with no refusal, no offer and no question.
+```
+
 ## CONFIRM_TASK_TEMPLATE
 
 - Purpose: Reads back the checked offers once and asks for one confirmation; the program records them (F-063).
@@ -375,6 +430,17 @@ Of course. Which date or amount would you like instead?
 
 ```text
 Persuasion attempt on this product, counted by the bank system: {attempt} (0: none yet). The bank system moves on to the next product when its attempts are used up.
+```
+
+## PERSUASION_PRODUCT_LINE
+
+- Purpose: Names the product a counted persuasion attempt is about (T-027, PUB-12).
+- Receiver: phone agent
+- Used at: builder/product_notes.py — negotiate (specs with per-product refusals and persuasion attempts)
+- Approximate tokens: ~20 static + `{product}` characters ÷ 4 at runtime
+
+```text
+A counted attempt is about the {product} only; never move to another product yourself.
 ```
 
 ## PRODUCT_INTENT_DESCRIPTION
@@ -491,6 +557,18 @@ I am sorry, I could not record every promise.
 ```text
 Ask the customer this as one short question, in your own words: {ask}
 Wait for the answer. Do not call any tool and do not promise anything.
+```
+
+## SPECIAL_SAY_FIRST_LINE
+
+- Purpose: Puts a special path's line before its question when the spec says so (say_first, T-028, PUB-05: sympathy before the offer).
+- Receiver: phone agent
+- Used at: builder/workflow.py — global special_<id> with ask and say_first
+- Approximate tokens: ~11 static + `{say}` characters ÷ 4 at runtime
+
+```text
+Before the question, say word for word: "{say}"
+
 ```
 
 ## SPECIAL_CHOICE_DESCRIPTION
@@ -779,7 +857,7 @@ Return this JSON shape:
 - Purpose: Extracts the closing table, the special paths and the closing tool fields.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'outcomes'
-- Approximate tokens: ~1356 static + `{states}` characters ÷ 4 at runtime
+- Approximate tokens: ~1420 static + `{states}` characters ÷ 4 at runtime
 
 ```text
 Extract the sections outcomes, special_paths and closing. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
@@ -788,7 +866,7 @@ Return this JSON shape:
  "closing": {"rules": [RULE] (how the call ends; most are enforced_by closing_outcome. An instruction for what the agent does during the call, such as notes or transfers, belongs to the step where it happens, not here), "outcome_field": "closing tool request field for the outcome", "reason_field": "closing tool request field for the reason", "product_notes": null or {"tool": "note tool name", "product_field": "note tool request field for the product id", "reason_field": "note tool request field for the reason", "reasons": ["every reason value the documents allow"], "refused_reason": "reason for a product the customer turned down or never agreed to", "failed_reason": "reason for a product whose promise could not be recorded", "skip_outcomes": ["call outcomes after which no note is added at all, for example a transfer"], "outcome_from_notes": null or {"all_reason": "the note reason that, on every product, gives its own row", "all_outcome": "outcome of that row", "all_outcome_reason": "reason of that row or \"\"", "otherwise_outcome": "outcome used otherwise, with the reason of the first product in account order whose note is another reason", "source": "excerpt"} (only when the documents derive the call outcome from the notes when no promise was recorded; null otherwise), "source": "excerpt"} (only when the documents require a note for each product that ended without a promise; code then writes those notes before the closing tool; null otherwise)},
  "outcomes": [{"outcome": "...", "reason": "... or \"\"", "when": RULE, "say": RULE (text: the exact words the agent says to the customer before the closing tool, word for word, read aloud as written; include every sentence the brief requires in that situation and end with a goodbye. Never an instruction such as "Thank the customer and say goodbye."; write "Thank you for your time. Goodbye." instead), "wins_over_promise": true or false (true only if this row is used even after a promise was recorded), "states": ["call-end state names below that close with this row"]}]
    (one row per outcome and reason pair the brief allows; every pair from the closing table.)
- "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (text: the exact words said to the customer, read aloud as written; never an instruction to the agent), "ask": RULE (optional; leave the key out unless the documents require one question before acting, for example whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer and waits for the answer, so it must be one question ending with "?", never an instruction), "on_decline": "id of another special path" (optional, only with ask: the closing path the documents give when the customer does not want what this path does after the question; leave it out when a no simply goes on with the call), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]
+ "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (text: the exact words said to the customer, read aloud as written; never an instruction to the agent), "ask": RULE (optional; leave the key out unless the documents require one question before acting, for example whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer and waits for the answer, so it must be one question ending with "?", never an instruction), "on_decline": "id of another special path" (optional, only with ask: the closing path the documents give when the customer does not want what this path does after the question; leave it out when a no simply goes on with the call), "say_first": true (optional, only with ask: the documents say the say line when the situation starts, before the question, for example one sentence of sympathy before an offer; leave it out when say is what the agent says when it acts after the question), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]
    (situations that interrupt the normal flow, for example: the customer says the payment was already made, denies the debt, reports financial difficulty, asks for a different plan or for a person; or a note on one product. tool_args holds only values the brief fixes; fields the conversation must fill are left out. then close: the call closes with outcome and reason, which must be a row above. then return: the agent goes back to the step it came from (outcome and reason are still required; repeat a row's values). Do not use the identity, account, promise or closing tools here. available_in lists only steps where the situation may happen: never before identity is verified if it would disclose the account.)
  "derived_states": {"state name": "why this row"} (every state below that the documents do not name, with the reason you chose its row; no excerpt needed),
  "sources": {},

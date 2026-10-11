@@ -11,7 +11,7 @@ from pathlib import Path
 from builder.extract import SPOKEN_MARK, extract_spec
 from builder.prompts import ACCOUNT_WAIT_LINE, CLOSING_FALLBACK_SAY, SPECIAL_SAY_FALLBACK
 from builder.spec import parse_spec
-from builder.spoken import agent_directed, spoken_words
+from builder.spoken import agent_directed, present_recording_notice, spoken_words
 from builder.tools_from_openapi import tools_from_openapi
 from builder.workflow import build_spec_workflow
 from tests.extract_helpers import FakeClient, as_text
@@ -184,7 +184,7 @@ class IntroductionPlacementTests(unittest.TestCase):
     def test_introduction_is_only_in_the_opening(self):
         for data in (FIXTURE_A, V11):
             workflow, _ = render(data)
-            introduction = parse_spec(copy.deepcopy(data)).agent.introduction.text
+            introduction = present_recording_notice(parse_spec(copy.deepcopy(data)).agent.introduction.text)[0]  # T-026
             self.assertNotIn(introduction, workflow["system_prompt"])
             self.assertIn(introduction, workflow["nodes"]["opening"]["task_message"])
             self.assertNotIn(introduction, workflow["nodes"]["third_party"]["task_message"])

@@ -30,6 +30,107 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-088: Several products: refusal counted for the wrong product, the agent said goodbye, and a "goodbye" loop ran until max duration
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A+B, PUB-12 live (A+B workflow `8887e79f`, version 2); `tasks/T-027-report.md`
+- **Run:** call `1c73c93a-64f1-485f-bff1-05a4596689b1` (`traces/live-runs/user-1c73c93a-64f1-485f-bff1-05a4596689b1.json`)
+- **Symptom:**
+  - No promise was recorded, although the customer accepted one product.
+  - All three products got a "refused" note.
+  - One product was asked twice.
+  - With no tool call, the model said "I have recorded your promise … Thank you for your time."
+  - It then repeated "Thank you for your time" to every "Thank you, goodbye." until the call hit max duration.
+- **Root cause:**
+  - The refusal step counted a refusal for the first open product, not for the product the customer named.
+  - The persuasion turn was not told which product it was about, so it moved on by itself and believed the talk was over.
+  - No step had an exit for a plain goodbye.
+  - The read-back step left the read-back to the model, which did not say it, so it waited forever for a yes or a no.
+- **Category:** routing / honesty
+- **Fix / lesson (T-027):**
+  - Each refusal counts for the product it names, and refusals said in the same turn as an offer are counted.
+  - The persuasion turn names its product.
+  - A global `customer_ends_call` exit goes to the read-back once when offers were accepted, and otherwise goes to the closing.
+  - The read-back is built by code and spoken on entry.
+  - New self-check families: goodbye at every offer step, mixed products. A static check finds model-spoken offer steps that lack the "never say recorded" line.
+- **Status:** fixed offline (T-027); the persuasion text is still model-spoken
+- **Retest:** pending: live A+B run
+
+### F-087: A weekday with the day said in words was read as the next weekday
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-07 live (version 19); `tasks/T-027-report.md`
+- **Run:** call `0aae2951-26b2-4120-b8b2-3b87d8fb0e52`
+- **Symptom:** "Monday the twenty sixth" was recorded on the next Monday (19 October). The expected flow was that the 26th is a non-business day, so the agent proposes the 27th.
+- **Root cause:** The spoken-number reader (T-022) changed a day word into digits only next to a month name. With only a weekday, the reader took the next such weekday.
+- **Category:** date-logic
+- **Fix / lesson:** A day word right after a weekday also becomes digits. A new self-check form, `weekday_the_word`, covers it, and a replay of the recorded extractions is added.
+- **Status:** fixed offline (T-027)
+- **Retest:** pending: live Brief A run
+
+### F-086: The required recording notice said "recorded" before any tool ran
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-10 live (version 17); `tasks/T-026-recording-disclosure.md`
+- **Run:** call `27e4153c-b754-4731-9bb6-4e84c86d488a`
+- **Symptom:** The judge failed "does not say 'recorded' before a successful call". The only early "recorded" was the opening's "this call is recorded", which the brief requires.
+- **Root cause:** The extracted introduction used the passive form, so the notice sounded like a claim that something had been recorded. The honesty line named only some actions.
+- **Category:** honesty / policy
+- **Fix / lesson:** T-026 makes two changes:
+  - **Introduction.** A fixed, generic rule rewrites only the call-recording clause of the introduction ("this call is recorded" / "being recorded", "calls are recorded") to "we are recording this call", keeping the grammar and capitals. A "recorded" that is not clearly that notice is left alone, with a trace warning.
+  - **System prompt.** It now says: use "recorded" only for an action whose tool returned ok true, and say "we are recording this call" for the notice.
+- **Status:** fixed offline (T-026)
+- **Retest:** pending: a chat run with approval
+
+### F-085: The sympathy line came after the support question, or not at all
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-05 (v18 and v19); `tasks/T-028-report.md`
+- **Symptom:**
+  - v18: "I am sorry to hear that." was said only after the transfer.
+  - With `on_decline`, a no closes on the declined path's own line, so the sympathy line would never be said.
+- **Root cause:** An ask-first path's `say` is its closing line, spoken when the agent acts. The spec could not say that the line comes first, before the question.
+- **Category:** policy / rendering
+- **Fix / lesson:**
+  - **Spec.** A new optional spec field `say_first`, filled by extraction and valid only with ask. When set, the question step speaks the line and then the question, and the closing does not repeat it.
+  - **Validation.** A bad value never fails a build: it gets a repair, then it is dropped.
+  - **Self-check.** It flags a question spoken without its line.
+- **Status:** fixed offline (T-028); the live spec needs one extraction to fill `say_first`
+- **Retest:** pending
+
+### F-084: The bank sent no overall verification field, and the call stayed in the identity step
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-05 live (version 19); `tasks/T-028-report.md`
+- **Run:** call `cb5ac54d-d68b-48d6-a1ba-77b7631e9dfd`
+- **Symptom:**
+  - Both answers were right, but the call never left identity.
+  - The agent invented "I am unable to access your account" and tried a tool it does not have.
+  - The job loss was said inside identity, so no hardship path started and no sympathy was said.
+  - The customer hung up, and the hang-up close recorded `not_verified/declined`.
+- **Root cause:** The bank's ledger already held verify, verify, get_account from another session for the same customer before this call. The bank therefore answered without `all_verified`. The identity exit routes only on that field.
+- **Category:** tool-call / platform
+- **Fix / lesson:** The identity tool's post-hook counts right answers in the call. Only when the overall field is missing, and every question has passed, it sets that field. A present overall field always wins, and get_account still refuses if the bank disagrees. The self-check scenario `identity_known_earlier` plays a bank that omits the field.
+- **Status:** fixed offline (T-028)
+- **Retest:** pending
+
+### F-083: Two special paths matched the same words and handed the call back and forth in silence
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-08 live (version 19); `tasks/T-028-report.md`
+- **Run:** call `f3bc513e-ec45-4faf-845b-4ffea44e903e`
+- **Symptom:**
+  - `special_topic` worked and `special_already_paid` started.
+  - The call then went `already_paid -> dispute -> already_paid ...` six times in 50 s without a word, and the customer hung up.
+  - The ledger outcome was right (`paid`, by the hang-up close), but "payments can take one business day to appear" was never said.
+- **Root cause:** From a global step, the platform tried the other global intents before the step's own `always` exit, and did not apply their `excluded_nodes` there. "I paid it in the app" also matched dispute ("paid off in the past").
+- **Category:** routing / platform
+- **Fix / lesson:**
+  - **Exit condition.** A global step never leaves by `always`. It leaves on a deterministic condition that always holds (`now` is set); deterministic conditions are tried before intents.
+  - **Static check.** `global_exit[<step>]` flags any `always` exit on a global step.
+- **Status:** fixed offline (T-028); the platform order on a global code step needs a live check
+- **Retest:** pending
+
 ### F-082: With several products the offer never finds its product, and the call loops without a promise
 
 - **Date:** 2026-10-11

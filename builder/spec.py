@@ -72,6 +72,9 @@ class SpecialPath:
     # T-023 (PUB-05): the closing path the call takes when the customer says no to ``ask``
     # (optional; without it a no goes back to the step the path came from).
     on_decline: str = ""
+    # T-028 (PUB-05): ``say`` is said when the path starts, before ``ask`` (a sympathy line before
+    # an offer), not when the agent acts after the question (optional, only with ask).
+    say_first: bool = False
 
 
 @dataclass(frozen=True)
@@ -225,7 +228,10 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
             _string(_required(obj, "then", path), f"{path}.then"),
             _rule(obj["ask"], f"{path}.ask") if "ask" in obj else None,
             _string(obj["on_decline"], f"{path}.on_decline", empty=True) if obj.get("on_decline") else "",
+            _flag(obj, "say_first", path),
         )
+        if special.say_first and special.ask is None:
+            raise SpecError(f"{path}.say_first is supported only with ask")
         allowed_steps = {"opening", "third_party", "identity", "negotiate", "confirm_record"}
         unknown_steps = set(special.available_in) - allowed_steps
         if not special.available_in or unknown_steps:

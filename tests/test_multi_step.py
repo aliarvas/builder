@@ -22,7 +22,8 @@ from builder.spec import (
     OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
 )
 from builder.tools_from_openapi import CALL_VARIABLES, tools_from_openapi
-from builder.workflow import build_spec_workflow, close_table, source_steps, workflow_prompt_estimates
+from builder.spoken import present_recording_notice
+from builder.workflow import GLOBAL_EXIT_CONDITION, build_spec_workflow, close_table, source_steps, workflow_prompt_estimates
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -606,9 +607,14 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 self.assertEqual(["end_call"], terminals)
                 incoming_end = [source for source, targets in successors.items() if "end_call" in targets]
                 self.assertEqual(["closing_say", "close_record"], incoming_end)
-                for node in [*nodes.values(), *workflow["global_nodes"].values()]:
+                for node in nodes.values():
                     if node["node_type"] in {"api_request", "code"} or node.get("passthrough"):
                         self.assertEqual("always", node["transitions"][-1]["condition"]["operator"])
+                # T-028 (PUB-08): a global step leaves on a variable condition that always holds,
+                # since the platform tries other intents before an `always` there.
+                for node in workflow["global_nodes"].values():
+                    if node["node_type"] in {"api_request", "code"} or node.get("passthrough"):
+                        self.assertEqual(GLOBAL_EXIT_CONDITION, node["transitions"][-1]["condition"])
 
     def test_every_path_to_end_call_runs_the_close_path(self):
         for index in range(len(FIXTURES)):
@@ -873,7 +879,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertIn("never say a payment or promise was recorded", task)
         self.assertIn("Never read an internal id", task)
         self.assertIn("Not paying on one date is not a refusal", task)
-        self.assertIn("create_promise returned ok true", workflow["system_prompt"])
+        self.assertIn('Use the word "recorded" only for an action whose tool returned ok true', workflow["system_prompt"])
         intent = next(
             item for item in workflow["nodes"]["negotiate"]["extraction_schema"]
             if item["name"] == load_spec(FIXTURES[0]).negotiation.data["intent_variable"]
@@ -1072,7 +1078,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
             spec = load_spec(FIXTURES[index])
             workflow = self.render(index)
             nodes = workflow["nodes"]
-            introduction = spec.agent.introduction.text
+            introduction = present_recording_notice(spec.agent.introduction.text)[0]  # T-026
             with self.subTest(fixture=FIXTURES[index].name):
                 # Speaks on every entry (F-053 fix); the prompt keeps the introduction to one time.
                 self.assertNotIn("on_enter_first_entry_only", nodes["opening"])

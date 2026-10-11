@@ -1,0 +1,68 @@
+{
+ "source": "traces/live-runs/user-0aae2951-26b2-4120-b8b2-3b87d8fb0e52.json (PUB-07, Brief A workflow b0bdd6e6 version 19): each customer turn with the step it was spoken at and the fields the live extractor wrote (variable_extracted events)",
+ "now": "2026-10-14T11:00",
+ "products": [
+  {
+   "product_id": "p1",
+   "type": "personal_loan",
+   "past_due": 540,
+   "days_late": 5,
+   "instalment_amount": 180
+  }
+ ],
+ "expected": {
+  "promises": [
+   [
+    "p1",
+    540.0,
+    "2026-10-27"
+   ]
+  ]
+ },
+ "turns": [
+  {
+   "node": "opening",
+   "text": "Yes, this is Samuel Ortiz.",
+   "extracted": {
+    "caller_role": "confirmed"
+   }
+  },
+  {
+   "node": "identity",
+   "text": "Why do you need that? It's the fifth of December nineteen seventy five.",
+   "extracted": {}
+  },
+  {
+   "node": "identity",
+   "text": "Which account is this about? Seven zero nine three.",
+   "extracted": {}
+  },
+  {
+   "node": "negotiate",
+   "text": "I cannot pay today. I can pay the week after next.",
+   "extracted": {
+    "offer_date": "the week after next",
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "proposes_date_or_amount"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Monday the twenty sixth.",
+   "extracted": {
+    "offer_date": "Monday the twenty sixth",
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "proposes_date_or_amount"
+   }
+  },
+  {
+   "node": "confirm_record",
+   "text": "Yes, I confirm.",
+   "extracted": {
+    "readback_reply": "confirms"
+   }
+  }
+ ]
+}

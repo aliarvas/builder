@@ -916,6 +916,10 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
         if "on_decline" in path and ("ask" not in path or path["on_decline"] == path.get("id")
                                      or path["on_decline"] not in closing_ids):
             path.pop("on_decline")
+    # T-028: say_first is optional and only means something with ask.
+    for path in special_paths:
+        if "say_first" in path and (path["say_first"] is not True or "ask" not in path):
+            path.pop("say_first")
 
     provenance: dict[str, Any] = {}
     overrides: list[dict[str, Any]] = []
@@ -1177,6 +1181,12 @@ def check_spec_data(spec: dict[str, Any], check: _Checker) -> None:
                     check.warn(where + ".on_decline", message + "; dropped")
                 else:
                     check.error(where + ".on_decline", message)
+        if "say_first" in path and (not isinstance(path["say_first"], bool) or (path["say_first"] and "ask" not in path)):
+            message = "must be true or false, and true only on a path that has ask"
+            if check.optional_soft:  # last round: merge_groups drops it, the line is said when acting
+                check.warn(where + ".say_first", message + "; dropped")
+            else:
+                check.error(where + ".say_first", message)
         steps = path.get("available_in")
         if not isinstance(steps, list) or not steps or any(step not in SPECIAL_STEPS for step in steps):
             check.error(where + ".available_in", f"must list steps from {list(SPECIAL_STEPS)}")

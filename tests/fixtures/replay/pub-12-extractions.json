@@ -1,0 +1,327 @@
+{
+ "source": "traces/live-runs/user-1c73c93a-64f1-485f-bff1-05a4596689b1.json (PUB-12, A+B workflow 8887e79f version 2): each customer turn with the step it was spoken at and the fields the live extractor wrote (variable_extracted events)",
+ "now": "2026-10-14T11:00",
+ "products": [
+  {
+   "product_id": "p1",
+   "type": "credit_card",
+   "card_last4": "9015",
+   "past_due": 510,
+   "days_late": 16,
+   "minimum_payment": 153
+  },
+  {
+   "product_id": "p2",
+   "type": "personal_loan",
+   "past_due": 1320,
+   "days_late": 16,
+   "instalment_amount": 440
+  },
+  {
+   "product_id": "p3",
+   "type": "car_loan",
+   "past_due": 140,
+   "days_late": 7,
+   "instalment_amount": 46
+  }
+ ],
+ "expected": {
+  "promises": [
+   [
+    "p1",
+    510.0,
+    "2026-10-15"
+   ]
+  ],
+  "notes": [
+   [
+    "p2",
+    "refused"
+   ],
+   [
+    "p3",
+    "refused"
+   ]
+  ]
+ },
+ "turns": [
+  {
+   "node": "opening",
+   "text": "Yes, this is Marcus Bell.",
+   "extracted": {
+    "caller_role": "confirmed"
+   }
+  },
+  {
+   "node": "identity",
+   "text": "My date of birth is nineteen October nineteen eighty three.",
+   "extracted": {}
+  },
+  {
+   "node": "identity",
+   "text": "The last four digits are four four zero one.",
+   "extracted": {}
+  },
+  {
+   "node": "identity",
+   "text": "The last four digits are four four one zero.",
+   "extracted": {}
+  },
+  {
+   "node": "negotiate",
+   "text": "I can pay the credit card tomorrow, but I am not paying the personal loan or the car loan.",
+   "extracted": {
+    "offer_date": "tomorrow",
+    "offer_product_name": "credit card",
+    "offer_amount_kind": "none",
+    "negotiation_reply": "proposes_date_or_amount"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "No, I refuse to pay the personal loan.",
+   "extracted": {
+    "offer_product_name": "personal loan",
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "refuses_payment"
+   }
+  },
+  {
+   "node": "negotiate",
+   "text": "No, I am not paying the car loan.",
+   "extracted": {
+    "offer_product_name": "car loan",
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "refuses_payment"
+   }
+  },
+  {
+   "node": "negotiate",
+   "text": "Yes, I confirm.",
+   "extracted": {
+    "offer_accepts_proposal": "yes",
+    "negotiation_reply": "agreed_date_and_amount",
+    "offer_date": "Thursday, 15 October",
+    "offer_product_name": "credit card ending 9015"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "I already told you, I am not paying the personal loan.",
+   "extracted": {
+    "offer_product_name": "personal loan",
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "refuses_payment"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "No, I am not paying the car loan.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "refuses_payment",
+    "offer_product_name": "car loan"
+   }
+  },
+  {
+   "node": "negotiate",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "negotiate",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "negotiate",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "negotiate",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "negotiate",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "negotiate",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "refuses_to_talk"
+   }
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "confirm_record",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  }
+ ]
+}

@@ -11,7 +11,7 @@ import json
 import textwrap
 from typing import Any
 
-from .prompts import OFFER_VERDICT_MESSAGES
+from .prompts import OFFER_VERDICT_MESSAGES, READBACK_ITEM, READBACK_LINE
 from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec, special_note_pairs
 
 # Workflow variables owned by the offer steps (framework names, not brief data).
@@ -90,6 +90,8 @@ def _config(spec: PhoneAgentSpec, reset_variables: list[tuple[str, str]]) -> dic
         "label_field": spec.account.data.get("product_label_field") or "",
         "reset": reset_variables,
         "messages": _verdict_messages(),
+        # T-027: the read-back the confirmation step says, built from the checked offers.
+        "readback": {"line": READBACK_LINE.text, "item": READBACK_ITEM.text},
     }
 
 
@@ -210,11 +212,18 @@ MONTH_NAME_PATTERN = '|'.join(sorted([name.lower() for name in MONTHS] + [name[:
                                      key=len, reverse=True))
 
 
+WEEKDAY_NAME_PATTERN = '|'.join(name.lower() for name in WEEKDAYS)
+
+
 def spoken_day_numbers(text):
     # Day numbers said in words next to a month name become digits: "the twenty third of
-    # october" -> "the 23 of october", "november the sixth" -> "november the 6". Words
-    # without a month name in the phrase are left alone (they may be an amount or a time).
+    # october" -> "the 23 of october", "november the sixth" -> "november the 6". T-027 (PUB-07):
+    # after a weekday name too: "monday the twenty sixth" -> "monday the 26". Words without a
+    # month or weekday name in the phrase are left alone (they may be an amount or a time).
     text = str(text or '')
+    text = re.sub(r'\\b(' + WEEKDAY_NAME_PATTERN + r') (the )?(' + DAY_WORD_PATTERN + r')\\b(?! (?:'
+                  + DAY_UNIT_PATTERN + r')\\b)',
+                  lambda match: match.group(1) + ' ' + (match.group(2) or '') + str(DAY_WORD_VALUES[match.group(3)]), text)
     if not re.search(r'\\b(?:' + MONTH_NAME_PATTERN + r')\\b', text):
         return text
     text = re.sub(DAY_WORD_GUARD + r'\\b(' + DAY_WORD_PATTERN + r')(?= (?:of )?(?:' + MONTH_NAME_PATTERN + r')\\b)',
@@ -646,6 +655,24 @@ def summary(accepted):
             + say_spoken_day(parse_day(entry.get('date'))) + ' [product number ' + str(key) + ']'
         )
     return '; '.join(lines) or 'none'
+
+
+def readback(accepted):
+    # T-027: the read-back in spoken words, said by the confirmation step on entry.
+    products = load_products()
+    items = []
+    for key in sorted(accepted, key=lambda item: int(item) if str(item).isdigit() else 0):
+        entry = accepted[key]
+        number = int(key) if str(key).isdigit() else 0
+        product = products[number - 1] if 1 <= number <= len(products) else dict()
+        name = product_name(number, product, len(products))
+        items.append(CONFIG['readback']['item'].replace('{amount}', say_spoken_amount(parse_amount(entry.get('amount'))))
+                     .replace('the {product}', name if name.startswith('the ') else 'the ' + name)
+                     .replace('{date}', say_spoken_day(parse_day(entry.get('date')))))
+    if not items:
+        return ''
+    payments = items[0] if len(items) == 1 else ', '.join(items[:-1]) + ' and ' + items[-1]
+    return CONFIG['readback']['line'].replace('{payments}', payments)
 """
 
 
@@ -662,6 +689,7 @@ vars[CONFIG['accepted']] = json.dumps(dict())
 vars[CONFIG['accepted_count']] = 0
 vars[CONFIG['noted']] = json.dumps([])
 vars['offers_summary'] = 'none'
+vars['readback_text'] = ''
 vars['offer_message'] = 'No offer has been checked yet.'
 vars['offer_verdict'] = 'none'
 vars['offer_rejections'] = 0
@@ -755,6 +783,7 @@ try:
             vars[CONFIG['accepted']] = json.dumps(accepted)
             vars[CONFIG['accepted_count']] = len(accepted)
             vars['offers_summary'] = summary(accepted)
+            vars['readback_text'] = readback(accepted)
             # Ready when every returned product has an accepted offer or a note.
             progress = 'ready' if len(handled_numbers(accepted)) >= len(products) else 'more'
     # T-022 (F-076): no readable date. The code proposes the latest allowed date and keeps it,
@@ -1207,7 +1236,25 @@ def product_refusal_code(spec: PhoneAgentSpec) -> str:
         "attempt_values": list(negotiation.get("attempt_values") or []),
         "refusal_state": PRODUCT_REFUSAL_STATE,
     })
-    return _prelude(spec, config) + PRODUCT_REFUSAL_BODY
+    if not multi_product(spec):
+        return _prelude(spec, config) + PRODUCT_REFUSAL_BODY
+    config.update(_multi_config(spec))
+    return _prelude(spec, config) + PRODUCT_PICK_BODY + "\n\n" + MULTI_REFUSAL_BODY
+
+
+def _multi_config(spec: PhoneAgentSpec) -> dict[str, Any]:
+    """T-025/T-027: the variables the product picker and the refusal counter use."""
+    negotiation = spec.negotiation.data
+    has_refusals = bool(negotiation.get("product_end_values")) or bool(
+        spec.offer.data.get("persuasion_attempts") and negotiation.get("attempt_values"))
+    return {
+        "product_name_var": OFFER_PRODUCT_NAME, "no_progress_limit": NO_PROGRESS_LIMIT,
+        "refused_name_var": OFFER_REFUSED_NAME if has_refusals else "",
+        "discussed_number_var": OFFER_DISCUSSED_NUMBER, "discussed_name_var": OFFER_DISCUSSED_NAME,
+        "intent_var": negotiation["intent_variable"],
+        "product_end_values": list(negotiation.get("product_end_values") or []),
+        "attempt_values": list(negotiation.get("attempt_values") or []),
+    }
 
 
 def note_next_code(spec: PhoneAgentSpec, recorded_numbers: str, special_results: list[str],
@@ -1267,7 +1314,22 @@ def _code(spec: PhoneAgentSpec, body: str, reset_variables: list[str]) -> str:
 
 def offer_setup_code(spec: PhoneAgentSpec) -> str:
     """Per-product facts (earliest/latest date, min/max amount) and sentinels for prompts."""
-    return _code(spec, SETUP_BODY, [])
+    if not multi_product(spec):
+        return _code(spec, SETUP_BODY, [])
+    config = _full_config(spec, [])
+    config.update(_multi_config(spec))
+    return _prelude(spec, config) + SETUP_BODY + PRODUCT_PICK_BODY + SETUP_DISCUSSED_BODY
+
+
+# T-027: the first product is under discussion until a check or a refusal moves on.
+SETUP_DISCUSSED_BODY = """
+vars[CONFIG['discussed_number_var']] = ''
+vars[CONFIG['discussed_name_var']] = 'first product'
+try:
+    set_discussed(discussed_number(load_products()), load_products())
+except Exception:
+    pass
+"""
 
 
 def check_offer_code(spec: PhoneAgentSpec, reset_variables: list[str]) -> str:
@@ -1276,9 +1338,7 @@ def check_offer_code(spec: PhoneAgentSpec, reset_variables: list[str]) -> str:
     if not multi_product(spec):
         return _code(spec, CHECK_BODY, reset_variables)
     config = _full_config(spec, reset_variables)
-    config.update({
-        "product_name_var": OFFER_PRODUCT_NAME, "no_progress_limit": NO_PROGRESS_LIMIT,
-    })
+    config.update(_multi_config(spec))
     reader = product_reader_code(spec.account.data["products_variable"], spec.account.data["products_field"])
     return (PRELUDE.replace("__CONFIG__", _py_literal(config)).replace("__PRODUCT_READER__", reader)
             + PRODUCT_PICK_BODY + "\n\ndef check_once():\n" + textwrap.indent(CHECK_BODY, "    ")
@@ -1292,6 +1352,11 @@ def multi_product(spec: PhoneAgentSpec) -> bool:
 
 
 OFFER_PRODUCT_NAME = "offer_product_name"
+# T-027 (PUB-12): the products a message refuses, in the customer's words, and the product
+# under discussion (its list number, and its spoken name for the persuasion line).
+OFFER_REFUSED_NAME = "offer_refused_product_name"
+OFFER_DISCUSSED_NUMBER = "offer_discussed_number"
+OFFER_DISCUSSED_NAME = "offer_discussed_product"
 # Check passes in a row that handle no product before the safe exit (T-025 Fix 4).
 NO_PROGRESS_LIMIT = 5
 
@@ -1335,11 +1400,75 @@ def named_product_numbers(text, products):
     return named, plausible
 
 
+def discussed_number(products):
+    # The product under discussion: the one the last step named while it is open (T-027),
+    # else the first product, in account order, not yet handled.
+    handled = handled_numbers(accepted_offers())
+    open_numbers = [index for index in range(1, len(products) + 1) if index not in handled]
+    try:
+        kept = int(str(vars.get(CONFIG['discussed_number_var'])).strip())
+    except Exception:
+        kept = None
+    if kept in open_numbers:
+        return kept
+    return open_numbers[0] if open_numbers else None
+
+
+def set_discussed(number, products):
+    # T-027 (PUB-12): the product a persuasion attempt is about, by number and in spoken words.
+    if number and 1 <= number <= len(products):
+        name = product_name(number, products[number - 1], len(products))
+        vars[CONFIG['discussed_number_var']] = number
+        vars[CONFIG['discussed_name_var']] = name[4:] if name.startswith('the ') else name
+
+
+def refused_numbers(products, paying):
+    # T-027 (PUB-12): open products the customer's words refuse in this message, except the
+    # ones the same message pays. "the others" / "the rest": every other open product.
+    words = vars.get(CONFIG['refused_name_var']) if CONFIG.get('refused_name_var') else ''
+    if not str(words or '').strip():
+        return []
+    handled = handled_numbers(accepted_offers())
+    open_numbers = [index for index in range(1, len(products) + 1) if index not in handled and index not in paying]
+    if re.search(' (?:other|others|rest) ', plain_words(words)):
+        return open_numbers
+    named, plausible = named_product_numbers(words, products)
+    # A product named outright wins over the ones a shared word ("loan") may mean.
+    return [index for index in open_numbers if index in (named or plausible)]
+
+
+def refuse_product(number, intent, products):
+    # One refusal of product ``number`` (F-062 rules): a persuasion attempt while attempts are
+    # left (True: the product goes on), otherwise the product ends with the refused note (False).
+    end = intent in CONFIG['product_end_values']
+    counted = OFFER.get('persuasion_attempts') and (end or intent in CONFIG['attempt_values'])
+    if counted:
+        rule = first_rule(products[number - 1], OFFER.get('persuasion_attempts', []))
+        if rule is None:
+            end = True
+        else:
+            used_by_product = json_value(CONFIG['state']['persuasion_used'], dict())
+            used = int(used_by_product.get(str(number)) or 0)
+            if used < int(rule.get('value')):
+                used_by_product[str(number)] = used + 1
+                vars[CONFIG['state']['persuasion_used']] = json.dumps(used_by_product)
+                vars[CONFIG['state']['persuasion_attempt']] = used + 1
+                return True
+            end = True
+    if not end:
+        return True
+    mark_note_reason(number, CONFIG['refused_reason'])
+    noted = noted_numbers()
+    if number not in noted:
+        noted.append(number)
+    vars[CONFIG['noted']] = json.dumps(noted)
+    return False
+
+
 def pick_products(products):
     # (numbers to check, ask): T-025 Fix 1.
     handled = handled_numbers(accepted_offers())
-    open_numbers = [index for index in range(1, len(products) + 1) if index not in handled]
-    current = open_numbers[0] if open_numbers else None
+    current = discussed_number(products)
     try:
         explicit = int(str(vars.get(CONFIG['product_var'])).strip())
     except Exception:
@@ -1375,6 +1504,14 @@ try:
     numbers, ask = pick_products(products_all)
 except Exception:
     numbers, ask = [], False
+try:
+    # T-027 (PUB-12): "the card tomorrow, but not the loans": each refused product counts one
+    # refusal before the check, so the check's progress and next line already know it.
+    refusal_intent = (CONFIG['product_end_values'] or CONFIG['attempt_values'] or [''])[0]
+    for refused in refused_numbers(products_all, numbers):
+        refuse_product(refused, refusal_intent, products_all)
+except Exception:
+    pass
 several = len(numbers) > 1
 verdict = 'missing'
 for position, number in enumerate(numbers or [0]):
@@ -1416,9 +1553,83 @@ try:
         vars['offer_message'] = ''
 except Exception:
     pass
+try:
+    # T-027: the product the next line is about: the one whose check failed, else the next open one.
+    # (``number`` is the product the loop stopped at.)
+    failed = number if numbers and verdict != 'ok' else None
+    vars[CONFIG['discussed_number_var']] = ''
+    set_discussed(failed or discussed_number(products_all), products_all)
+except Exception:
+    pass
 # Fix 5: the product fields are reset with the other offer fields.
 vars[CONFIG['product_var']] = 0
 vars[CONFIG['product_name_var']] = ''
+if CONFIG.get('refused_name_var'):
+    vars[CONFIG['refused_name_var']] = ''
+"""
+
+
+# T-027 (PUB-12): a refusal with several products. The products the customer's words name
+# (as an offer or as refused) are the ones refused, each counted on its own; with no name, the
+# product under discussion. A product with attempts left becomes the product under discussion.
+MULTI_REFUSAL_BODY = """state = 'persuade'
+message = ''
+try:
+    products = load_products()
+    accepted = accepted_offers()
+    handled = handled_numbers(accepted)
+    open_numbers = [index for index in range(1, len(products) + 1) if index not in handled]
+    try:
+        explicit = int(str(vars.get(CONFIG['product_var'])).strip())
+    except Exception:
+        explicit = None
+    if explicit in open_numbers:
+        targets = [explicit]
+    else:
+        named, plausible = named_product_numbers(vars.get(CONFIG['product_name_var']), products)
+        targets = [index for index in open_numbers if index in (named or plausible)]
+        targets += [index for index in refused_numbers(products, []) if index not in targets]
+    if not targets:
+        current = discussed_number(products)
+        targets = [current] if current is not None else []
+    intent = str(vars.get(CONFIG['intent_var']) or '')
+    going_on = [number for number in targets if refuse_product(number, intent, products)]
+    if going_on:
+        set_discussed(going_on[0], products)
+    else:
+        handled = handled_numbers(accepted)
+        upcoming = next((index for index in range(1, len(products) + 1) if index not in handled), None)
+        if upcoming is not None:
+            state = 'more'
+            product = products[upcoming - 1]
+            name = product_name(upcoming, product, len(products))
+            message = CONFIG['messages'].get('more', '').replace(
+                'the [next]', name if name.startswith('the ') else 'the ' + name).replace(
+                '[next_amount]', say_spoken_amount(limits(product)[3]))
+            vars[CONFIG['proposed_kind_var']] = 'full'
+            vars[CONFIG['state']['persuasion_attempt']] = int(
+                json_value(CONFIG['state']['persuasion_used'], dict()).get(str(upcoming)) or 0)
+            set_discussed(upcoming, products)
+        elif accepted:
+            state = 'ready'
+        else:
+            state = 'closing'
+            if intent not in CONFIG['product_end_values'] and CONFIG['product_end_values']:
+                # Attempts used up by count: the closing reads the refusal value.
+                vars[CONFIG['intent_var']] = CONFIG['product_end_values'][0]
+except Exception:
+    state = 'persuade'
+vars[CONFIG['refusal_state']] = state
+if state == 'more':
+    vars['offer_message'] = message
+    vars['offer_verdict'] = 'none'
+    vars[CONFIG['progress']] = 'more'
+if state != 'closing':
+    vars[CONFIG['intent_var']] = CONFIG['kind_none']
+vars[CONFIG['product_var']] = 0
+vars[CONFIG['product_name_var']] = ''
+if CONFIG['refused_name_var']:
+    vars[CONFIG['refused_name_var']] = ''
 """
 
 

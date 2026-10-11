@@ -94,7 +94,7 @@ class SelfCheckTests(unittest.TestCase):
         spec = load(SPECS["spec-brief-a.json"][0])
         workflow = build_spec_workflow(spec, SPECS["spec-brief-a.json"][1])
         played = [item for item in run_selfcheck(spec, workflow, NOW).results if item.scenario.startswith("spoken_date")]
-        self.assertEqual(6, len(played))
+        self.assertEqual(7, len(played))  # T-027: the weekday form
         self.assertTrue(all(item.passed for item in played), [item.reason for item in played if not item.passed])
         # The v18 reader: no words for day numbers.
         text = json.dumps(workflow)
@@ -102,7 +102,8 @@ class SelfCheckTests(unittest.TestCase):
         self.assertNotEqual(text, old)
         report = run_selfcheck(spec, json.loads(old), NOW)
         failed = {item.scenario for item in report.results if item.scenario.startswith("spoken_date") and not item.passed}
-        self.assertEqual({"spoken_date_word_ordinal", "spoken_date_word_ordinal_capital", "spoken_date_month_the_word"}, failed)
+        self.assertEqual({"spoken_date_word_ordinal", "spoken_date_word_ordinal_capital", "spoken_date_month_the_word",
+                          "spoken_date_weekday_the_word"}, failed)
         self.assertTrue(all(item.kind == BUILDER for item in report.results
                             if item.scenario in failed))
 

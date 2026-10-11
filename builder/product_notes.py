@@ -20,11 +20,12 @@ from typing import Any, Callable
 
 from .offer_check import (
     NOTE_PRODUCT_ID, NOTE_REASON, NOTE_RESULT, NOTE_STATE, PERSUASION_ATTEMPT, PRODUCT_REFUSAL_STATE,
-    OFFER_PRODUCT, OFFER_PRODUCT_NAME, multi_product, note_next_code, notes_outcome_code, product_refusal_code,
+    OFFER_DISCUSSED_NAME, OFFER_PRODUCT, OFFER_PRODUCT_NAME, OFFER_REFUSED_NAME, multi_product, note_next_code,
+    notes_outcome_code, product_refusal_code,
 )
 from .prompts import (
-    CLOSING_FALLBACK_SAY, OFFER_PRODUCT_NAME_DESCRIPTION, PERSUASION_STATE_LINE, PRODUCT_END_COUNTED_DESCRIPTION,
-    PRODUCT_INTENT_DESCRIPTION,
+    CLOSING_FALLBACK_SAY, OFFER_PRODUCT_NAME_DESCRIPTION, OFFER_REFUSED_PRODUCTS_DESCRIPTION, PERSUASION_PRODUCT_LINE,
+    PERSUASION_STATE_LINE, PRODUCT_END_COUNTED_DESCRIPTION, PRODUCT_INTENT_DESCRIPTION,
 )
 from .record_loop import FAILED_NUMBERS, RECORDED_NUMBERS
 from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec, SpecError, special_note_pairs
@@ -111,6 +112,10 @@ def add_product_name_field(spec: PhoneAgentSpec, nodes: dict[str, Any]) -> None:
     at = next((index + 1 for index, field in enumerate(schema) if field["name"] == OFFER_PRODUCT), len(schema))
     schema.insert(at, {"name": OFFER_PRODUCT_NAME, "type": "string",
                        "description": OFFER_PRODUCT_NAME_DESCRIPTION.text, "min_confidence": 0.7})
+    if refusal_values(spec):
+        # T-027 (PUB-12): "the card tomorrow, but not the loans" refuses products in an offer turn.
+        schema.insert(at + 1, {"name": OFFER_REFUSED_NAME, "type": "string",
+                               "description": OFFER_REFUSED_PRODUCTS_DESCRIPTION.text, "min_confidence": 0.7})
 
 
 def add_product_steps(
@@ -155,6 +160,10 @@ def add_product_steps(
         if spec.offer.data.get("persuasion_attempts"):
             negotiate["task_message"] += "\n" + PERSUASION_STATE_LINE.text.replace(
                 "{attempt}", "{{" + PERSUASION_ATTEMPT + "}}")
+            if multi_product(spec):
+                # T-027 (PUB-12): which product the counted attempt is about.
+                negotiate["task_message"] += " " + PERSUASION_PRODUCT_LINE.text.replace(
+                    "{product}", "{{" + OFFER_DISCUSSED_NAME + "}}")
 
     if spec.closing.data.get("product_notes"):
         try:

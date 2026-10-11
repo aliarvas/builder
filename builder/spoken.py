@@ -93,3 +93,32 @@ def quoted_speech(text: str, reserved: frozenset[str] | set[str] = frozenset()) 
             return ""
         kept.append(words if words[-1] in ".!?" else words + ".")
     return " ".join(kept)
+
+
+# T-026: the recording notice describes the present ("we are recording this call"); the word
+# "recorded" is kept for an action whose tool returned ok (a judge read "this call is recorded"
+# as a claim made before any tool ran). Generic English wording; no brief value.
+_CALL_NOUN = r"(?:(?:this|the|your|our) (?:phone |telephone )?call|(?:all |our )?calls)"
+_RECORDING_NOTICE = re.compile(
+    r"\b" + _CALL_NOUN + r" (?:is|are|will be)(?: being)? recorded\b", re.IGNORECASE)
+_RECORDED_WORD = re.compile(r"\brecorded\b", re.IGNORECASE)
+RECORDING_NOTICE_WORDS = "we are recording this call"
+
+
+def present_recording_notice(text: str) -> tuple[str, str]:
+    """(text, note): the call-recording clause of a spoken line rewritten to the present
+    continuous ("this call is recorded" -> "we are recording this call"). The note says what
+    changed, or why a "recorded" left in the line was not touched; "" when nothing to say."""
+    def replace(match: re.Match[str]) -> str:
+        start = match.start()
+        before = text[:start].rstrip()
+        sentence_start = not before or before[-1] in ".!?"
+        return RECORDING_NOTICE_WORDS[0].upper() + RECORDING_NOTICE_WORDS[1:] if sentence_start else RECORDING_NOTICE_WORDS
+
+    rewritten = _RECORDING_NOTICE.sub(replace, text)
+    if _RECORDED_WORD.search(rewritten):
+        return rewritten, ("'recorded' is left in the line because it is not clearly the call-recording notice"
+                           + ("; the notice clause was rewritten" if rewritten != text else ""))
+    if rewritten != text:
+        return rewritten, f"recording notice said in the present: {rewritten!r}"
+    return text, ""

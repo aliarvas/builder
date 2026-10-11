@@ -124,9 +124,9 @@ MULTI_STEP_SYSTEM_PROMPT_TEMPLATE = PromptDefinition(
     used_at="builder/workflow.py — spec workflow system_prompt",
     text=(
         "You are {agent_name}. Speak {language}. Keep every turn concise and truthful. "
-        "Call at most one tool per message. Never claim an action succeeded, or a note or callback was recorded, "
-        "unless its tool returned ok true; never say a payment or promise was recorded unless create_promise "
-        "returned ok true.\n"
+        "Call at most one tool per message. Never claim an action succeeded unless its tool returned ok true. "
+        "Use the word \"recorded\" only for an action whose tool returned ok true in this call (a payment or promise: "
+        "create_promise); for the recording notice say \"we are recording this call\".\n"
         "Global rules:\n{rules}"
     ),
     runtime_placeholders=("{agent_name}", "{language}", "{rules}"),
@@ -284,6 +284,39 @@ OFFER_PRODUCT_NAME_DESCRIPTION = PromptDefinition(
     "The product or products the customer's last message names for this payment, copied in the customer's words "
     "(for example the kind of product, the last digits, or \"both\"). Empty if the message names no product.",
 )
+OFFER_REFUSED_PRODUCTS_DESCRIPTION = PromptDefinition(
+    "OFFER_REFUSED_PRODUCTS_DESCRIPTION",
+    "The products the customer refuses in the same message, in their words; the code counts a refusal for each (T-027).",
+    "extraction model",
+    "builder/product_notes.py — negotiate extraction field offer_refused_product_name (specs with per-product refusals)",
+    "The product or products the customer's last message refuses to pay, copied in the customer's words "
+    "(for example the kind of product, the last digits, or \"the others\"). Empty if the message refuses no product.",
+)
+READBACK_LINE = PromptDefinition(
+    "READBACK_LINE", "Read-back the confirmation step says on entry, built by code from the checked offers "
+    "(T-027, PUB-12: the model never read it back and the step waited for a confirmation forever).",
+    "phone agent (fixed spoken line)", "builder/offer_check.py — readback_text, spoken by confirm_record",
+    "I can record {payments}. Do you confirm?",
+    ("{payments}",),
+)
+READBACK_ITEM = PromptDefinition(
+    "READBACK_ITEM", "One checked offer in the read-back line (T-027).", "phone agent (fixed spoken line)",
+    "builder/offer_check.py — readback_text",
+    "a payment of {amount} for the {product} on {date}",
+    ("{amount}", "{product}", "{date}"),
+)
+CONFIRM_READBACK_SAID_LINE = PromptDefinition(
+    "CONFIRM_READBACK_SAID_LINE", "Tells the confirmation step that the program has already said the read-back (T-027).",
+    "phone agent", "builder/goodbye.py — confirm_record",
+    "The program has just said this read-back to the customer: \"{{readback_text}}\" Do not read it again unless "
+    "the customer asks; answer the customer and wait for one clear confirmation.",
+)
+CUSTOMER_ENDS_CALL_INTENT = PromptDefinition(
+    "CUSTOMER_ENDS_CALL_INTENT", "Routing intent of the global step for a customer who ends the call during the "
+    "offer talk (T-027, PUB-12: \"Thank you, goodbye\" matched no route and the step repeated itself).",
+    "routing model", "builder/goodbye.py — global step customer_ends_call",
+    "The customer only says goodbye or thanks to end the call, with no refusal, no offer and no question.",
+)
 CONFIRM_TASK_TEMPLATE = PromptDefinition(
     "CONFIRM_TASK_TEMPLATE", "Reads back the checked offers once and asks for one confirmation; the program "
     "records them (F-063).", "phone agent",
@@ -313,6 +346,12 @@ PERSUASION_STATE_LINE = PromptDefinition(
     "Persuasion attempt on this product, counted by the bank system: {attempt} (0: none yet). The bank "
     "system moves on to the next product when its attempts are used up.",
     ("{attempt}",),
+)
+PERSUASION_PRODUCT_LINE = PromptDefinition(
+    "PERSUASION_PRODUCT_LINE", "Names the product a counted persuasion attempt is about (T-027, PUB-12).", "phone agent",
+    "builder/product_notes.py — negotiate (specs with per-product refusals and persuasion attempts)",
+    "A counted attempt is about the {product} only; never move to another product yourself.",
+    ("{product}",),
 )
 PRODUCT_INTENT_DESCRIPTION = PromptDefinition(
     "PRODUCT_INTENT_DESCRIPTION", "Extraction meaning of the per-product refusal values (F-062).", "extraction model",
@@ -432,6 +471,13 @@ SPECIAL_ASK_PHRASED_TEMPLATE = PromptDefinition(
     "Ask the customer this as one short question, in your own words: {ask}\n"
     "Wait for the answer. Do not call any tool and do not promise anything.",
     ("{ask}",),
+)
+SPECIAL_SAY_FIRST_LINE = PromptDefinition(
+    "SPECIAL_SAY_FIRST_LINE",
+    "Puts a special path's line before its question when the spec says so (say_first, T-028, PUB-05: sympathy before the offer).",
+    "phone agent", "builder/workflow.py — global special_<id> with ask and say_first",
+    'Before the question, say word for word: "{say}"\n',
+    ("{say}",),
 )
 SPECIAL_ASK_TASK_TEMPLATE = PromptDefinition(
     "SPECIAL_ASK_TASK_TEMPLATE", "Waits for the answer to a special path's first question.", "phone agent",
@@ -732,6 +778,8 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     'and waits for the answer, so it must be one question ending with "?", never an instruction), '
     '"on_decline": "id of another special path" (optional, only with ask: the closing path the documents give when '
     'the customer does not want what this path does after the question; leave it out when a no simply goes on with the call), '
+    '"say_first": true (optional, only with ask: the documents say the say line when the situation starts, before the question, '
+    'for example one sentence of sympathy before an offer; leave it out when say is what the agent says when it acts after the question), '
     '"tool": "tool name or \\"\\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", '
     '"available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]\n'
     "   (situations that interrupt the normal flow, for example: the customer says the payment was already made, "
@@ -848,10 +896,16 @@ PROMPTS = (
     NEGOTIATION_TASK_TEMPLATE,
     OFFER_VERDICT_MESSAGES,
     OFFER_PRODUCT_NAME_DESCRIPTION,
+    OFFER_REFUSED_PRODUCTS_DESCRIPTION,
+    READBACK_LINE,
+    READBACK_ITEM,
+    CONFIRM_READBACK_SAID_LINE,
+    CUSTOMER_ENDS_CALL_INTENT,
     CONFIRM_TASK_TEMPLATE,
     ACCOUNT_WAIT_LINE,
     REVISE_ASK_LINE,
     PERSUASION_STATE_LINE,
+    PERSUASION_PRODUCT_LINE,
     PRODUCT_INTENT_DESCRIPTION,
     PRODUCT_END_COUNTED_DESCRIPTION,
     CLOSING_FALLBACK_SAY,
@@ -862,6 +916,7 @@ PROMPTS = (
     SPECIAL_TOOL_FAILED_SAY,
     PROMISE_NOT_ALL_RECORDED_SAY,
     SPECIAL_ASK_PHRASED_TEMPLATE,
+    SPECIAL_SAY_FIRST_LINE,
     SPECIAL_CHOICE_DESCRIPTION,
     SPECIAL_TOPIC_DESCRIPTION,
     CALLBACK_COLLECT_RULE,

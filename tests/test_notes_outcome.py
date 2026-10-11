@@ -218,7 +218,9 @@ class RenderTests(unittest.TestCase):
                     parse_spec(data)
 
 
-BRIEF_A_RENDER_SHA256 = "db9effa1ad59d21b8c38495dbba69ab8906b9ff266ceac9e6c2b54b77f4e18c0"
+# T-028/T-026: global exits, identity hook, honesty line, present-tense recording notice. T-027 on top: a
+# weekday with a day in words, the code-built read-back said by confirm_record, the global goodbye step.
+BRIEF_A_RENDER_SHA256 = "69c6e9dbd1411d17e0b47763ced7be0aa8932f48df66c2fc35d0a50af8bf7ff4"
 
 
 class ExtractionTests(unittest.TestCase):

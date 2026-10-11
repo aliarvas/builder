@@ -35,7 +35,10 @@ from .callback import (
     CALLBACK_BOOK as CALLBACK_BOOK_STEP, DAY_TEXT, THIRD_PARTY_CLOSE_EXPLICIT, THIRD_PARTY_CLOSE_KIND, TIME_TEXT,
     callback_window,
 )
-from .offer_check import ACCEPTS_YES, OFFER_ACCEPTS, OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFERS_ACCEPTED, OFFERS_NOTED
+from .offer_check import (
+    ACCEPTS_YES, OFFER_ACCEPTS, OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PRODUCT_NAME, OFFER_REFUSED_NAME,
+    OFFERS_ACCEPTED, OFFERS_NOTED,
+)
 from .selfcheck_calendar import SpecCalendar, first_rule
 from .record_loop import RECORD_PROMISE
 from .spec import FRAMEWORK_NONE_VALUE, SPECIAL_THEN_CLOSE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec, special_note_pairs
@@ -149,11 +152,13 @@ class Bank:
     (ok once they run out); ``identity`` lists whether each security answer is right."""
 
     def __init__(self, spec: PhoneAgentSpec, products: list[dict[str, Any]],
-                 answers: dict[str, list[bool]] | None = None, identity: list[bool] | None = None) -> None:
+                 answers: dict[str, list[bool]] | None = None, identity: list[bool] | None = None,
+                 identity_known: bool = False) -> None:
         self.spec = spec
         self.products = products
         self.answers = {name: list(values) for name, values in (answers or {}).items()}
         self.identity = list(identity or [])
+        self.identity_known = identity_known
         self.wrong_left = BANK_WRONG_ANSWERS
         self.passed: set[str] = set()
         self.calls: list[ToolCall] = []
@@ -176,6 +181,9 @@ class Bank:
                 identity["verified_field"]: self.passed >= set(self.question_fields),
                 identity["attempts_left_field"]: self.wrong_left,
             })
+            if self.identity_known:
+                # PUB-05 (v19): verified in an earlier session, the bank sent no overall field.
+                del data[identity["verified_field"]]
         elif tool == self.account_tool:
             data[account["products_field"]] = copy.deepcopy(self.products) if ok else []
         self.calls.append(ToolCall(tool, dict(body), ok, step))
@@ -518,6 +526,7 @@ class Scenario:
     repeats: dict[str, int] = dataclasses.field(default_factory=dict)  # action label -> turns
     step: str = ""                          # the step the scenario is about
     callback: tuple[str, ...] | None = None  # T-012: (day, time) booked; () none; None not checked
+    identity_known: bool = False            # T-028: the bank verified the customer earlier
 
 
 def synthetic_products(spec: PhoneAgentSpec, count: int) -> list[dict[str, Any]]:
@@ -698,6 +707,12 @@ def scenarios(spec: PhoneAgentSpec, now: str) -> list[Scenario]:
                         *plan.verify(), plan.offer(1, day), plan.confirm()],
             "promise_recorded", one, identity=[False], promises=[plan.promise(one[0], day)],
             notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="negotiate"))
+        # T-028 (PUB-05): the bank had verified the customer earlier and sends no overall field.
+        result.append(Scenario(
+            "identity_known_earlier", [*plan.reach_negotiation(), plan.offer(1, day), plan.confirm()],
+            "promise_recorded", one, promises=[plan.promise(one[0], day)],
+            notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="identity",
+            identity_known=True))
         result.extend(_offer_scenarios(spec, plan, one, notes_for))
         result.extend(_spoken_date_scenarios(spec, plan, one, notes_for))
         # The record call fails every time.
@@ -733,6 +748,9 @@ def scenarios(spec: PhoneAgentSpec, now: str) -> list[Scenario]:
     if plan.notes or plan.negotiation.get("product_end_values"):
         result.extend(_multi_scenarios(spec, plan, notes_for))
         result.extend(_without_product_field(_multi_scenarios(spec, plan, notes_for)))
+        result.extend(_mixed_refusal_scenarios(spec, plan, notes_for))
+    # T-027: a goodbye during the offer talk ends the call within two turns.
+    result.extend(_goodbye_scenarios(spec, plan, one, notes_for))
 
     # T-012: call-end states and the other families.
     result.extend(_call_end_scenarios(spec, plan, one, notes_for))
@@ -1145,7 +1163,8 @@ def _before(plan, step: str, one) -> list[dict[str, Any]] | None:
 def _enter(path) -> dict[str, Any]:
     from .workflow import special_result_variable
     return {"kind": "special", "label": "special", "node": "special_" + path.id,
-            "choice_variable": special_result_variable(path) + "_choice"}
+            "choice_variable": special_result_variable(path) + "_choice",
+            "say_first": path.say.text if path.say_first else ""}
 
 
 def _closing_case(plan, path, step, one, notes_for, name, before) -> Scenario:
@@ -1442,6 +1461,8 @@ def _play_call_end(sim: Simulator, action: dict[str, Any]) -> bool:
         if not sim.enter_special(_special_entry(sim, action["node"])):
             return False
         return sim.leave_special()
+    if action["kind"] == "goodbye":
+        return _play_goodbye(sim, action)
     sim.problems.append(f"unknown scenario action {action['kind']!r}")
     return False
 
@@ -1477,6 +1498,10 @@ def _inside_special(sim: Simulator, spec: PhoneAgentSpec, action: dict[str, Any]
             continue
         # The path asks first (F-055 ask). T-023: the answer is read by its operand, since a no
         # may close the call (on_decline) instead of going back.
+        said = " ".join(str(part) for part in ((node.get("on_enter") or {}).get("text"), node.get("task_message")) if part)
+        if action.get("say_first") and action["say_first"].strip() not in said:
+            # T-028 (PUB-05): the line (a sympathy sentence) comes before the question.
+            sim.problems.append(f"{inside} asks before saying {action['say_first']!r}")
         wanted = SPECIAL_STAY if action.get("decline") else SPECIAL_PROCEED
         operands = {c.get("operand") for t in node.get("transitions", []) for c in _leaves(t["condition"])}
         if wanted not in operands:
@@ -1497,7 +1522,7 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
     record_tool = _promise_tool(workflow, spec)
     answers = {_role_tool(workflow, name) if name in ROLE_STEPS else name: values
                for name, values in scenario.answers.items()}
-    bank = Bank(spec, scenario.products, answers, scenario.identity)
+    bank = Bank(spec, scenario.products, answers, scenario.identity, scenario.identity_known)
     variables = {"now": now, spec.offer.data.get("today_variable") or "now": now}
     for name in CALL_VARIABLES:
         variables.setdefault(name, "sim-" + name)
@@ -1750,6 +1775,21 @@ def shadowed_intent_steps(spec: PhoneAgentSpec, workflow: dict[str, Any]) -> lis
     return problems
 
 
+def global_always_exits(workflow: dict[str, Any]) -> list[tuple[str, str]]:
+    """(global step, problem) for each global step that leaves by an ``always`` transition
+    (T-028, PUB-08). From a global step the platform tried the other paths' intents before
+    that exit, so two paths matching the same words looped without a word."""
+    problems = []
+    for key, node in workflow.get("global_nodes", {}).items():
+        for transition in node.get("transitions") or []:
+            if (transition.get("condition") or {}).get("operator") == "always":
+                problems.append((key, (
+                    f"global step {key} leaves to {transition.get('target_node')} by 'always'; the platform "
+                    "tries the other special paths' intents before it, so two paths can hand the call "
+                    "back and forth without speaking")))
+    return problems
+
+
 def run_selfcheck(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str | None = None) -> Report:
     """Play every scenario of ``spec`` on ``workflow``. Never raises.
 
@@ -1776,6 +1816,20 @@ def run_selfcheck(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str | Non
         shadowed = [("-", f"check failed: {type(exc).__name__}: {exc}")]
     for step, problem in shadowed:
         results.append(Result(f"intent_shadow[{step}]", False, BUILDER, problem, step=step))
+        played += 1
+    try:
+        exits = global_always_exits(workflow)
+    except Exception as exc:  # a render shape the check does not know
+        exits = [("-", f"check failed: {type(exc).__name__}: {exc}")]
+    for step, problem in exits:
+        results.append(Result(f"global_exit[{step}]", False, BUILDER, problem, step=step))
+        played += 1
+    try:
+        claims = recorded_claim_gaps(workflow)
+    except Exception as exc:  # a render shape the check does not know
+        claims = [("-", f"check failed: {type(exc).__name__}: {exc}")]
+    for step, problem in claims:
+        results.append(Result(f"recorded_claim[{step}]", False, BUILDER, problem, step=step))
         played += 1
     for index, label in unreached_rows(spec, plays):
         if "(returning path)" in label:
@@ -1911,6 +1965,8 @@ def spoken_date_forms(day: datetime.date) -> dict[str, str]:
         "digit_ordinal": f"{digit_ordinal(day.day)} of {month}",
         "month_first": f"{month} {digit_ordinal(day.day)}",
         "month_the_word": f"{month} the {spoken_ordinal(day.day).replace('-', ' ')}",
+        # T-027 (PUB-07): a weekday and the day in words, no month ("Monday the twenty sixth").
+        "weekday_the_word": f"{day.strftime('%A')} the {spoken_ordinal(day.day).replace('-', ' ')}",
     }
 
 
@@ -1968,3 +2024,117 @@ def _offer_loop_failures(sim: Simulator) -> list[str]:
     if longest > NO_PROGRESS_PASSES:
         return [f"loop: {longest} offer checks in a row handle no product (check_offer <-> offer_say)"]
     return []
+
+
+# ---------------------------------------------------------------------------
+# T-027 (PUB-12): a goodbye in the offer talk, products refused by name, no false "recorded"
+# ---------------------------------------------------------------------------
+
+GOODBYE_STEP = "customer_ends_call"
+# Customer turns from the first goodbye to the end of the call (CTO addendum, item 6).
+GOODBYE_TURNS = 2
+
+
+def _play_goodbye(sim: Simulator, action: dict[str, Any]) -> bool:
+    """The customer only says goodbye: the extraction gives the step's choice field the value
+    that routes nowhere (its description names the goodbye), so the global step starts."""
+    from .workflow import choice_variables
+
+    waiting = sim.advance()
+    names = choice_variables(sim.spec)
+    said = {field["name"]: FRAMEWORK_NONE_VALUE for field in sim.nodes.get(waiting, {}).get("extraction_schema") or []
+            if field.get("name") in names}
+    if GOODBYE_STEP not in sim.globals:
+        sim.problems.append(f"no step catches a goodbye at {waiting}")
+        return False
+    moved = sim.intent_turn(_topic_choice(sim, waiting, GOODBYE_STEP, said), GOODBYE_STEP)
+    if moved == "step":
+        sim.problems.append(f"at {waiting} a step route takes the goodbye, so the call goes on")
+        return False
+    return bool(moved)
+
+
+def _goodbye(label: str = "goodbye") -> dict[str, Any]:
+    return {"kind": "goodbye", "label": label, "repeat": True}
+
+
+def _goodbye_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """A goodbye at the offer step closes the call; with an accepted offer the read-back is
+    said once, and a second goodbye closes without a promise, a yes records it."""
+    result = [Scenario("goodbye_negotiate", [*plan.reach_negotiation(), _goodbye()], "hangup", one,
+                       notes=notes_for(one, state="hangup"), repeats={"goodbye": 1}, step="negotiate")]
+    day = plan.good_day(one)
+    if day:
+        result.append(Scenario(
+            "goodbye_at_readback", [*plan.reach_negotiation(), plan.offer(1, day), _goodbye()], "hangup", one,
+            notes=notes_for(one, state="hangup"), repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record"))
+    if plan.notes or plan.negotiation.get("product_end_values"):
+        products = synthetic_products(spec, 3)
+        day = plan.good_day(products)
+        if day:
+            first = {**plan.offer(1, day), "vars": {OFFER_DATE: day, OFFER_PRODUCT_NAME: "the first one"}}
+            result.append(Scenario(
+                "goodbye_after_one_offer", [*plan.reach_negotiation(), first, {**_goodbye(), "repeat": False},
+                                            plan.confirm()],
+                "promise_recorded", products, promises=[plan.promise(products[0], day)],
+                notes=notes_for(products, promised=["p1"], state="promise_recorded"), step="offer_say"))
+    return result
+
+
+def _attempts(spec: PhoneAgentSpec, product: dict[str, Any]) -> int:
+    """Persuasion attempts the spec gives this product (0 without a rule)."""
+    rule = first_rule(spec.offer.data.get("persuasion_attempts") or [], product)
+    return int(rule.get("value") or 0) if rule and spec.offer.data.get("persuasion_attempts") else 0
+
+
+def _mixed_refusal_scenarios(spec, plan, notes_for) -> list[Scenario]:
+    """One product paid and the others refused in the same turn ("the card tomorrow, but not
+    the others"); and a product refused by name while another is under discussion. Each
+    refusal counts for the product the words name."""
+    if not plan.negotiation.get("product_end_values"):
+        return []
+    products = synthetic_products(spec, 3)
+    day = plan.good_day(products)
+    if not day:
+        return []
+    result = []
+    mixed = {"kind": "say", "label": "offer", "vars": {
+        OFFER_DATE: day, OFFER_PRODUCT_NAME: "the first one", OFFER_REFUSED_NAME: "the others"}}
+    more = sum(_attempts(spec, product) for product in products[1:])
+    turns = [mixed, *([{**plan.refuse(), "until": ("confirm_record",)}] if more else []), plan.confirm()]
+    result.append(Scenario(
+        "multi_pay_one_refuse_rest", [*plan.reach_negotiation(), *turns], "promise_recorded", products,
+        promises=[plan.promise(products[0], day)],
+        notes=notes_for(products, promised=["p1"], refused=["p2", "p3"], state="promise_recorded"),
+        repeats={"refuse": more} if more else {}, step="product_refusal"))
+    named = {**plan.refuse(label="refuse_third"), "repeat": False,
+             "vars": {**plan.refuse()["vars"], OFFER_PRODUCT_NAME: "the third one"}}
+    first = {**plan.offer(1, day), "vars": {OFFER_DATE: day, OFFER_PRODUCT_NAME: "the first one"}}
+    second = {**plan.offer(2, day), "vars": {OFFER_DATE: day, OFFER_PRODUCT_NAME: "the second one"}}
+    refusals = [named] * (_attempts(spec, products[2]) + 1)
+    result.append(Scenario(
+        "multi_refuse_named", [*plan.reach_negotiation(), first, *refusals, second, plan.confirm()],
+        "promise_recorded", products, promises=[plan.promise(products[0], day), plan.promise(products[1], day)],
+        notes=notes_for(products, promised=["p1", "p2"], refused=["p3"], state="promise_recorded"),
+        step="product_refusal"))
+    return result
+
+
+HONEST_RECORD_PATTERN = re.compile(r"never say[^.\n]*recorded", re.IGNORECASE)
+OFFER_STATE_PLACEHOLDERS = ("{{offers_summary}}", "{{readback_text}}", "{{offer_message}}")
+
+
+def recorded_claim_gaps(workflow: dict[str, Any]) -> list[tuple[str, str]]:
+    """(step, problem) for each model-spoken step that sees the checked offers but is not told
+    never to say a promise was recorded (CTO addendum item 2: PUB-12 said "I have recorded
+    your promise" before any tool ran)."""
+    problems = []
+    for key, node in [*workflow.get("nodes", {}).items(), *workflow.get("global_nodes", {}).items()]:
+        task = str(node.get("task_message") or "")
+        if node.get("node_type") != "conversation" or not any(item in task for item in OFFER_STATE_PLACEHOLDERS):
+            continue
+        if not HONEST_RECORD_PATTERN.search(task):
+            problems.append((key, "the step sees the checked offers but its prompt never forbids saying that a "
+                                  "promise was recorded before the record tool returned ok"))
+    return problems
+

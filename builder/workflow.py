@@ -13,6 +13,7 @@ from .prompts import (
     ACCOUNT_WAIT_LINE,
     REVISE_ASK_LINE,
     SPECIAL_ASK_PHRASED_TEMPLATE,
+    SPECIAL_SAY_FIRST_LINE,
     SPECIAL_CHOICE_DESCRIPTION,
     SPECIAL_TOPIC_DESCRIPTION,
     SPECIAL_SAY_FALLBACK,
@@ -52,11 +53,12 @@ from .record_loop import (
     record_next_code, record_promise_node, record_values,
 )
 from .product_notes import NOTE_RECORD, PRODUCT_REFUSAL, add_product_steps, refusal_values
+from .goodbye import add_goodbye_exit, speak_readback
 from .spec import (
     ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec,
     Rule, SpecError, SpecialPath, notes_outcome_pairs, special_note_pairs,
 )
-from .spoken import agent_directed, quoted_speech, spoken_words
+from .spoken import agent_directed, present_recording_notice, quoted_speech, spoken_words
 from .callback import (
     BOOK_FAILURE_COUNT, THIRD_PARTY_ASK, THIRD_PARTY_CLOSE_CHECK, add_collect_rule, callback_entry_transition,
     callback_extraction_fields, callback_nodes, third_party_ask_node, third_party_close_guard_node,
@@ -158,6 +160,15 @@ def _rule_lines(rules: tuple[Rule, ...]) -> str:
 
 def _condition(variable: str, operator: str, operand: Any) -> dict[str, Any]:
     return {"variable": variable, "operator": operator, "operand": operand}
+
+
+# T-028 (PUB-08): from a global step the platform tried the other special paths' intents before
+# the step's own `always` exit, and did not apply their excluded_nodes there. Two paths that
+# matched the same words ("I paid it" is already_paid and dispute) sent the call back and forth
+# without a word until the customer hung up. A global step therefore leaves on a variable
+# condition that always holds (`now` is a call variable, always set); deterministic conditions
+# are tried before intents. The passthrough default stays the fallback.
+GLOBAL_EXIT_CONDITION = {"logic": "or", "conditions": [{"variable": "now", "operator": "not_equals", "operand": ""}]}
 
 
 def _transition(target: str, description: str, conditions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -370,6 +381,26 @@ def group_transitions_by_target(transitions: list[dict[str, Any]]) -> list[dict[
     return result
 
 
+IDENTITY_PASSED_VARIABLE = "identity_answers_passed"
+
+
+def identity_pass_hook(verified_field: str, answer_field: str, questions: int) -> str:
+    """T-028 (PUB-05): a result without the overall field (the bank had verified the customer
+    in an earlier session and sent only the answer's own field) left the call in the identity
+    step for good. When the overall field is missing, every question answered right in this
+    call counts; get_account still refuses if the bank disagrees, which closes as a failure."""
+    return f"""try:
+    data = result.get('data') if isinstance(result, dict) else None
+    if isinstance(data, dict) and str(data.get({answer_field!r})).lower() == 'true':
+        passed = int(vars.get({IDENTITY_PASSED_VARIABLE!r}) or 0) + 1
+        vars[{IDENTITY_PASSED_VARIABLE!r}] = passed
+        if data.get({verified_field!r}) is None and passed >= {questions!r}:
+            data[{verified_field!r}] = True
+except Exception:
+    pass
+"""
+
+
 def _response_mapping(tool: dict[str, Any], mappings: dict[str, str]) -> dict[str, Any]:
     mapped = copy.deepcopy(tool)
     mapped["response_mapping"] = [
@@ -580,11 +611,18 @@ def _special_nodes(
             extra[decline_key] = declined
             extra.update(more)
             stay_target, stay_text = decline_key, "The customer does not want this: " + decline.when.text
-        node = _conversation(key, render_prompt(ask_prompt, ask=path.ask.text), [], [
+        spoken_ask = path.ask.text
+        if path.say_first and not phrased:
+            # T-028 (PUB-05): the line comes first (sympathy before the offer); the closing does not repeat it.
+            spoken_ask = path.say.text.strip() + " " + path.ask.text.strip()
+        ask_task = render_prompt(ask_prompt, ask=spoken_ask)
+        if path.say_first and phrased:
+            ask_task = render_prompt(SPECIAL_SAY_FIRST_LINE, say=path.say.text) + ask_task
+        node = _conversation(key, ask_task, [], [
             _transition(go_key, "The customer wants this", [_condition(choice, "equals", SPECIAL_PROCEED)]),
             _transition(stay_target, stay_text, [_condition(choice, "equals", SPECIAL_STAY)]),
         ])
-        node["on_enter"] = {"type": "llm"} if phrased else {"type": "tts", "text": path.ask.text}
+        node["on_enter"] = {"type": "llm"} if phrased else {"type": "tts", "text": spoken_ask}
         node["extraction_schema"] = [{
             "name": choice, "type": "string", "enum_values": [SPECIAL_PROCEED, SPECIAL_STAY],
             "description": render_prompt(SPECIAL_CHOICE_DESCRIPTION, ask=path.ask.text, action=_path_action(path)),
@@ -1108,7 +1146,8 @@ def _closing_code(spec: PhoneAgentSpec) -> str:
     fallback, said when the chosen outcome row is not the state's own row, or when that
     row's sentence is only the generic goodbye (empty or an instruction replaced, F-047).
     """
-    first_lines = [("special:" + path.id, path.say.text, True) for path in spec.special_paths if path.then == "close"]
+    first_lines = [("special:" + path.id, path.say.text, True) for path in spec.special_paths
+                   if path.then == "close" and not path.say_first]  # T-028: said before its question
     if any(path.then == "close" and path.tool for path in spec.special_paths):
         first_lines.append(("special_tool_failed", SPECIAL_TOOL_FAILED_SAY.text, False))
     first_lines.append(("promise_failed", PROMISE_NOT_ALL_RECORDED_SAY.text, False))
@@ -1340,6 +1379,8 @@ def _render_spec_workflow(
         "data." + identity["verified_field"]: "identity_verified",
         "data." + identity["attempts_left_field"]: "identity_attempts_left",
     })
+    identity_tool["post_process_code"] = identity_tool.get("post_process_code", "") + identity_pass_hook(
+        identity["verified_field"], identity["answer_verified_field"], len(spec.identity_questions))
     account_tool = copy.deepcopy(by_name["get_account"])
     account_tool.setdefault("config", {})["maxRetries"] = 1
     promise_tool = _promise_tool(spec, by_name["create_promise"])
@@ -1651,6 +1692,10 @@ def _render_spec_workflow(
         clone["on_enter"] = {"type": "tts", "text": line}
         nodes[clone_key] = clone
 
+    # T-027 (PUB-12): the read-back is said by code, and a goodbye in the offer talk has an exit
+    # (before the special topic value, which must name the goodbye too).
+    speak_readback(nodes)
+    add_goodbye_exit(nodes, global_nodes, global_sources, _code_node)
     _add_special_topic(spec, nodes, global_nodes, global_sources)
     side_questions = side_question_steps(spec, nodes)
     for key, node in [*nodes.items(), *global_nodes.items()]:
@@ -1658,6 +1703,11 @@ def _render_spec_workflow(
         _apply_conversation_tool_rules(node)
         if node.get("transitions"):
             node["transitions"] = group_transitions_by_target(node["transitions"])
+
+    for node in global_nodes.values():
+        for transition in node.get("transitions") or []:
+            if transition["condition"].get("operator") == "always":
+                transition["condition"] = copy.deepcopy(GLOBAL_EXIT_CONDITION)
 
     for global_key, sources in global_sources.items():
         global_nodes[global_key]["excluded_nodes"] = sorted(
@@ -2086,7 +2136,12 @@ def speakable_spec(spec: PhoneAgentSpec) -> tuple[PhoneAgentSpec, list[str]]:
                 notes.append(f"spoken_fallback special_paths[{index}].ask: {reason}; the agent phrases the question")
         paths.append(dataclasses.replace(path, say=say, ask=ask))
     wait_line = clean(spec.agent.wait_line, ACCOUNT_WAIT_LINE.text, "agent.wait_line") if spec.agent.wait_line else ""
-    agent = dataclasses.replace(spec.agent, wait_line=wait_line)
+    # T-026: the recording notice in the present tense; "recorded" only after a tool returned ok.
+    introduction, note = present_recording_notice(spec.agent.introduction.text)
+    if note and "left in the line" in note:  # a rewrite is the fixed rule; only a doubt is a warning
+        notes.append(f"recording_notice agent.introduction: {note}")
+    agent = dataclasses.replace(spec.agent, wait_line=wait_line,
+                                introduction=dataclasses.replace(spec.agent.introduction, text=introduction))
     return dataclasses.replace(spec, outcomes=outcomes, special_paths=tuple(paths), agent=agent), notes
 
 
