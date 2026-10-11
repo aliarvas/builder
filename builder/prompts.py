@@ -290,7 +290,8 @@ OFFER_REFUSED_PRODUCTS_DESCRIPTION = PromptDefinition(
     "extraction model",
     "builder/product_notes.py — negotiate extraction field offer_refused_product_name (specs with per-product refusals)",
     "The product or products the customer's last message refuses to pay, copied in the customer's words "
-    "(for example the kind of product, the last digits, or \"the others\"). Empty if the message refuses no product.",
+    "(for example the kind of product, the last digits, or \"the others\"). Empty unless this message itself "
+    "refuses a product; never copy a product from an earlier message.",
 )
 READBACK_LINE = PromptDefinition(
     "READBACK_LINE", "Read-back the confirmation step says on entry, built by code from the checked offers "
@@ -315,14 +316,16 @@ CUSTOMER_ENDS_CALL_INTENT = PromptDefinition(
     "CUSTOMER_ENDS_CALL_INTENT", "Routing intent of the global step for a customer who ends the call (T-027, "
     "PUB-12: \"Thank you, goodbye\" matched no route and the step repeated itself; T-029: every step).",
     "routing model", "builder/goodbye.py — global step customer_ends_call",
-    "The customer only says goodbye or thanks to end the call: not an answer to a question, no refusal, "
-    "no offer and no question.",
+    "The customer clearly takes leave (goodbye, bye, or that they are done) and says nothing else: not an "
+    "answer to a question, no refusal, no offer and no question. \"Thanks\", \"okay\" or \"yes\" alone is "
+    "not a goodbye.",
 )
 GOODBYE_CHOICE_DESCRIPTION = PromptDefinition(
     "GOODBYE_CHOICE_DESCRIPTION", "Choice value of a global ask step for a customer who ends the call there; a "
     "global step cannot start the goodbye step (T-029).", "extraction model",
     "builder/goodbye.py — choice field of each global conversation step",
-    " {value}: the customer only says goodbye or thanks to end the call, not an answer to the question.",
+    " {value}: the customer only takes leave (goodbye, or that they are done) and gives no answer; \"thanks\", "
+    "\"okay\" or \"yes\" alone is not {value}, and a \"no\" (also \"no thanks, goodbye\") answers the question.",
     ("{value}",),
 )
 CONFIRM_TASK_TEMPLATE = PromptDefinition(
@@ -347,6 +350,12 @@ REVISE_ASK_LINE = PromptDefinition(
     "REVISE_ASK_LINE", "Fixed line when the customer wants to change the read-back (F-053).",
     "phone agent (fixed spoken line)", "builder/workflow.py — revise_ask",
     "Of course. Which date or amount would you like instead?",
+)
+READBACK_RESUME_LINE = PromptDefinition(
+    "READBACK_RESUME_LINE", "Fixed line when the call returns to the read-back after a side question; the "
+    "read-back itself is not said again (T-032).", "phone agent (fixed spoken line)",
+    "builder/readback_resume.py — confirm_record_resume",
+    "Shall I go ahead with the payments I read out?",
 )
 PERSUASION_STATE_LINE = PromptDefinition(
     "PERSUASION_STATE_LINE", "Tells the negotiation step which persuasion attempt it is on (F-062) and what one "
@@ -916,6 +925,7 @@ PROMPTS = (
     CONFIRM_TASK_TEMPLATE,
     ACCOUNT_WAIT_LINE,
     REVISE_ASK_LINE,
+    READBACK_RESUME_LINE,
     PERSUASION_STATE_LINE,
     PERSUASION_PRODUCT_LINE,
     PRODUCT_INTENT_DESCRIPTION,

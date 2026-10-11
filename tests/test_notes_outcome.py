@@ -222,7 +222,8 @@ class RenderTests(unittest.TestCase):
 # weekday with a day in words, the code-built read-back said by confirm_record, the global goodbye step.
 # T-029: the goodbye exit at every conversation step (special-topic value at the opening and third party,
 # the goodbye value at the global ask steps, the customer_goodbye step). T-030 does not move it.
-BRIEF_A_RENDER_SHA256 = "dde9db86b247aea886abac6b682add375219535c3863485078fd07452298432c"
+# T-031: the product matcher, the goodbye's record route, the refused-products description; with T-032.
+BRIEF_A_RENDER_SHA256 = "c6e4cfe2c7aeb2a960582696f2215e689ad1c7f2f99cd25d1ad8ddd8a1833a23"
 
 
 class ExtractionTests(unittest.TestCase):

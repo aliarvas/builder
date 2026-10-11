@@ -59,6 +59,28 @@ class RecordingNoticeTests(unittest.TestCase):
         self.assertIn("left in the line", note)
         self.assertNotIn(RECORDING_NOTICE_WORDS, present_recording_notice("This call may be recorded.")[0])
 
+    def test_a_clause_that_goes_on_is_left_with_the_warning(self):
+        # T-032 (review LOW 1): "recorded and monitored" must not become "recording this call and monitored".
+        for text in ("Calls are recorded and monitored for quality purposes.",
+                     "This call will be recorded and may be used for training."):
+            with self.subTest(text=text):
+                line, note = present_recording_notice(text)
+                self.assertEqual(text, line)
+                self.assertIn("left in the line", note)
+                self.assertIn("goes on after", note)
+        self.assertEqual("We are recording this call so that we can help you.",
+                         present_recording_notice("Your call is recorded so that we can help you.")[0])
+        self.assertEqual("We are recording this call to train our staff.",
+                         present_recording_notice("This call is recorded to train our staff.")[0])
+
+    def test_may_be_is_matched_and_warned(self):
+        for text in ("This call may be recorded.", "Calls might be recorded for quality."):
+            with self.subTest(text=text):
+                line, note = present_recording_notice(text)
+                self.assertEqual(text, line)  # the present tense would change the meaning
+                self.assertIn("left in the line", note)
+                self.assertIn("be' recorded", note)
+
 
 if __name__ == "__main__":
     unittest.main()

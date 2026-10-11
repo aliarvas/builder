@@ -54,6 +54,7 @@ from .record_loop import (
 )
 from .product_notes import NOTE_RECORD, PRODUCT_REFUSAL, add_product_steps, refusal_values
 from .goodbye import add_goodbye_exit, speak_readback
+from .readback_resume import CONFIRM_RESUME, add_readback_resume, resume_returns
 from .spec import (
     ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec,
     Rule, SpecError, SpecialPath, notes_outcome_pairs, special_note_pairs,
@@ -382,19 +383,45 @@ def group_transitions_by_target(transitions: list[dict[str, Any]]) -> list[dict[
 
 
 IDENTITY_PASSED_VARIABLE = "identity_answers_passed"
+IDENTITY_ASKED_VARIABLE = "identity_answer_field"
 
 
-def identity_pass_hook(verified_field: str, answer_field: str, questions: int) -> str:
+def identity_asked_hook(fields: list[str]) -> str:
+    """T-032: the pre-hook notes which question this call answers (the request value that names
+    one of the spec's question fields), so the post-hook counts distinct questions."""
+    return f"""try:
+    import json
+    body = config.get('body') if isinstance(config, dict) else None
+    if isinstance(body, str):
+        body = json.loads(body)
+    asked = ''
+    if isinstance(body, dict):
+        for value in body.values():
+            if str(value) in {fields!r}:
+                asked = str(value)
+                break
+    vars[{IDENTITY_ASKED_VARIABLE!r}] = asked
+except Exception:
+    pass
+"""
+
+
+def identity_pass_hook(verified_field: str, answer_field: str, fields: list[str]) -> str:
     """T-028 (PUB-05): a result without the overall field (the bank had verified the customer
     in an earlier session and sent only the answer's own field) left the call in the identity
-    step for good. When the overall field is missing, every question answered right in this
-    call counts; get_account still refuses if the bank disagrees, which closes as a failure."""
+    step for good. When the overall field is missing, the call passes once every question field
+    was answered right in this call; T-032: the same question answered twice counts once.
+    get_account still refuses if the bank disagrees, which closes as a failure."""
     return f"""try:
     data = result.get('data') if isinstance(result, dict) else None
+    asked = str(vars.get({IDENTITY_ASKED_VARIABLE!r}) or '')
+    vars[{IDENTITY_ASKED_VARIABLE!r}] = ''
     if isinstance(data, dict) and str(data.get({answer_field!r})).lower() == 'true':
-        passed = int(vars.get({IDENTITY_PASSED_VARIABLE!r}) or 0) + 1
-        vars[{IDENTITY_PASSED_VARIABLE!r}] = passed
-        if data.get({verified_field!r}) is None and passed >= {questions!r}:
+        passed = [item for item in str(vars.get({IDENTITY_PASSED_VARIABLE!r}) or '').split(',') if item]
+        if asked in {fields!r} and asked not in passed:
+            passed.append(asked)
+        vars[{IDENTITY_PASSED_VARIABLE!r}] = ','.join(passed)
+        if data.get({verified_field!r}) is None and set({fields!r}) <= set(passed):
             data[{verified_field!r}] = True
 except Exception:
     pass
@@ -503,7 +530,7 @@ SPECIAL_TOPIC_VALUE = "special_topic"
 # again, so whatever is available in ``opening`` is available there too.
 STEP_ALIASES = {
     "opening": ("opening", "opening_reask"), "negotiate": ("negotiate", "offer_say", "revise_ask"),
-    "third_party": ("third_party", THIRD_PARTY_ASK),
+    "third_party": ("third_party", THIRD_PARTY_ASK), "confirm_record": ("confirm_record", CONFIRM_RESUME),
 }
 
 
@@ -1379,8 +1406,10 @@ def _render_spec_workflow(
         "data." + identity["verified_field"]: "identity_verified",
         "data." + identity["attempts_left_field"]: "identity_attempts_left",
     })
+    question_fields = [question.field for question in spec.identity_questions]
+    identity_tool["pre_process_code"] = identity_tool.get("pre_process_code", "") + identity_asked_hook(question_fields)
     identity_tool["post_process_code"] = identity_tool.get("post_process_code", "") + identity_pass_hook(
-        identity["verified_field"], identity["answer_verified_field"], len(spec.identity_questions))
+        identity["verified_field"], identity["answer_verified_field"], question_fields)
     account_tool = copy.deepcopy(by_name["get_account"])
     account_tool.setdefault("config", {})["maxRetries"] = 1
     promise_tool = _promise_tool(spec, by_name["create_promise"])
@@ -1695,7 +1724,10 @@ def _render_spec_workflow(
     # T-027 (PUB-12): the read-back is said by code, and a goodbye in the offer talk has an exit
     # (before the special topic value, which must name the goodbye too).
     speak_readback(nodes)
+    # T-032: a side question at the read-back returns to a copy that does not say it again.
+    add_readback_resume(nodes)
     add_goodbye_exit(spec, nodes, global_nodes, global_sources, _code_node)
+    resume_returns(nodes, global_nodes, global_sources, spec.confirmation.data["intent_variable"], SPECIAL_TOPIC_VALUE)
     _add_special_topic(spec, nodes, global_nodes, global_sources)
     side_questions = side_question_steps(spec, nodes)
     for key, node in [*nodes.items(), *global_nodes.items()]:
@@ -1754,7 +1786,7 @@ RULE_STEPS = {
 # Nodes rendered from a plan step's rules (opening_reask repeats the opening rules).
 STEP_NODES = {
     "opening": ("opening", "opening_reask"), "third_party": ("third_party",), "identity": ("identity",),
-    "negotiate": ("negotiate", "offer_say", "revise_ask"), "confirm_record": ("confirm_record",),
+    "negotiate": ("negotiate", "offer_say", "revise_ask"), "confirm_record": ("confirm_record", CONFIRM_RESUME),
 }
 _FILLER = re.compile(r"\b(?:the|a|an|that)\b")
 # Words that add a condition, a limit, a negation or an alternative. A budget stage never

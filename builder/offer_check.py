@@ -495,7 +495,7 @@ ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', '
 
 
 def product_name(index, product, count):
-    # Customer-facing name: kind in words plus the label field ("credit card ending 4821").
+    # Customer-facing name: kind in words plus the label field ("<kind> ending <label>").
     kind = product.get(CONFIG['kind_field']) if CONFIG['kind_field'] else None
     label = product.get(CONFIG['label_field']) if CONFIG['label_field'] else None
     words = str(kind).replace('_', ' ').strip() if kind not in (None, '') else ''
@@ -1370,34 +1370,85 @@ def plain_words(value):
     return ' ' + re.sub(r'[^a-z0-9]+', ' ', str(value or '').lower()).strip() + ' '
 
 
-def named_product_numbers(text, products):
+def singular(word):
+    # T-031: a plural matches its kind word ("<kind>s" is "<kind>"); "-ss" and short words stay.
+    if word in POINTER_WORDS or word in QUANTIFIER_WORDS or word in OTHER_WORDS:
+        return word
+    return word[:-1] if len(word) >= 4 and word.endswith('s') and not word.endswith('ss') else word
+
+
+def word_list(text):
+    return [singular(word) for word in plain_words(text).split()]
+
+
+# Words that name no product: a pointer to the product under discussion ("this one", "it"),
+# the payment itself, or a day (T-031). A quantifier is not a product either.
+POINTER_WORDS = set('the a an this that these those it its one same current my our your his her their them '
+                    'for on of to and or with just only also payment pay paying paid product account bill '
+                    'please yes ok okay today tomorrow next week month day date'.split()
+                    + [name.lower() for name in WEEKDAYS + MONTHS])
+QUANTIFIER_WORDS = set('both all each every everything everyone'.split())
+OTHER_WORDS = set('other others rest'.split())
+
+
+def names_a_product(text):
+    # T-031: words that say something beyond a pointer or a quantifier: they mean a product.
+    return any(word not in POINTER_WORDS | QUANTIFIER_WORDS | OTHER_WORDS for word in word_list(text))
+
+
+def named_product_numbers(text, products, open_numbers=None):
     # (named, plausible): the products the words name, and the ones they may mean.
-    words = plain_words(text)
-    if not words.strip():
+    # T-031: first the labels, list ordinals and whole kinds; then single kind words in what is
+    # left, in the plural too ("<kind>s") and from three letters. A kind word only one product
+    # has names it; a shared one names all of them in the plural or after a quantifier
+    # ("both <kind>s"), else it only may mean them. "both" alone means the two open products
+    # only when exactly two are open; "the others" alone may mean any open product.
+    raw = plain_words(text).split()
+    if not raw:
         return [], []
-    if re.search(r' (?:both|all|each|every one|all of them|everything) ', words):
-        return list(range(1, len(products) + 1)), []
-    named, by_kind, plausible = [], dict(), []
-    kinds = dict()
-    for index, product in enumerate(products, start=1):
-        kind = plain_words(product.get(CONFIG['kind_field']) if CONFIG['kind_field'] else '').strip()
-        kinds[kind] = kinds.get(kind, 0) + 1
-    for index, product in enumerate(products, start=1):
-        kind = plain_words(product.get(CONFIG['kind_field']) if CONFIG['kind_field'] else '').strip()
-        label = plain_words(product.get(CONFIG['label_field']) if CONFIG['label_field'] else '').strip()
+    words = [singular(word) for word in raw]
+    plural = set(singular(word) for word in raw if singular(word) != word)
+    rest = ' ' + ' '.join(words) + ' '
+    quantified = any(word in QUANTIFIER_WORDS for word in words)
+    named, plausible = [], []
+    kinds, labels = [], []
+    for product in products:
+        kinds.append(' '.join(word_list(product.get(CONFIG['kind_field']) if CONFIG['kind_field'] else '')))
+        labels.append(' '.join(word_list(product.get(CONFIG['label_field']) if CONFIG['label_field'] else '')))
+    for index in range(1, len(products) + 1):
+        kind, label = kinds[index - 1], labels[index - 1]
         ordinal = ORDINALS[index - 1] if index <= len(ORDINALS) else ''
-        if label and ' ' + label + ' ' in words:
+        if label and ' ' + label + ' ' in rest:
             named.append(index)
-        elif ordinal and re.search(' ' + ordinal + ' (?:one|product) ', words):
+        elif ordinal and re.search(' ' + ordinal + ' (?:one|product) ', rest):
             named.append(index)
-        elif kind and ' ' + kind + ' ' in words:
-            if kinds[kind] == 1:
-                named.append(index)
-            else:
-                plausible.append(index)
-        elif kind and any(len(part) > 3 and ' ' + part + ' ' in words for part in kind.split(' ')):
+        elif kind and ' ' + kind + ' ' in rest:
+            (named if kinds.count(kind) == 1 or quantified else plausible).append(index)
+    for index in named + plausible:
+        for said in (labels[index - 1], kinds[index - 1]):
+            if said:
+                rest = rest.replace(' ' + said + ' ', ' ')
+    left = rest.split()
+    parts_of = [[part for part in kind.split(' ') if len(part) >= 3 and part not in POINTER_WORDS] for kind in kinds]
+    for index in range(1, len(products) + 1):
+        if index in named or index in plausible:
+            continue
+        hits = [part for part in parts_of[index - 1] if part in left]
+        if not hits:
+            continue
+        shared = all(sum(part in parts for parts in parts_of) > 1 for part in hits)
+        if not shared or quantified or any(part in plural for part in hits):
+            named.append(index)
+        else:
             plausible.append(index)
-    return named, plausible
+    named.sort()
+    plausible.sort()
+    if named or plausible or not (quantified or set(words) & OTHER_WORDS):
+        return named, plausible
+    candidates = list(open_numbers) if open_numbers is not None else list(range(1, len(products) + 1))
+    if ('both' in words and len(candidates) != 2) or set(words) & OTHER_WORDS:
+        return [], candidates
+    return candidates, []
 
 
 def discussed_number(products):
@@ -1430,11 +1481,29 @@ def refused_numbers(products, paying):
         return []
     handled = handled_numbers(accepted_offers())
     open_numbers = [index for index in range(1, len(products) + 1) if index not in handled and index not in paying]
-    if re.search(' (?:other|others|rest) ', plain_words(words)):
-        return open_numbers
-    named, plausible = named_product_numbers(words, products)
-    # A product named outright wins over the ones a shared word ("loan") may mean.
+    named, plausible = named_product_numbers(words, products, open_numbers)
+    if set(word_list(words)) & OTHER_WORDS:
+        # "the others": every other open product; "the other <kind>": the ones of that kind but
+        # the one under discussion (T-031).
+        meant = [index for index in open_numbers if index in (named or plausible)]
+        if meant == open_numbers:
+            return open_numbers
+        current = discussed_number(products)
+        return [index for index in meant if index != current] if len(meant) > 1 else meant
+    # A product named outright wins over the ones a shared kind word may mean; of those, the
+    # product under discussion is the one meant (T-031).
+    if not named and discussed_number(products) in plausible:
+        return [discussed_number(products)] if discussed_number(products) in open_numbers else []
     return [index for index in open_numbers if index in (named or plausible)]
+
+
+def refusal_repeated():
+    # T-031: the extractor may copy an earlier message's refused products into a later turn.
+    # The same words on the next offer pass are not a new refusal; an empty field forgets them.
+    words = plain_words(vars.get(CONFIG['refused_name_var']) if CONFIG.get('refused_name_var') else '').strip()
+    last = str(vars.get('offer_refused_counted') or '')
+    vars['offer_refused_counted'] = words
+    return bool(words) and words == last
 
 
 def refuse_product(number, intent, products):
@@ -1475,13 +1544,17 @@ def pick_products(products):
         explicit = None
     if explicit is not None and 1 <= explicit <= len(products):
         return [explicit], False
-    named, plausible = named_product_numbers(vars.get(CONFIG['product_name_var']), products)
+    words = vars.get(CONFIG['product_name_var'])
+    open_numbers = [index for index in range(1, len(products) + 1) if index not in handled]
+    named, plausible = named_product_numbers(words, products, open_numbers)
     if named:
         return [index for index in named if index not in handled] or named, False
     plausible = [index for index in plausible if index not in handled]
     if len(plausible) == 1:
         return plausible, False
-    if len(plausible) >= 2:
+    # T-031: words that fit several products, or name none of them (a word no kind has), are never
+    # booked on the product under discussion without one question.
+    if len(plausible) >= 2 or (not plausible and names_a_product(words)):
         asked = json_value('offer_product_asked', list())
         if str(current) not in asked:
             asked.append(str(current))
@@ -1505,11 +1578,12 @@ try:
 except Exception:
     numbers, ask = [], False
 try:
-    # T-027 (PUB-12): "the card tomorrow, but not the loans": each refused product counts one
+    # T-027 (PUB-12): "product A tomorrow, but not the others": each refused product counts one
     # refusal before the check, so the check's progress and next line already know it.
     refusal_intent = (CONFIG['product_end_values'] or CONFIG['attempt_values'] or [''])[0]
-    for refused in refused_numbers(products_all, numbers):
-        refuse_product(refused, refusal_intent, products_all)
+    if not refusal_repeated():
+        for refused in refused_numbers(products_all, numbers):
+            refuse_product(refused, refusal_intent, products_all)
 except Exception:
     pass
 several = len(numbers) > 1
@@ -1586,9 +1660,12 @@ try:
     if explicit in open_numbers:
         targets = [explicit]
     else:
-        named, plausible = named_product_numbers(vars.get(CONFIG['product_name_var']), products)
+        named, plausible = named_product_numbers(vars.get(CONFIG['product_name_var']), products, open_numbers)
         targets = [index for index in open_numbers if index in (named or plausible)]
         targets += [index for index in refused_numbers(products, []) if index not in targets]
+        # A refusal turn always counts; its words are remembered so a copy on the next offer
+        # pass does not count again (T-031).
+        refusal_repeated()
     if not targets:
         current = discussed_number(products)
         targets = [current] if current is not None else []

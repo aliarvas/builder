@@ -83,10 +83,11 @@ class SideQuestionLintTests(unittest.TestCase):
         # Written out by hand: the robot path is available at opening, third_party, identity,
         # negotiate and confirm_record; opening_reask follows opening (unclear answer),
         # third_party_ask follows third_party (callback re-ask), offer_say and revise_ask follow
-        # negotiate and confirm_record. No other conversation step lists it.
+        # negotiate and confirm_record; confirm_record_resume is the read-back step a side question
+        # returns to (T-032). No other conversation step lists it.
         listed = {key for key, node in conversations(nodes).items() if item(robot) in node["task_message"]}
         self.assertEqual({"opening", "opening_reask", "third_party", "third_party_ask", "identity", "negotiate",
-                          "offer_say", "revise_ask", "confirm_record"}, listed)
+                          "offer_say", "revise_ask", "confirm_record", "confirm_record_resume"}, listed)
         # A step neither listed nor reached right after one gets nothing.
         self.assertNotIn(SIDE_QUESTION_LINE.text, json.dumps(build_spec_workflow(spec, tools).get("global_nodes")))
 

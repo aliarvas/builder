@@ -334,10 +334,10 @@ The product or products the customer's last message names for this payment, copi
 - Purpose: The products the customer refuses in the same message, in their words; the code counts a refusal for each (T-027).
 - Receiver: extraction model
 - Used at: builder/product_notes.py — negotiate extraction field offer_refused_product_name (specs with per-product refusals)
-- Approximate tokens: ~52 (characters ÷ 4)
+- Approximate tokens: ~67 (characters ÷ 4)
 
 ```text
-The product or products the customer's last message refuses to pay, copied in the customer's words (for example the kind of product, the last digits, or "the others"). Empty if the message refuses no product.
+The product or products the customer's last message refuses to pay, copied in the customer's words (for example the kind of product, the last digits, or "the others"). Empty unless this message itself refuses a product; never copy a product from an earlier message.
 ```
 
 ## READBACK_LINE
@@ -378,10 +378,10 @@ The program has just said this read-back to the customer: "{{readback_text}}" Do
 - Purpose: Routing intent of the global step for a customer who ends the call (T-027, PUB-12: "Thank you, goodbye" matched no route and the step repeated itself; T-029: every step).
 - Receiver: routing model
 - Used at: builder/goodbye.py — global step customer_ends_call
-- Approximate tokens: ~31 (characters ÷ 4)
+- Approximate tokens: ~53 (characters ÷ 4)
 
 ```text
-The customer only says goodbye or thanks to end the call: not an answer to a question, no refusal, no offer and no question.
+The customer clearly takes leave (goodbye, bye, or that they are done) and says nothing else: not an answer to a question, no refusal, no offer and no question. "Thanks", "okay" or "yes" alone is not a goodbye.
 ```
 
 ## GOODBYE_CHOICE_DESCRIPTION
@@ -389,10 +389,10 @@ The customer only says goodbye or thanks to end the call: not an answer to a que
 - Purpose: Choice value of a global ask step for a customer who ends the call there; a global step cannot start the goodbye step (T-029).
 - Receiver: extraction model
 - Used at: builder/goodbye.py — choice field of each global conversation step
-- Approximate tokens: ~23 static + `{value}` characters ÷ 4 at runtime
+- Approximate tokens: ~47 static + `{value}` characters ÷ 4 at runtime
 
 ```text
- {value}: the customer only says goodbye or thanks to end the call, not an answer to the question.
+ {value}: the customer only takes leave (goodbye, or that they are done) and gives no answer; "thanks", "okay" or "yes" alone is not {value}, and a "no" (also "no thanks, goodbye") answers the question.
 ```
 
 ## CONFIRM_TASK_TEMPLATE
@@ -430,6 +430,17 @@ Thank you. One moment while I check your account.
 
 ```text
 Of course. Which date or amount would you like instead?
+```
+
+## READBACK_RESUME_LINE
+
+- Purpose: Fixed line when the call returns to the read-back after a side question; the read-back itself is not said again (T-032).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/readback_resume.py — confirm_record_resume
+- Approximate tokens: ~12 (characters ÷ 4)
+
+```text
+Shall I go ahead with the payments I read out?
 ```
 
 ## PERSUASION_STATE_LINE

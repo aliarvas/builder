@@ -24,7 +24,12 @@ def identity_hook(workflow):
     return tool, tool["post_process_code"]
 
 
-def run_hook(code, data, variables):
+def run_hook(code, data, variables, tool=None, field=None):
+    """The post-hook; with ``tool`` and ``field`` the pre-hook first, as for a call that answers
+    the question ``field``."""
+    if tool is not None:
+        config = {"body": {"customer_id": "c", "field": field, "answer": "x"}}
+        exec(_compiled(tool["pre_process_code"]), _sandbox([], "test", vars=variables, config=config))
     result = {"status": "success", "status_code": 200, "data": dict(data)}
     exec(_compiled(code), _sandbox([], "test", result=result, vars=variables))
     return result["data"]
@@ -76,23 +81,40 @@ class GlobalExitTests(unittest.TestCase):
 class IdentityKnownEarlierTests(unittest.TestCase):
     def test_two_right_answers_verify_when_the_overall_field_is_missing(self):
         spec, workflow = render(BRIEF_A)
-        _, code = identity_hook(workflow)
+        tool, code = identity_hook(workflow)
         verified, answer = spec.identity.data["verified_field"], spec.identity.data["answer_verified_field"]
+        first_field, second_field = [question.field for question in spec.identity_questions]
         variables = {}
-        first = run_hook(code, {"ok": True, answer: True, "wrong_answers_left": 3}, variables)
+        first = run_hook(code, {"ok": True, answer: True, "wrong_answers_left": 3}, variables, tool, first_field)
         self.assertNotIn(verified, first)  # one question only
-        second = run_hook(code, {"ok": True, answer: True, "wrong_answers_left": 3}, variables)
+        second = run_hook(code, {"ok": True, answer: True, "wrong_answers_left": 3}, variables, tool, second_field)
         self.assertIs(True, second[verified])
-        self.assertEqual(2, variables[IDENTITY_PASSED_VARIABLE])
+        self.assertEqual({first_field, second_field}, set(variables[IDENTITY_PASSED_VARIABLE].split(",")))
+
+    def test_the_same_question_twice_counts_once(self):
+        # T-032 (review MEDIUM 4): one right answer sent twice must not pass a two-question check.
+        spec, workflow = render(BRIEF_A)
+        tool, code = identity_hook(workflow)
+        verified, answer = spec.identity.data["verified_field"], spec.identity.data["answer_verified_field"]
+        first_field = spec.identity_questions[0].field
+        variables = {}
+        for _ in range(3):
+            data = run_hook(code, {"ok": True, answer: True}, variables, tool, first_field)
+            self.assertNotIn(verified, data)
+        self.assertEqual(first_field, variables[IDENTITY_PASSED_VARIABLE])
+        # A call whose question the pre-hook could not name is not counted.
+        self.assertNotIn(verified, run_hook(code, {"ok": True, answer: True}, variables, tool, "unknown"))
+        self.assertNotIn(verified, run_hook(code, {"ok": True, answer: True}, variables))
 
     def test_the_bank_overall_field_always_wins(self):
         spec, workflow = render(BRIEF_A)
-        _, code = identity_hook(workflow)
+        tool, code = identity_hook(workflow)
         verified, answer = spec.identity.data["verified_field"], spec.identity.data["answer_verified_field"]
-        variables = {IDENTITY_PASSED_VARIABLE: 5}
-        data = run_hook(code, {"ok": True, answer: True, verified: False}, variables)
+        fields = [question.field for question in spec.identity_questions]
+        variables = {IDENTITY_PASSED_VARIABLE: ",".join(fields)}
+        data = run_hook(code, {"ok": True, answer: True, verified: False}, variables, tool, fields[0])
         self.assertIs(False, data[verified])
-        wrong = run_hook(code, {"ok": True, answer: False}, {})
+        wrong = run_hook(code, {"ok": True, answer: False}, {}, tool, fields[0])
         self.assertNotIn(verified, wrong)
 
     def test_the_scenario_passes_and_the_v19_render_is_caught(self):

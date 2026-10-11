@@ -749,6 +749,7 @@ def scenarios(spec: PhoneAgentSpec, now: str) -> list[Scenario]:
         result.extend(_multi_scenarios(spec, plan, notes_for))
         result.extend(_without_product_field(_multi_scenarios(spec, plan, notes_for)))
         result.extend(_mixed_refusal_scenarios(spec, plan, notes_for))
+        result.extend(_product_word_scenarios(spec, plan, notes_for))
     # T-027: a goodbye during the offer talk ends the call within two turns.
     result.extend(_goodbye_scenarios(spec, plan, one, notes_for))
 
@@ -1616,6 +1617,7 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
         if notes != scenario.notes:
             failures.append(f"notes {notes}, the spec gives {scenario.notes}")
     failures.extend(_callback_failures(workflow, bank, scenario))
+    failures.extend(accepted_refusal_notes(sim, spec, scenario.products))
     if sim.rejected:
         failures.append(f"rejected typed writes {sim.rejected[:3]}")
     if len(sim.spoken_after_turn) > 1:
@@ -2079,7 +2081,7 @@ def _goodbye(label: str = "goodbye") -> dict[str, Any]:
 
 def _goodbye_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
     """A goodbye at the offer step closes the call; with an accepted offer the read-back is
-    said once, and a second goodbye closes without a promise, a yes records it. T-029: a
+    said once, and a second goodbye or a yes records it (T-031). T-029: a
     goodbye at the opening, the identity step, the third party and a special-path question."""
     from .goodbye import goodbye_states
 
@@ -2103,8 +2105,9 @@ def _goodbye_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
     day = plan.good_day(one)
     if day:
         result.append(Scenario(
-            "goodbye_at_readback", [*plan.reach_negotiation(), plan.offer(1, day), _goodbye()], after, one,
-            notes=notes_for(one, state=after), repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record"))
+            "goodbye_at_readback", [*plan.reach_negotiation(), plan.offer(1, day), _goodbye()], "promise_recorded",
+            one, promises=[plan.promise(one[0], day)], notes=notes_for(one, promised=["p1"], state="promise_recorded"),
+            repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record"))
     if plan.notes or plan.negotiation.get("product_end_values"):
         products = synthetic_products(spec, 3)
         day = plan.good_day(products)
@@ -2115,6 +2118,7 @@ def _goodbye_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
                                             plan.confirm()],
                 "promise_recorded", products, promises=[plan.promise(products[0], day)],
                 notes=notes_for(products, promised=["p1"], state="promise_recorded"), step="offer_say"))
+    result += _goodbye_accepted_scenarios(spec, plan, notes_for)
     return result
 
 
@@ -2125,7 +2129,7 @@ def _attempts(spec: PhoneAgentSpec, product: dict[str, Any]) -> int:
 
 
 def _mixed_refusal_scenarios(spec, plan, notes_for) -> list[Scenario]:
-    """One product paid and the others refused in the same turn ("the card tomorrow, but not
+    """One product paid and the others refused in the same turn ("product A tomorrow, but not
     the others"); and a product refused by name while another is under discussion. Each
     refusal counts for the product the words name."""
     if not plan.negotiation.get("product_end_values"):
@@ -2155,6 +2159,96 @@ def _mixed_refusal_scenarios(spec, plan, notes_for) -> list[Scenario]:
         notes=notes_for(products, promised=["p1", "p2"], refused=["p3"], state="promise_recorded"),
         step="product_refusal"))
     return result
+
+
+def _product_word_scenarios(spec, plan, notes_for) -> list[Scenario]:
+    """T-031: the customer names products in other words than the full kind: one kind word
+    ("my <word>"), a shared kind word in the plural ("the <word>s") or after "both", and words
+    that name no product (one question, never the product under discussion). Each turn pays the
+    products the words name and refuses the others; the promises show which products the words
+    were matched to."""
+    account = spec.account.data
+    kind_field = account.get("product_kind_field")
+    if not kind_field or not plan.negotiation.get("product_end_values"):
+        return []
+    products = synthetic_products(spec, 3)
+    day = plan.good_day(products)
+    if not day or not all(product.get(kind_field) for product in products):
+        return []
+    parts = [[word for word in re.split(r"[^a-z0-9]+", str(product[kind_field]).lower()) if len(word) >= 3]
+             for product in products]
+    numbers = range(1, len(products) + 1)
+    owners = {word: [index for index in numbers if word in parts[index - 1]] for words in parts for word in words}
+    cases = []
+    unique = [(word, found[0]) for word, found in owners.items() if len(found) == 1]
+    # A product past the first, so a default to the product under discussion shows.
+    unique.sort(key=lambda item: -item[1])
+    if unique:
+        word, number = unique[0]
+        cases.append(("kind_word", [], "my " + word, "the others", [number]))
+    shared = [(word, found) for word, found in owners.items() if 1 < len(found) < len(products)]
+    if shared:
+        word, found = shared[0]
+        cases.append(("plural", [], "the " + word + "s", "the others", found))
+        if len(found) == 2:
+            cases.append(("both_kind", [], "both " + word + "s", "the others", found))
+        if unique and unique[0][1] not in found:
+            cases.append(("refused_plural", [], "my " + unique[0][0], "the " + word + "s", [unique[0][1]]))
+    unknown = {"kind": "say", "label": "unknown_product", "vars": {OFFER_DATE: day, OFFER_PRODUCT_NAME: "the unlisted one"}}
+    cases.append(("unknown_name", [unknown], "the third one", "the others", [len(products)]))
+    result = []
+    for name, before, paying, refused, paid in cases:
+        turn = {"kind": "say", "label": "offer", "vars": {
+            OFFER_DATE: day, OFFER_PRODUCT_NAME: paying, OFFER_REFUSED_NAME: refused}}
+        rest = [index for index in numbers if index not in paid]
+        more = sum(_attempts(spec, products[index - 1]) for index in rest)
+        turns = [*before, turn, *([{**plan.refuse(), "until": ("confirm_record",)}] if more else []), plan.confirm()]
+        ids = [str(products[index - 1][account["product_id_field"]]) for index in paid]
+        refused_ids = [str(products[index - 1][account["product_id_field"]]) for index in rest]
+        result.append(Scenario(
+            "product_words_" + name, [*plan.reach_negotiation(), *turns], "promise_recorded", products,
+            promises=[plan.promise(products[index - 1], day) for index in paid],
+            notes=notes_for(products, promised=ids, refused=refused_ids, state="promise_recorded"),
+            repeats={"refuse": more} if more else {}, step="check_offer"))
+    return result
+
+
+def _goodbye_accepted_scenarios(spec, plan, notes_for) -> list[Scenario]:
+    """T-031 (review HIGH 2): one product accepted, the read-back said, and the customer says
+    goodbye instead of yes: the accepted offer is recorded, never noted as refused."""
+    if not (plan.notes or plan.negotiation.get("product_end_values")):
+        return []
+    products = synthetic_products(spec, 3)
+    day = plan.good_day(products)
+    if not day:
+        return []
+    first = {**plan.offer(1, day), "vars": {OFFER_DATE: day, OFFER_PRODUCT_NAME: "the first one"}}
+    pid = str(products[0][spec.account.data["product_id_field"]])
+    return [Scenario(
+        "goodbye_readback_then_goodbye", [*plan.reach_negotiation(), first, _goodbye()], "promise_recorded", products,
+        promises=[plan.promise(products[0], day)],
+        notes=notes_for(products, promised=[pid], state="promise_recorded"),
+        repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record")]
+
+
+def accepted_refusal_notes(sim: Simulator, spec: PhoneAgentSpec, products: list[dict[str, Any]]) -> list[str]:
+    """T-031: a refused note on a product the customer accepted is a false statement about the
+    customer (review HIGH 2); every scenario checks it."""
+    rule = spec.closing.data.get("product_notes") or {}
+    if not rule.get("refused_reason"):
+        return []
+    accepted = sim.vars.get(OFFERS_ACCEPTED)
+    try:
+        accepted = json.loads(accepted) if isinstance(accepted, str) and accepted.strip() else (accepted or {})
+    except ValueError:
+        accepted = {}
+    id_field = spec.account.data["product_id_field"]
+    ids = {str(products[int(key) - 1].get(id_field)) for key in accepted
+           if str(key).strip().isdigit() and 1 <= int(key) <= len(products)}
+    return [f"a {rule['refused_reason']} note on {call.body.get(rule['product_field'])}, which the customer accepted"
+            for call in sim.bank.calls if call.tool == rule.get("tool") and call.ok
+            and str(call.body.get(rule.get("reason_field"))) == str(rule["refused_reason"])
+            and str(call.body.get(rule.get("product_field"))) in ids]
 
 
 HONEST_RECORD_PATTERN = re.compile(r"never say[^.\n]*recorded", re.IGNORECASE)

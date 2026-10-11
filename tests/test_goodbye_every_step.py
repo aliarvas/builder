@@ -65,7 +65,7 @@ class StaticCheckTests(unittest.TestCase):
         for node in asks:
             field = node["extraction_schema"][0]
             self.assertIn(GOODBYE_VALUE, field["enum_values"])
-            self.assertIn(GOODBYE_VALUE + ": the customer only says goodbye", field["description"])
+            self.assertIn(GOODBYE_VALUE + ": the customer only takes leave", field["description"])
             self.assertEqual(CUSTOMER_GOODBYE, node["transitions"][0]["target_node"])
 
 

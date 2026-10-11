@@ -113,7 +113,7 @@ def add_product_name_field(spec: PhoneAgentSpec, nodes: dict[str, Any]) -> None:
     schema.insert(at, {"name": OFFER_PRODUCT_NAME, "type": "string",
                        "description": OFFER_PRODUCT_NAME_DESCRIPTION.text, "min_confidence": 0.7})
     if refusal_values(spec):
-        # T-027 (PUB-12): "the card tomorrow, but not the loans" refuses products in an offer turn.
+        # T-027 (PUB-12): "product A tomorrow, but not the others" refuses products in an offer turn.
         schema.insert(at + 1, {"name": OFFER_REFUSED_NAME, "type": "string",
                                "description": OFFER_REFUSED_PRODUCTS_DESCRIPTION.text, "min_confidence": 0.7})
 

@@ -5,9 +5,10 @@
   it back after an earlier goodbye and waited for a confirmation until the call timed out.
 - A goodbye that no route of the step takes ("Thank you, goodbye" was ``none`` in PUB-12, and
   the step repeated "Thank you for your time" for minutes) goes to ``customer_goodbye`` (code):
-  with accepted offers the read-back once; before identity passed, the state the end-of-call
-  hook would write (a third party: the close of its path without a callback); otherwise a
-  hang-up. A second goodbye always closes. The closing chain then writes notes and the outcome.
+  with accepted offers the read-back once, then (T-031) the record loop for the accepted offers;
+  before identity passed, the state the end-of-call hook would write (a third party: the close
+  of its path without a callback); otherwise a hang-up. A second goodbye always ends the call.
+  The closing chain then writes notes and the outcome.
 - T-029: every conversation step reaches it. Normal steps through the global step
   ``customer_ends_call`` (it fires only when the step's own routes found no match); global
   conversation steps, which no global step can start from, through a choice value of their own.
@@ -18,6 +19,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .offer_check import OFFERS_ACCEPTED_COUNT
+from .record_loop import RECORD_NEXT
 from .prompts import CONFIRM_READBACK_SAID_LINE, CUSTOMER_ENDS_CALL_INTENT, GOODBYE_CHOICE_DESCRIPTION
 from .spec import HANGUP_CLOSE_STATES, PhoneAgentSpec
 
@@ -28,6 +30,8 @@ GOODBYE_ROUTE = "customer_goodbye_route"
 # The choice value a global conversation step gets for a goodbye.
 GOODBYE_VALUE = "ends_call"
 READBACK_TEXT = "readback_text"
+# The read-back text a goodbye already had said (T-031).
+GOODBYE_READBACK = "customer_goodbye_readback"
 VERIFIED_STATE, UNVERIFIED_STATE = HANGUP_CLOSE_STATES
 
 
@@ -45,7 +49,16 @@ def goodbye_states(spec: PhoneAgentSpec) -> tuple[str, str, str]:
 
 
 def goodbye_code(spec: PhoneAgentSpec) -> str:
+    """T-031: with accepted offers, the read-back is said once for each read-back text (a new
+    accepted offer gives a new text, so an early goodbye never uses it up), and a goodbye after
+    it records the accepted offers: the customer agreed to them and did not object to the
+    read-back, so leaving is not a refusal (CTO addendum item 3: the closing chain records the
+    accepted promises). A read-back the customer rejected (a revise value, which the offer check
+    clears when it accepts new terms) is never recorded on a goodbye. Without accepted offers
+    the goodbye closes by stage."""
     after, before, third_state = goodbye_states(spec)
+    confirmation = spec.confirmation.data
+    rejected = list(confirmation.get("revise_values") or [])
     who = spec.opening.data.get("who_answered_variable") or ""
     third_values = list(spec.opening.data.get("third_party_values") or [])
     return f"""try:
@@ -57,9 +70,15 @@ try:
     accepted = int(vars.get({OFFERS_ACCEPTED_COUNT!r}) or 0)
 except Exception:
     accepted = 0
+text = str(vars.get({READBACK_TEXT!r}) or '').strip()
 verified = str(vars.get('identity_verified') or '').lower() == 'true'
-if accepted > 0 and count == 1:
+if str(vars.get({confirmation.get("intent_variable") or ""!r}) or '') in {rejected!r}:
+    accepted = 0
+if accepted > 0 and text and text != str(vars.get({GOODBYE_READBACK!r}) or ''):
     vars[{GOODBYE_ROUTE!r}] = 'readback'
+    vars[{GOODBYE_READBACK!r}] = text
+elif accepted > 0 and text:
+    vars[{GOODBYE_ROUTE!r}] = 'record'
 else:
     vars[{GOODBYE_ROUTE!r}] = 'close'
     if verified:
@@ -97,6 +116,9 @@ def add_goodbye_exit(
     if "confirm_record" in nodes:
         exits.insert(0, {"target_node": "confirm_record", "description": "Offers were accepted: read them back once",
                          "condition": {"variable": GOODBYE_ROUTE, "operator": "equals", "operand": "readback"}})
+    if "confirm_record" in nodes and RECORD_NEXT in nodes:
+        exits.insert(1, {"target_node": RECORD_NEXT, "description": "The read-back was said: record the accepted offers",
+                         "condition": {"variable": GOODBYE_ROUTE, "operator": "equals", "operand": "record"}})
     nodes[CUSTOMER_GOODBYE] = code_node(CUSTOMER_GOODBYE, goodbye_code(spec), exits)
     sources = tuple(key for key, node in nodes.items() if waits_for_customer(node))
     entry = code_node(CUSTOMER_ENDS_CALL, "vars['customer_goodbye_heard'] = 'yes'\n", [

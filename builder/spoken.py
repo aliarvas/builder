@@ -100,7 +100,12 @@ def quoted_speech(text: str, reserved: frozenset[str] | set[str] = frozenset()) 
 # as a claim made before any tool ran). Generic English wording; no brief value.
 _CALL_NOUN = r"(?:(?:this|the|your|our) (?:phone |telephone )?call|(?:all |our )?calls)"
 _RECORDING_NOTICE = re.compile(
-    r"\b" + _CALL_NOUN + r" (?:is|are|will be)(?: being)? recorded\b", re.IGNORECASE)
+    r"\b" + _CALL_NOUN + r" (is|are|will be|may be|might be|can be)(?: being)? recorded\b", re.IGNORECASE)
+# T-032: the clause is rewritten only where it ends the thought (end of sentence, a comma, or a
+# purpose: "for", "to", "so that"); "recorded and monitored" would become "we are recording
+# this call and monitored", so such a line is left as it is, with the warning.
+_NOTICE_ENDS = re.compile(r"^\s*(?:[.!?,;:]|$|(?:for|to|so that)\b)", re.IGNORECASE)
+_UNCERTAIN = ("may be", "might be", "can be")
 _RECORDED_WORD = re.compile(r"\brecorded\b", re.IGNORECASE)
 RECORDING_NOTICE_WORDS = "we are recording this call"
 
@@ -109,15 +114,25 @@ def present_recording_notice(text: str) -> tuple[str, str]:
     """(text, note): the call-recording clause of a spoken line rewritten to the present
     continuous ("this call is recorded" -> "we are recording this call"). The note says what
     changed, or why a "recorded" left in the line was not touched; "" when nothing to say."""
+    reasons: list[str] = []
+
     def replace(match: re.Match[str]) -> str:
-        start = match.start()
-        before = text[:start].rstrip()
+        if match.group(1).lower() in _UNCERTAIN:
+            reasons.append(f"the notice says {match.group(1)!r} recorded; saying it in the present would change "
+                           "its meaning")
+            return match.group(0)
+        if not _NOTICE_ENDS.match(text[match.end():]):
+            reasons.append("the notice clause goes on after 'recorded'; a rewrite of the clause alone would "
+                           "break the sentence")
+            return match.group(0)
+        before = text[:match.start()].rstrip()
         sentence_start = not before or before[-1] in ".!?"
         return RECORDING_NOTICE_WORDS[0].upper() + RECORDING_NOTICE_WORDS[1:] if sentence_start else RECORDING_NOTICE_WORDS
 
     rewritten = _RECORDING_NOTICE.sub(replace, text)
     if _RECORDED_WORD.search(rewritten):
-        return rewritten, ("'recorded' is left in the line because it is not clearly the call-recording notice"
+        why = "; ".join(reasons) or "it is not clearly the call-recording notice"
+        return rewritten, (f"'recorded' is left in the line because {why}"
                            + ("; the notice clause was rewritten" if rewritten != text else ""))
     if rewritten != text:
         return rewritten, f"recording notice said in the present: {rewritten!r}"

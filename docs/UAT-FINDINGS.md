@@ -30,6 +30,54 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-094: A side question at the read-back made the agent say the whole read-back again
+
+- **Date:** 2026-10-11
+- **Brief / case:** review of T-029/T-030 (`tasks/T-029-030-review.md`, LOW 2); multi-product briefs
+- **Run:** offline review; no live run
+- **Symptom:** After a side question at the read-back ("are you a robot?", a declined offer of help), the call returned to the read-back step and the full read-back was said again. Long and repetitive in a voice call.
+- **Root cause:** The read-back step says the read-back as its fixed entry line (F-088 fix). A side question returns to the step it came from, and the entry line runs on every entry.
+- **Category:** routing
+- **Fix / lesson:** Side questions started at the read-back return to a copy of the step whose fixed line only asks for the confirmation. A return is recognised by the read-back's choice field (it holds the special-topic value). Every real entry (accepted or revised offer, goodbye, end of a special path) still says the read-back. The copy is left out when no side question can return to it.
+- **Status:** fixed offline (T-032), not yet confirmed live
+- **Retest:** pending: a chat run with a side question at the read-back
+
+### F-093: The recording notice rewrite could break a sentence; "may be recorded" was not recognised
+
+- **Date:** 2026-10-11
+- **Brief / case:** review LOW 1; any brief whose introduction mentions recording
+- **Run:** offline review
+- **Symptom:** "Calls are recorded and monitored for quality" would become "We are recording this call and monitored for quality" (broken grammar).
+- **Root cause:** The F-086 rule rewrote only the clause, whatever came after it.
+- **Category:** prompt
+- **Fix / lesson:** The clause is rewritten only when it ends the thought (end of sentence, a comma, or a purpose: "for", "to", "so that"). Otherwise the line is left as written and the build gets a warning. "may / might / can be recorded" is now recognised as the notice but left as it is, with a warning, because the present tense would change its meaning.
+- **Status:** fixed offline (T-032)
+- **Retest:** not needed live; covered by unit tests
+
+### F-092: One right identity answer sent twice could pass a two-question check
+
+- **Date:** 2026-10-11
+- **Brief / case:** review MEDIUM 4; briefs whose bank sends no overall verification field (the F-084 case)
+- **Run:** offline review (the generated hook run twice)
+- **Symptom:** With no overall field in the result, two right results counted as two questions, even when both answered the same question (the model repeated the call).
+- **Root cause:** The F-084 fix counted right answers with a number, not which question they answered.
+- **Category:** honesty
+- **Fix / lesson:** The tool's pre-hook notes which question the request answers (the request value that names one of the spec's question fields); the post-hook keeps the list of distinct questions answered right and sets the overall field only when every question is in it. A call whose question cannot be named is not counted. The bank's own overall field still always wins.
+- **Status:** fixed offline (T-032)
+- **Retest:** pending: an identity check in a chat run (the overall field is normally sent, so the risk was small)
+
+### F-091: "Thanks" or "no thanks, goodbye" could be read as the customer ending the call
+
+- **Date:** 2026-10-11
+- **Brief / case:** review MEDIUM 3; any brief (goodbye exit from F-088/F-089)
+- **Run:** offline review; the routing model cannot be run offline
+- **Symptom (risk):** "Okay, thank you" in the middle of the offer talk could match the goodbye step and close the call with products not discussed; "No thanks, goodbye" to an offer of help could close on the hang-up row instead of the declined row.
+- **Root cause:** The goodbye intent and the goodbye choice value said "goodbye or thanks", so bare thanks matched, and they did not say that a "no" is an answer.
+- **Category:** routing
+- **Fix / lesson:** Both texts now require a clear leave-taking (goodbye, or that they are done), say that "thanks", "okay" or "yes" alone is not a goodbye, and that a "no" (also "no thanks, goodbye") answers the question.
+- **Status:** fixed offline (T-032), not yet confirmed live
+- **Retest:** pending: live checks 3 and 4 of the review (chat, with approval)
+
 ### F-089: Outside the offer steps a goodbye had no exit, and the persuasion turn could sum up or say thanks
 
 - **Date:** 2026-10-11

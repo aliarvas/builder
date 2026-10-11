@@ -1138,8 +1138,8 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 key = "special_" + path.id
                 per_source = key not in globals_
                 entries = (
-                    {f"{key}_at_{source}": {source} for source in source_steps(path)}
-                    if per_source else {key: set(source_steps(path))}
+                    {f"{key}_at_{source}": {source} for source in source_steps(path) if source in nodes}
+                    if per_source else {key: set(source_steps(path)) & set(nodes)}
                 )
                 with self.subTest(fixture=FIXTURES[index].name, path=path.id):
                     for entry_key, sources in entries.items():
@@ -1222,8 +1222,9 @@ class MultiStepWorkflowTests(unittest.TestCase):
             self.assertEqual(source, variables["special_result_product_dispute_from"])
             self.assertEqual(["special_product_dispute"], edges(entry))
         done = nodes["special_product_dispute_done"]
-        # negotiate and its two waiting copies (F-053 fix) are all possible sources.
-        self.assertEqual(["negotiate", "offer_say", "revise_ask", "confirm_record"], edges(done))
+        # negotiate and its two waiting copies (F-053 fix) are all possible sources, and the
+        # read-back's copy for returns (T-032).
+        self.assertEqual(["negotiate", "offer_say", "revise_ask", "confirm_record_resume", "confirm_record"], edges(done))
         self.assertEqual("always", done["transitions"][-1]["condition"]["operator"])
         back = json.dumps(done["transitions"][0])
         self.assertIn('"variable": "special_result_product_dispute_from", "operator": "equals", "operand": "negotiate"', back)
