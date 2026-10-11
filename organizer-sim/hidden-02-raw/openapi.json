@@ -1,0 +1,148 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Northline Finance recovery actions",
+    "version": "2026-11-rehearsal",
+    "description": "Synthetic organizer simulation. Actions are recorded but policy is enforced by the agent, not this contract."
+  },
+  "servers": [
+    {"url": "https://northline-organizer-sim.invalid/actions"}
+  ],
+  "paths": {
+    "/verify_identity": {
+      "post": {
+        "summary": "Submit one security response. Risk memo 14 defines the current fields and limit.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "verification_kind": {"type": "string", "enum": ["billing_postcode", "customer_ref_last3"]},
+            "supplied_value": {"type": "string"}
+          },
+          "required": ["customer_id", "verification_kind", "supplied_value"]
+        }}}},
+        "responses": {"200": {"description": "Security result", "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "ok": {"type": "boolean"},
+            "error": {"type": "string"},
+            "response_matches": {"type": "boolean"},
+            "attempts_left": {"type": "integer"},
+            "security_complete": {"type": "boolean"},
+            "format_error": {"type": "boolean"}
+          }
+        }}}}}
+      }
+    },
+    "/get_account": {
+      "post": {
+        "summary": "Return agreements after security is complete.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"customer_id": {"type": "string"}}, "required": ["customer_id"]
+        }}}},
+        "responses": {"200": {"description": "Agreement data", "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "ok": {"type": "boolean"},
+            "error": {"type": "string"},
+            "agreements": {"type": "array", "items": {"type": "object", "properties": {
+              "agreement_key": {"type": "string"},
+              "agreement_type": {"type": "string", "enum": ["hire_purchase", "revolving", "term_loan"]},
+              "arrears_amount": {"type": "number"},
+              "late_days": {"type": "integer"},
+              "regular_instalment": {"type": "number", "description": "Hire purchase only"},
+              "minimum_due": {"type": "number", "description": "Revolving only"},
+              "required_payment": {"type": "number", "description": "Term loan only"}
+            }, "required": ["agreement_key", "agreement_type", "arrears_amount", "late_days"]}}
+          }
+        }}}}}
+      }
+    },
+    "/create_promise": {
+      "post": {
+        "summary": "Record one confirmed promise against an agreement.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "agreement_key": {"type": "string"},
+            "promised_value": {"type": "number"},
+            "promised_for": {"type": "string", "format": "date"}
+          },
+          "required": ["customer_id", "agreement_key", "promised_value", "promised_for"]
+        }}}},
+        "responses": {"200": {"description": "Promise result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}, "promise_reference": {"type": "string"}}
+        }}}}}
+      }
+    },
+    "/add_note": {
+      "post": {
+        "summary": "Record the agreement-level reason when no promise exists.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "agreement_key": {"type": "string"},
+            "note_reason": {"type": "string", "enum": ["refusal", "paid_claim", "ownership_dispute", "financial_difficulty", "technical_failure"]},
+            "comment": {"type": "string"}
+          },
+          "required": ["customer_id", "agreement_key", "note_reason"]
+        }}}},
+        "responses": {"200": {"description": "Note result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}}
+        }}}}}
+      }
+    },
+    "/schedule_callback": {
+      "post": {
+        "summary": "Reserve a callback time.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "return_on": {"type": "string", "format": "date"},
+            "return_at": {"type": "string", "description": "24-hour HH:MM"}
+          },
+          "required": ["customer_id", "return_on", "return_at"]
+        }}}},
+        "responses": {"200": {"description": "Callback result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}, "callback_reference": {"type": "string"}}
+        }}}}}
+      }
+    },
+    "/transfer_to_agent": {
+      "post": {
+        "summary": "Transfer to a staffed team.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "team": {"type": "string", "enum": ["account_options", "operator", "specialist_support"]}
+          },
+          "required": ["customer_id", "team"]
+        }}}},
+        "responses": {"200": {"description": "Transfer result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}}
+        }}}}}
+      }
+    },
+    "/close_call": {
+      "post": {
+        "summary": "Write the final disposition and end the call. No action is accepted afterwards.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "resolution": {"type": "string", "enum": ["arranged", "cleared_elsewhere", "handed_off", "no_arrangement", "security_stop", "unavailable"]},
+            "reason_code": {"type": "string", "description": "Required except for arranged and cleared_elsewhere; use the supplied CSV."}
+          },
+          "required": ["customer_id", "resolution"]
+        }}}},
+        "responses": {"200": {"description": "Close result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}}
+        }}}}}
+      }
+    }
+  }
+}

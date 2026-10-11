@@ -1,0 +1,154 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Aster Bank assisted-arrears tools",
+    "version": "1.0-rehearsal",
+    "description": "Synthetic organizer simulation. The API records actions but does not enforce the policy in the brief."
+  },
+  "servers": [
+    {"url": "https://aster-bank-organizer-sim.invalid/v1"}
+  ],
+  "paths": {
+    "/verify_identity": {
+      "post": {
+        "summary": "Check one identity answer. Two wrong answers in total end the check.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {
+            "type": "object",
+            "properties": {
+              "customer_id": {"type": "string"},
+              "check_type": {"type": "string", "enum": ["postal_code", "birth_month"]},
+              "response": {"type": "string", "description": "postal_code is uppercase without spaces; birth_month is 01 through 12."}
+            },
+            "required": ["customer_id", "check_type", "response"]
+          }}}
+        },
+        "responses": {"200": {"description": "Result", "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "ok": {"type": "boolean"},
+            "error": {"type": "string"},
+            "answer_accepted": {"type": "boolean"},
+            "identity_complete": {"type": "boolean"},
+            "wrong_answers_remaining": {"type": "integer"},
+            "retryable_format": {"type": "boolean"}
+          }
+        }}}}}
+      }
+    },
+    "/get_account": {
+      "post": {
+        "summary": "Return overdue facilities after identity is complete.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {"customer_id": {"type": "string"}},
+          "required": ["customer_id"]
+        }}}},
+        "responses": {"200": {"description": "Facilities in handling order", "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "ok": {"type": "boolean"},
+            "error": {"type": "string"},
+            "accounts": {"type": "array", "items": {"type": "object", "properties": {
+              "account_id": {"type": "string"},
+              "category": {"type": "string", "enum": ["card", "personal_loan", "overdraft"]},
+              "display_suffix": {"type": "string", "description": "Cards only"},
+              "overdue_balance": {"type": "number"},
+              "overdue_days": {"type": "integer"},
+              "minimum_due": {"type": "number", "description": "Cards only"},
+              "scheduled_payment": {"type": "number", "description": "Personal loans only"}
+            }, "required": ["account_id", "category", "overdue_balance", "overdue_days"]}}
+          }
+        }}}}}
+      }
+    },
+    "/create_promise": {
+      "post": {
+        "summary": "Record one confirmed commitment for one facility.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "account_id": {"type": "string"},
+            "promise_amount": {"type": "number"},
+            "promise_date": {"type": "string", "format": "date"}
+          },
+          "required": ["customer_id", "account_id", "promise_amount", "promise_date"]
+        }}}},
+        "responses": {"200": {"description": "Record result", "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}, "commitment_ref": {"type": "string"}}
+        }}}}}
+      }
+    },
+    "/add_note": {
+      "post": {
+        "summary": "Record why a facility ended without a commitment.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "account_id": {"type": "string"},
+            "note_code": {"type": "string", "enum": ["declined", "payment_reported", "disputed", "vulnerability", "system_failure"]},
+            "note_text": {"type": "string"}
+          },
+          "required": ["customer_id", "account_id", "note_code"]
+        }}}},
+        "responses": {"200": {"description": "Record result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}}
+        }}}}}
+      }
+    },
+    "/schedule_callback": {
+      "post": {
+        "summary": "Book a callback for an unintended recipient.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "callback_date": {"type": "string", "format": "date"},
+            "callback_time": {"type": "string", "description": "24-hour HH:MM"}
+          },
+          "required": ["customer_id", "callback_date", "callback_time"]
+        }}}},
+        "responses": {"200": {"description": "Booking result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}, "booking_ref": {"type": "string"}}
+        }}}}}
+      }
+    },
+    "/transfer_to_agent": {
+      "post": {
+        "summary": "Hand the call to a human queue.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "destination": {"type": "string", "enum": ["arrangements", "general_service", "customer_care"]}
+          },
+          "required": ["customer_id", "destination"]
+        }}}},
+        "responses": {"200": {"description": "Handoff result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}}
+        }}}}}
+      }
+    },
+    "/close_call": {
+      "post": {
+        "summary": "Close the call. This must be the last tool call.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {
+          "type": "object",
+          "properties": {
+            "customer_id": {"type": "string"},
+            "status": {"type": "string", "enum": ["commitment_made", "resolved_elsewhere", "transferred", "no_commitment", "security_failed", "contact_failed"]},
+            "detail": {"type": "string", "description": "Omit for commitment_made and resolved_elsewhere; otherwise use the brief table."}
+          },
+          "required": ["customer_id", "status"]
+        }}}},
+        "responses": {"200": {"description": "Close result", "content": {"application/json": {"schema": {
+          "type": "object", "properties": {"ok": {"type": "boolean"}, "error": {"type": "string"}}
+        }}}}}
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+resolution,reason_code,when
+arranged,,At least one promise was recorded and there was no successful handoff
+cleared_elsewhere,,Every agreement has a paid_claim note
+handed_off,options,A successful account_options handoff
+handed_off,operator,A successful operator handoff
+handed_off,support,A successful specialist_support handoff
+no_arrangement,refused,No promise and the remaining zero-promise mix has no more specific terminal reason
+no_arrangement,disputed,No promise and every agreement is disputed
+no_arrangement,difficulty,No promise and every agreement is financial difficulty
+no_arrangement,technical_failure,A promise or required note could not be recorded after its retry
+security_stop,wrong_answers,Security ended after the allowed wrong answers
+security_stop,refused_security,The customer declined security after the explanation
+unavailable,cb_booked,A callback was successfully booked
+unavailable,cb_rejected,No valid callback was supplied after the allowed asks
+unavailable,bad_number,The number does not belong to the customer
+unavailable,deceased,The customer is reported deceased
+unavailable,ambiguous_contact,Contact was not clearly confirmed after two asks
