@@ -496,6 +496,74 @@ def _window_text(window: dict[str, Any] | None) -> str:
     return f"{when}, between {clock(window['earliest'])} and {clock(window['latest'])}"
 
 
+def _turkish_clock(spec: PhoneAgentSpec) -> str:
+    """T-044: a Turkish call: the day and time words are put in the English words the reader
+    knows before it runs ("yarın saat on birde" -> "tomorrow 11", "öğleden sonra üçte" -> "3 pm",
+    "üç buçukta" -> "3:30"). English code is unchanged."""
+    from .language import language_code
+    from .offer_check import TURKISH_DATES
+    if language_code(spec.agent.language) != "tr":
+        return ""
+    return TURKISH_DATES + TURKISH_CLOCK
+
+
+TURKISH_CLOCK = r"""
+
+TR_TENS_CLOCK = dict(on=10, yirmi=20, otuz=30, kırk=40, elli=50)
+TR_CLOCK_SUFFIX = r'(?:de|da|te|ta|e|a|ye|ya|i|ı|u|ü|si|sı)?'
+
+
+TR_CLOCK_WORDS = r'saat|buçuk|sabah|öğle|akşam|gece|yarın|bugün|öbür|dakika|[çğıöşü]'
+
+
+def turkish_clock_text(value):
+    text = tr_fold(value)
+    if not re.search(TR_CLOCK_WORDS, text):
+        return str(value)  # no Turkish word: the English reader reads it as it is
+    text = re.sub(r"['’]", '', text)
+    # "iki saat sonra", "yarım saat sonra", "on beş dakika sonra": a span from now.
+    if re.search(r'\byarım saat sonra', text):
+        return 'in 30 minutes'
+    text = re.sub(r'\bdörd', 'dört', text)
+    units = '|'.join(TR_UNITS)
+    tens = '|'.join(TR_TENS_CLOCK)
+    text = re.sub(r'\b(' + tens + r')\s+(' + units + r')' + TR_CLOCK_SUFFIX + r'\b',
+                  lambda m: str(TR_TENS_CLOCK[m.group(1)] + TR_UNITS.index(m.group(2)) + 1), text)
+    text = re.sub(r'\b(' + tens + r')' + TR_CLOCK_SUFFIX + r'\b', lambda m: str(TR_TENS_CLOCK[m.group(1)]), text)
+    text = re.sub(r'\b(' + units + r')' + TR_CLOCK_SUFFIX + r'\b', lambda m: str(TR_UNITS.index(m.group(1)) + 1), text)
+    text = re.sub(r'\b(\d{1,2})[:.](\d{2})' + TR_CLOCK_SUFFIX + r'\b', r'\1:\2', text)
+    text = re.sub(r'\b(\d{1,2})' + TR_CLOCK_SUFFIX + r'\s+buçuk\w*', r'\1:30', text)
+    text = re.sub(r'\b(\d{1,2})(?:de|da|te|ta|e|a|ye|ya)\b', r'\1', text)
+    span = re.search(r'\b(\d+)\s+(saat|dakika)(?:\s+(\d+)\s+dakika)?\s+sonra', text)
+    if span:
+        unit = 'hours' if span.group(2) == 'saat' else 'minutes'
+        return 'in ' + span.group(1) + ' ' + unit + (' ' + span.group(3) + ' minutes' if span.group(3) else '')
+    meridiem = ''
+    if re.search(r'öğleden sonra|akşam|gece', text):
+        meridiem = ' pm'
+    elif re.search(r'sabah|öğleden önce', text):
+        meridiem = ' am'
+    noon = re.search(r'\böğle(?:n|yin)?\b', text) and not re.search(r'\d', text)
+    if re.search(r'öbür gün|yarından sonra', text):
+        day = 'day after tomorrow '
+    elif re.search(r'\byarın', text):
+        day = 'tomorrow '
+    elif re.search(r'\bbugün', text):
+        day = 'today '
+    else:
+        day = ''
+    clock = ' '.join(re.findall(r'\d{1,2}:\d{2}|\d{1,2}', re.sub(r'\b\d{4}\b', ' ', text)))
+    return (day + ('noon' if noon else clock + meridiem)).strip()
+
+
+for name in (CALLBACK['day_text'], CALLBACK['time_text']):
+    raw = str(vars.get(name) or '')
+    if raw.strip():
+        day = resolve_offer_day(raw)
+        vars[name] = day.isoformat() if day is not None and name == CALLBACK['day_text'] else turkish_clock_text(raw) or raw
+"""
+
+
 def callback_check_code(spec: PhoneAgentSpec) -> str:
     """Code for ``callback_check``: resolve the person's words, check the window, set the verdict."""
     window = callback_window(spec)
@@ -517,6 +585,7 @@ def callback_check_code(spec: PhoneAgentSpec) -> str:
         .replace("__PRODUCT_READER__", "")
         + "CALLBACK = " + _py_literal(config) + "\n"
         + "WINDOW = " + _py_literal(window or dict()) + " or None\n"
+        + _turkish_clock(spec)
         + f"vars[{THIRD_PARTY_CLOSE_KIND!r}] = {THIRD_PARTY_CLOSE_OTHER!r}\n"
         + CHECK_BODY
     )

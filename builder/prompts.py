@@ -368,6 +368,13 @@ LANGUAGE_ONLY_LINE = PromptDefinition(
     "documents' word lists stay exactly as the documents give them.",
     ("{language}",),
 )
+LANGUAGE_RECORDED_LINE = PromptDefinition(
+    "LANGUAGE_RECORDED_LINE", "Replaces the system prompt's English honesty sentence about \"recorded\" in a call "
+    "not in English (T-044).", "phone agent", "builder/workflow.py — system_prompt, apply_call_language",
+    "Use the {language} word for \"recorded\" (\"{recorded}\") only for an action whose tool returned ok true "
+    "in this call (a payment or promise: create_promise); for the recording notice say \"{notice}\".",
+    ("{language}", "{recorded}", "{notice}"),
+)
 CUSTOMER_LANGUAGE_NOTE = PromptDefinition(
     "CUSTOMER_LANGUAGE_NOTE", "Appended to every extraction description of a call not in English (T-041).",
     "extraction model", "builder/workflow.py — extraction_schema descriptions",
@@ -644,7 +651,9 @@ EXTRACT_OPENING_IDENTITY_TASK = PromptDefinition(
     '"introduction": RULE (text: the exact first sentence the agent says to the customer, word for word: who is '
     'calling, for whom, recording notice. Not an instruction such as "Say you are ..."), '
     '"wait_line": "one short sentence in the language of the call, said while the account is looked up after '
-    'identity is verified, for example a thank-you and a request to wait; no debt details"},\n'
+    'identity is verified, for example a thank-you and a request to wait; no debt details", '
+    '"currency": "the currency word or symbol the documents write after amounts (for example TL), as written; '
+    'empty if they write none"},\n'
     ' "opening": {\n'
     '  "rules": [RULE] (other opening rules: what may be said before verification, how to answer questions '
     'about who or what is calling),\n'
@@ -943,7 +952,101 @@ CONTRACT_DERIVE_REPAIR = PromptDefinition(
     ("{problems}",),
 )
 
+# T-046: generic mode. Platform rules only; nothing from any case.
+GENERIC_SYSTEM = PromptDefinition(
+    "GENERIC_SYSTEM", "Sets the builder model's job in generic mode: design and write a Freya phone-agent workflow "
+    "from a case's documents (T-046).", "builder model", "builder/generic.py — every generic-mode call",
+    "You build a phone agent on the Freya platform from a company's documents. A program checks and saves what "
+    "you write, and simulated callers then test the agent, so every value must be exact.\n"
+    "- Use only the case documents for the business: services, fields, values, wording, rules and edge cases. "
+    "Never invent a rule, a service, a field, a value or a promise.\n"
+    "- The documents were written at different times and may disagree. A newer document, mail or meeting decision "
+    "overrides an older one; an explicit correction wins. Example conversations and test data illustrate the rules; "
+    "they are not rules themselves.\n"
+    "- Use the platform documents for the workflow format and follow them exactly.\n"
+    "- Reply with one JSON object only, no prose.",
+)
+GENERIC_PLATFORM_RULES = PromptDefinition(
+    "GENERIC_PLATFORM_RULES", "Workflow rules learned in our live runs, given to every generic-mode call (T-046).",
+    "builder model", "builder/generic.py — the cached context of every generic-mode call",
+    "1. The agent speaks the language the documents give for the calls, in every task_message, every fixed tts line "
+    "and every spoken example. Amounts are read with their currency, dates in the spoken form of that language.\n"
+    "2. Honesty: the agent never says an action happened (sent, changed, recorded, transferred) unless that tool's "
+    "result in this call says it succeeded. On a failure or an error status it says plainly that it could not be "
+    "done and offers what the documents allow. It never guesses a value a tool did not return.\n"
+    "3. Call variables the platform gives (listed in the documents) are never asked for. Put each one in "
+    "`test_variables` with a realistic example value. Every date decision uses the call's current-time variable.\n"
+    "4. Tools: each bank service is one tool with handler `__function__:api_call`, its `url` default is the mock "
+    "URL followed by the exact service path ({{variable}} for path parameters), `method` as in the contract, the "
+    "request fields exactly as named in the contract, and `response_mapping` for the fields the flow routes on or "
+    "speaks. Route on the HTTP status or a result field, never on a boolean alone (map it to a string first or use "
+    "`equals` \"true\"/\"false\" strings). Every tool call has a success route and a failure route.\n"
+    "5. Put a call that must run before the agent speaks in its own `api_request` node (`pre_actions`, "
+    "`passthrough: true`, a deterministic route per result and a last `always` route). Tools that the customer's "
+    "choice triggers may be `tools` on a conversation node, with clear descriptions of when to call them.\n"
+    "6. Routing: a node's own transitions are tried in order before global nodes; put deterministic conditions "
+    "before `matches_intent`. The top-level condition group uses \"logic\": \"or\"; nest \"and\" inside it.\n"
+    "7. Extraction enums end with the value \"none\" (nothing said), and no route listens to \"none\".\n"
+    "8. Every conversation node has a way out when the caller says goodbye or wants to end the call: a global node "
+    "with a `matches_intent` condition (a clear leave-taking only; thanks or okay alone is not a goodbye) that goes "
+    "to the closing and an `end_call` node. Every path reaches an `end_call` node.\n"
+    "9. Side questions and interruptions that can come anywhere (a request for a person, a question the documents "
+    "answer, a complaint) are global nodes; after answering they return with `__previous__`. List terminal nodes "
+    "and nodes where an interrupt would do harm in `excluded_nodes`. Global nodes need `condition` and "
+    "`description`; plain nodes never carry `condition`, `description` or `excluded_nodes`.\n"
+    "10. A loop of code and api_request nodes must also leave on the engine counters "
+    "`<node>_success_count` / `<node>_failure_count` (`greater_than` a small number), so it ends even when code fails.\n"
+    "11. Give conversation nodes `max_node_turns` with a `max_turn_transition` to a polite closing.\n"
+    "12. No `agent_config`, no `null`, node `name` equals its key in snake_case.",
+)
+GENERIC_CONTRACT_TASK = PromptDefinition(
+    "GENERIC_CONTRACT_TASK", "Asks for the case's own services as an OpenAPI 3 document (T-046).", "builder model",
+    "builder/generic.py — derive_contract",
+    "Write the company's services that the phone agent must call, from the integration and service documents, as one "
+    "OpenAPI 3.0.3 JSON object. For every service: its exact path (path parameters as {name}) and HTTP method; its "
+    "parameters and JSON request body with every field, its type and its allowed values; and every documented "
+    "response by HTTP status code with every response field (nested objects and arrays included). Copy every path, "
+    "field and value exactly as the newest document writes it. Use \"servers\": [{\"url\": \"https://mock.invalid\"}] "
+    "(the program replaces it). Add \"x-notes\" on an operation for rules the documents give about calling it.",
+)
+GENERIC_DESIGN_TASK = PromptDefinition(
+    "GENERIC_DESIGN_TASK", "Asks for the workflow design from the documents and the contract (T-046).",
+    "builder model", "builder/generic.py — make_design",
+    "The services, as the program will expose them to the agent:\n{contract}\n\n"
+    "Design the phone agent as one JSON object:\n"
+    "{\"language\": ..., \"call_variables\": [{\"name\", \"example\"}], \"steps\": [{\"key\", \"node_type\" "
+    "(conversation | api_request | code | end_call | global), \"purpose\", \"spoken_rules\" (what the agent says and "
+    "must not say here, in the call's language, with the exact sentences the documents require), \"tools\", "
+    "\"extraction\" (fields with enum values), \"transitions\" [{\"to\", \"when\"}]}], \"edge_cases\" [{\"case\", "
+    "\"handling\", \"step\"}]}.\n"
+    "Cover every branch of the documents' flow, every service result and error status, every rule about what may "
+    "and may not be said, and every situation the FAQ, mails, meetings and examples mention. Resolve conflicts by "
+    "the newest decision and say which you chose in \"edge_cases\". Follow the platform rules.",
+)
+GENERIC_RENDER_TASK = PromptDefinition(
+    "GENERIC_RENDER_TASK", "Asks for the Freya workflow JSON from the design (T-046).", "builder model",
+    "builder/generic.py — render",
+    "Design:\n{design}\n\nServices (call them at {mock_url} plus the path):\n{contract}\n\n"
+    "Write the complete Freya workflow JSON for this design, exactly in the platform format (top-level "
+    "`initial_node`, `system_prompt`, `nodes`, `global_nodes`, `test_variables`). Every task_message is complete and "
+    "self-contained for its step and written in the call's language. Follow the platform rules. Reply with the "
+    "workflow object only.",
+)
+GENERIC_REPAIR_TASK = PromptDefinition(
+    "GENERIC_REPAIR_TASK", "Sends the program's problems back for one repair round (T-046).", "builder model",
+    "builder/generic.py — repairs of the contract, design and workflow",
+    "The program found these problems:\n{problems}\n\nFix every one without breaking anything else. Reply with "
+    "{what}, as one JSON object.",
+    ("{problems}", "{what}"),
+)
+
 PROMPTS = (
+    GENERIC_SYSTEM,
+    GENERIC_PLATFORM_RULES,
+    GENERIC_CONTRACT_TASK,
+    GENERIC_DESIGN_TASK,
+    GENERIC_RENDER_TASK,
+    GENERIC_REPAIR_TASK,
     CONTRACT_DERIVE_SYSTEM,
     CONTRACT_DERIVE_TASK,
     CONTRACT_DERIVE_REPAIR,
@@ -982,6 +1085,7 @@ PROMPTS = (
     REVISE_ASK_LINE,
     READBACK_RESUME_LINE,
     LANGUAGE_ONLY_LINE,
+    LANGUAGE_RECORDED_LINE,
     CUSTOMER_LANGUAGE_NOTE,
     SPOKEN_TABLE_TRANSLATE_SYSTEM,
     PERSUASION_STATE_LINE,

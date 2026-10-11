@@ -1355,8 +1355,75 @@ def _prelude(spec: PhoneAgentSpec, config: dict[str, Any]) -> str:
     reader = product_reader_code(spec.account.data["products_variable"], spec.account.data["products_field"])
     text = PRELUDE.replace("__CONFIG__", _py_literal(config)).replace("__PRODUCT_READER__", reader)
     # T-041: a Turkish call reads and says dates and amounts in Turkish; English code is unchanged.
-    from .language import language_code
-    return text + TURKISH_DATES if language_code(spec.agent.language) == "tr" else text
+    # T-044: a call not in English names products with the translated words; an amount gets the
+    # documents' currency word when they give one.
+    from .language import ENGLISH, current_words, language_code
+    code = language_code(spec.agent.language)
+    if code == "tr":
+        text += TURKISH_DATES
+    if code != ENGLISH:
+        text += "\n\nPRODUCT_WORDS = " + _py_literal(current_words()) + "\n" + LOCAL_PRODUCT_NAMES
+    currency = str(getattr(spec.agent, "currency", "") or "").strip()
+    if currency:
+        text += "\n\nCURRENCY = " + _py_literal(currency) + "\n" + CURRENCY_AMOUNTS
+    return text
+
+
+# T-044: product names in the call's language. The English code puts "the " before a name that
+# lacks it; a translated name needs none, so it is a string that says it already has it.
+LOCAL_PRODUCT_NAMES = r"""
+
+class SpokenName(str):
+    def startswith(self, prefix, *args):
+        return True if prefix == 'the ' else str.startswith(self, prefix, *args)
+
+
+def product_name(index, product, count):
+    kind = product.get(CONFIG['kind_field']) if CONFIG['kind_field'] else None
+    label = product.get(CONFIG['label_field']) if CONFIG['label_field'] else None
+    words = ''
+    if kind not in (None, ''):
+        words = PRODUCT_WORDS.get('WORD_KIND_' + str(kind)) or str(kind).replace('_', ' ').strip()
+    if label not in (None, ''):
+        words = PRODUCT_WORDS.get('WORD_NAME_WITH_LABEL', '{kind} ending {label}').replace(
+            '{kind}', words or PRODUCT_WORDS.get('WORD_PRODUCT', 'product')).replace('{label}', str(label))
+    if words:
+        return SpokenName(words)
+    nth = PRODUCT_WORDS.get('WORD_NTH', '').splitlines()
+    if count > 1 and 1 <= index <= len(nth):
+        return SpokenName(nth[index - 1])
+    return SpokenName(PRODUCT_WORDS.get('WORD_PRODUCT', 'product'))
+
+
+def readback(accepted):
+    products = load_products()
+    items = []
+    for key in sorted(accepted, key=lambda item: int(item) if str(item).isdigit() else 0):
+        entry = accepted[key]
+        number = int(key) if str(key).isdigit() else 0
+        product = products[number - 1] if 1 <= number <= len(products) else dict()
+        name = product_name(number, product, len(products))
+        items.append(CONFIG['readback']['item'].replace('the {product}', '{product}')
+                     .replace('{amount}', say_spoken_amount(parse_amount(entry.get('amount'))))
+                     .replace('{product}', name)
+                     .replace('{date}', say_spoken_day(parse_day(entry.get('date')))))
+    if not items:
+        return ''
+    joiner = ' ' + PRODUCT_WORDS.get('WORD_AND', 'and') + ' '
+    payments = items[0] if len(items) == 1 else ', '.join(items[:-1]) + joiner + items[-1]
+    return CONFIG['readback']['line'].replace('{payments}', payments)
+"""
+
+# T-044: the documents' currency word after a spoken amount ("637,50 TL").
+CURRENCY_AMOUNTS = r"""
+
+PLAIN_SPOKEN_AMOUNT = say_spoken_amount
+
+
+def say_spoken_amount(amount):
+    text = PLAIN_SPOKEN_AMOUNT(amount)
+    return text if amount is None else text + ' ' + CURRENCY
+"""
 
 
 # T-041: Turkish date words for the generated code. The reader maps a Turkish phrase to the English
@@ -1524,8 +1591,7 @@ def check_offer_code(spec: PhoneAgentSpec, reset_variables: list[str]) -> str:
         return _code(spec, CHECK_BODY, reset_variables)
     config = _full_config(spec, reset_variables)
     config.update(_multi_config(spec))
-    reader = product_reader_code(spec.account.data["products_variable"], spec.account.data["products_field"])
-    return (PRELUDE.replace("__CONFIG__", _py_literal(config)).replace("__PRODUCT_READER__", reader)
+    return (_prelude(spec, config)
             + PRODUCT_PICK_BODY + "\n\ndef check_once():\n" + textwrap.indent(CHECK_BODY, "    ")
             + "    return verdict\n\n\n" + MULTI_CHECK_BODY)
 
@@ -1924,11 +1990,7 @@ def special_noted_code(spec: PhoneAgentSpec, result_variable: str, tool_name: st
     if note_reason and config["is_note_tool"] and _notes_outcome(spec):
         config.update({"note_outcome_reason": note_reason, "note_reasons_special": NOTE_REASONS_SPECIAL})
         extra = NOTED_REASON_BODY
-    return (
-        PRELUDE.replace("__CONFIG__", _py_literal(config))
-        .replace("__PRODUCT_READER__", reader)
-        + NOTED_BODY + extra
-    )
+    return _prelude(spec, config) + NOTED_BODY + extra
 
 
 def promise_values_hook(spec: PhoneAgentSpec) -> str:

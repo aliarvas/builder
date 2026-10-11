@@ -30,6 +30,32 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-102: A Turkish call would name products, the recording notice and callback times in English; the several-product check had no Turkish dates
+
+- **Date:** 2026-10-11
+- **Brief / case:** final rules (Turkish), T-044 (the gaps left open by T-041)
+- **Run:** offline review
+- **Symptom (risk):** In a Turkish call:
+  - product names came from code in English ("credit card ending 1903", "the first product");
+  - the recording-notice rule and the system prompt's honesty sentence were English;
+  - "yarın saat on birde" was not read as a callback time;
+  - amounts had no currency word;
+  - the several-product offer check had no Turkish date reader at all.
+- **Root cause:**
+  - The name pattern, the ordinal words and the kind words were English code.
+  - The T-026 rule and the callback reader knew only English.
+  - Two code builders did not use the language-aware prelude.
+- **Category:** prompt / date-logic
+- **Fix / lesson:**
+  - The product words (pattern, ordinals, "and", the spec's kind values) are translated in the same build-time call, and the code uses them in any word order.
+  - A Turkish present-tense notice rule and honesty sentence.
+  - Turkish day and time words are put in the English reader's words.
+  - An optional `agent.currency` is said after amounts.
+  - Every code builder uses the same prelude.
+  - English renders are unchanged.
+- **Status:** fixed offline (T-044)
+- **Retest:** pending: a Turkish chat run of the final case
+
 ### F-101: A call in another language would speak the builder's English lines and miss non-English dates
 
 - **Date:** 2026-10-11

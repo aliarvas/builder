@@ -13,6 +13,7 @@ from .prompts import (
     ACCOUNT_WAIT_LINE,
     CUSTOMER_LANGUAGE_NOTE,
     LANGUAGE_ONLY_LINE,
+    LANGUAGE_RECORDED_LINE,
     REVISE_ASK_LINE,
     SPECIAL_ASK_PHRASED_TEMPLATE,
     SPECIAL_SAY_FIRST_LINE,
@@ -61,7 +62,7 @@ from .spec import (
     ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec,
     Rule, SpecError, SpecialPath, notes_outcome_pairs, special_note_pairs,
 )
-from .spoken import agent_directed, present_recording_notice, quoted_speech, spoken_words
+from .spoken import RECORDING_NOTICE_WORDS, agent_directed, present_recording_notice, quoted_speech, spoken_words
 from .callback import (
     BOOK_FAILURE_COUNT, THIRD_PARTY_ASK, THIRD_PARTY_CLOSE_CHECK, add_collect_rule, callback_entry_transition,
     callback_extraction_fields, callback_nodes, third_party_ask_node, third_party_close_guard_node,
@@ -2212,7 +2213,8 @@ def speakable_spec(spec: PhoneAgentSpec) -> tuple[PhoneAgentSpec, list[str]]:
         paths.append(dataclasses.replace(path, say=say, ask=ask))
     wait_line = clean(spec.agent.wait_line, ACCOUNT_WAIT_LINE.text, "agent.wait_line") if spec.agent.wait_line else ""
     # T-026: the recording notice in the present tense; "recorded" only after a tool returned ok.
-    introduction, note = present_recording_notice(spec.agent.introduction.text)
+    from .language import language_code
+    introduction, note = present_recording_notice(spec.agent.introduction.text, language_code(spec.agent.language))
     if note and "left in the line" in note:  # a rewrite is the fixed rule; only a doubt is a warning
         notes.append(f"recording_notice agent.introduction: {note}")
     agent = dataclasses.replace(spec.agent, wait_line=wait_line,
@@ -2228,7 +2230,15 @@ def apply_call_language(spec: PhoneAgentSpec, workflow: dict[str, Any]) -> None:
     if code == ENGLISH:
         return
     name = language_name(code)
-    workflow["system_prompt"] = render_prompt(LANGUAGE_ONLY_LINE, language=name) + "\n" + workflow["system_prompt"]
+    from .language import RECORDED_WORD_BY_LANGUAGE, RECORDING_NOTICE_BY_LANGUAGE
+    system = workflow["system_prompt"]
+    english = 'Use the word "recorded" only for an action whose tool returned ok true in this call (a payment or promise: create_promise); for the recording notice say "' + RECORDING_NOTICE_WORDS + '".'
+    if code in RECORDING_NOTICE_BY_LANGUAGE and english in system:
+        # T-044: the honesty sentence and the recording notice in the call's language.
+        system = system.replace(english, render_prompt(
+            LANGUAGE_RECORDED_LINE, language=name, recorded=RECORDED_WORD_BY_LANGUAGE[code],
+            notice=RECORDING_NOTICE_BY_LANGUAGE[code]))
+    workflow["system_prompt"] = render_prompt(LANGUAGE_ONLY_LINE, language=name) + "\n" + system
     note = render_prompt(CUSTOMER_LANGUAGE_NOTE, language=name)
     for node in [*workflow.get("nodes", {}).values(), *workflow.get("global_nodes", {}).values()]:
         for field in node.get("extraction_schema") or []:

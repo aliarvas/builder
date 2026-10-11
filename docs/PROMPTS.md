@@ -2,6 +2,101 @@
 
 Generated from `builder/prompts.py`. Do not edit by hand; edit the code and regenerate.
 
+## GENERIC_SYSTEM
+
+- Purpose: Sets the builder model's job in generic mode: design and write a Freya phone-agent workflow from a case's documents (T-046).
+- Receiver: builder model
+- Used at: builder/generic.py — every generic-mode call
+- Approximate tokens: ~183 (characters ÷ 4)
+
+```text
+You build a phone agent on the Freya platform from a company's documents. A program checks and saves what you write, and simulated callers then test the agent, so every value must be exact.
+- Use only the case documents for the business: services, fields, values, wording, rules and edge cases. Never invent a rule, a service, a field, a value or a promise.
+- The documents were written at different times and may disagree. A newer document, mail or meeting decision overrides an older one; an explicit correction wins. Example conversations and test data illustrate the rules; they are not rules themselves.
+- Use the platform documents for the workflow format and follow them exactly.
+- Reply with one JSON object only, no prose.
+```
+
+## GENERIC_PLATFORM_RULES
+
+- Purpose: Workflow rules learned in our live runs, given to every generic-mode call (T-046).
+- Receiver: builder model
+- Used at: builder/generic.py — the cached context of every generic-mode call
+- Approximate tokens: ~733 (characters ÷ 4)
+
+```text
+1. The agent speaks the language the documents give for the calls, in every task_message, every fixed tts line and every spoken example. Amounts are read with their currency, dates in the spoken form of that language.
+2. Honesty: the agent never says an action happened (sent, changed, recorded, transferred) unless that tool's result in this call says it succeeded. On a failure or an error status it says plainly that it could not be done and offers what the documents allow. It never guesses a value a tool did not return.
+3. Call variables the platform gives (listed in the documents) are never asked for. Put each one in `test_variables` with a realistic example value. Every date decision uses the call's current-time variable.
+4. Tools: each bank service is one tool with handler `__function__:api_call`, its `url` default is the mock URL followed by the exact service path ({{variable}} for path parameters), `method` as in the contract, the request fields exactly as named in the contract, and `response_mapping` for the fields the flow routes on or speaks. Route on the HTTP status or a result field, never on a boolean alone (map it to a string first or use `equals` "true"/"false" strings). Every tool call has a success route and a failure route.
+5. Put a call that must run before the agent speaks in its own `api_request` node (`pre_actions`, `passthrough: true`, a deterministic route per result and a last `always` route). Tools that the customer's choice triggers may be `tools` on a conversation node, with clear descriptions of when to call them.
+6. Routing: a node's own transitions are tried in order before global nodes; put deterministic conditions before `matches_intent`. The top-level condition group uses "logic": "or"; nest "and" inside it.
+7. Extraction enums end with the value "none" (nothing said), and no route listens to "none".
+8. Every conversation node has a way out when the caller says goodbye or wants to end the call: a global node with a `matches_intent` condition (a clear leave-taking only; thanks or okay alone is not a goodbye) that goes to the closing and an `end_call` node. Every path reaches an `end_call` node.
+9. Side questions and interruptions that can come anywhere (a request for a person, a question the documents answer, a complaint) are global nodes; after answering they return with `__previous__`. List terminal nodes and nodes where an interrupt would do harm in `excluded_nodes`. Global nodes need `condition` and `description`; plain nodes never carry `condition`, `description` or `excluded_nodes`.
+10. A loop of code and api_request nodes must also leave on the engine counters `<node>_success_count` / `<node>_failure_count` (`greater_than` a small number), so it ends even when code fails.
+11. Give conversation nodes `max_node_turns` with a `max_turn_transition` to a polite closing.
+12. No `agent_config`, no `null`, node `name` equals its key in snake_case.
+```
+
+## GENERIC_CONTRACT_TASK
+
+- Purpose: Asks for the case's own services as an OpenAPI 3 document (T-046).
+- Receiver: builder model
+- Used at: builder/generic.py — derive_contract
+- Approximate tokens: ~162 (characters ÷ 4)
+
+```text
+Write the company's services that the phone agent must call, from the integration and service documents, as one OpenAPI 3.0.3 JSON object. For every service: its exact path (path parameters as {name}) and HTTP method; its parameters and JSON request body with every field, its type and its allowed values; and every documented response by HTTP status code with every response field (nested objects and arrays included). Copy every path, field and value exactly as the newest document writes it. Use "servers": [{"url": "https://mock.invalid"}] (the program replaces it). Add "x-notes" on an operation for rules the documents give about calling it.
+```
+
+## GENERIC_DESIGN_TASK
+
+- Purpose: Asks for the workflow design from the documents and the contract (T-046).
+- Receiver: builder model
+- Used at: builder/generic.py — make_design
+- Approximate tokens: ~210 (characters ÷ 4)
+
+```text
+The services, as the program will expose them to the agent:
+{contract}
+
+Design the phone agent as one JSON object:
+{"language": ..., "call_variables": [{"name", "example"}], "steps": [{"key", "node_type" (conversation | api_request | code | end_call | global), "purpose", "spoken_rules" (what the agent says and must not say here, in the call's language, with the exact sentences the documents require), "tools", "extraction" (fields with enum values), "transitions" [{"to", "when"}]}], "edge_cases" [{"case", "handling", "step"}]}.
+Cover every branch of the documents' flow, every service result and error status, every rule about what may and may not be said, and every situation the FAQ, mails, meetings and examples mention. Resolve conflicts by the newest decision and say which you chose in "edge_cases". Follow the platform rules.
+```
+
+## GENERIC_RENDER_TASK
+
+- Purpose: Asks for the Freya workflow JSON from the design (T-046).
+- Receiver: builder model
+- Used at: builder/generic.py — render
+- Approximate tokens: ~105 (characters ÷ 4)
+
+```text
+Design:
+{design}
+
+Services (call them at {mock_url} plus the path):
+{contract}
+
+Write the complete Freya workflow JSON for this design, exactly in the platform format (top-level `initial_node`, `system_prompt`, `nodes`, `global_nodes`, `test_variables`). Every task_message is complete and self-contained for its step and written in the call's language. Follow the platform rules. Reply with the workflow object only.
+```
+
+## GENERIC_REPAIR_TASK
+
+- Purpose: Sends the program's problems back for one repair round (T-046).
+- Receiver: builder model
+- Used at: builder/generic.py — repairs of the contract, design and workflow
+- Approximate tokens: ~29 static + `{problems}` characters ÷ 4 + `{what}` characters ÷ 4 at runtime
+
+```text
+The program found these problems:
+{problems}
+
+Fix every one without breaking anything else. Reply with {what}, as one JSON object.
+```
+
 ## CONTRACT_DERIVE_SYSTEM
 
 - Purpose: Sets the builder model's job when the case's service contract is a document, not an OpenAPI file: write the OpenAPI file of exactly the tools it describes (T-040).
@@ -490,6 +585,17 @@ Shall I go ahead with the payments I read out?
 Speak only {language}, also when the customer uses another language. Tool values, codes and the documents' word lists stay exactly as the documents give them.
 ```
 
+## LANGUAGE_RECORDED_LINE
+
+- Purpose: Replaces the system prompt's English honesty sentence about "recorded" in a call not in English (T-044).
+- Receiver: phone agent
+- Used at: builder/workflow.py — system_prompt, apply_call_language
+- Approximate tokens: ~42 static + `{language}` characters ÷ 4 + `{recorded}` characters ÷ 4 + `{notice}` characters ÷ 4 at runtime
+
+```text
+Use the {language} word for "recorded" ("{recorded}") only for an action whose tool returned ok true in this call (a payment or promise: create_promise); for the recording notice say "{notice}".
+```
+
 ## CUSTOMER_LANGUAGE_NOTE
 
 - Purpose: Appended to every extraction description of a call not in English (T-041).
@@ -847,13 +953,13 @@ Leave enforced_by out for anything the agent must say, ask, propose or decide, a
 - Purpose: Extracts the agent identity, opening, third-party handling, identity check and global rules.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'opening_identity'
-- Approximate tokens: ~1252 (characters ÷ 4)
+- Approximate tokens: ~1285 (characters ÷ 4)
 
 ```text
 Extract the sections agent, opening, third_party, identity and global_rules. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
 Return this JSON shape:
 {
- "agent": {"name": "how the agent presents itself", "language": "language of the call", "introduction": RULE (text: the exact first sentence the agent says to the customer, word for word: who is calling, for whom, recording notice. Not an instruction such as "Say you are ..."), "wait_line": "one short sentence in the language of the call, said while the account is looked up after identity is verified, for example a thank-you and a request to wait; no debt details"},
+ "agent": {"name": "how the agent presents itself", "language": "language of the call", "introduction": RULE (text: the exact first sentence the agent says to the customer, word for word: who is calling, for whom, recording notice. Not an instruction such as "Say you are ..."), "wait_line": "one short sentence in the language of the call, said while the account is looked up after identity is verified, for example a thank-you and a request to wait; no debt details", "currency": "the currency word or symbol the documents write after amounts (for example TL), as written; empty if they write none"},
  "opening": {
   "rules": [RULE] (other opening rules: what may be said before verification, how to answer questions about who or what is calling),
   "confirmation_question": RULE (how to ask whether the intended customer is speaking),

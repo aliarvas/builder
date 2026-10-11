@@ -25,6 +25,11 @@ LANGUAGE_WORDS = {
 }
 # Names for the prompts: the last word of each list, capitalised ("turkish" -> "Turkish").
 LANGUAGE_NAMES = {code: words[-1].capitalize() for code, words in {"tr": ("turkish",), "en": LANGUAGE_WORDS["en"]}.items()}
+# T-044: the recording notice said in the present, per language (T-026 for English).
+RECORDING_NOTICE_BY_LANGUAGE = {"tr": "görüşmemiz kayıt altına alınıyor"}
+RECORDED_WORD_BY_LANGUAGE = {"tr": "kaydedildi"}
+
+
 # Turkish month names and day numbers in words, for the self-check's spoken dates (T-041).
 TURKISH_MONTHS = ("Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim",
                   "Kasım", "Aralık")
@@ -90,10 +95,73 @@ def check_line(name: str, english: str, translated: Any) -> str:
     return ""
 
 
-def translate_table(code: str, complete: Callable[[str, str], str]) -> tuple[dict[str, str], list[str]]:
+# T-044: the words the generated code builds product names from, translated in the same call.
+# Keys start with WORD_; the code falls back to the English word for a missing key.
+WORD_PREFIX = "WORD_"
+ORDINAL_WORDS = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")
+
+
+def product_word_entries(spec: Any = None) -> dict[str, str]:
+    """English product-name words: the "<kind> ending <label>" pattern, the ordinal names, "and",
+    and each product kind value the spec's offer rules name (credit_card -> "credit card")."""
+    nth = "the {ordinal} product"
+    entries = {
+        WORD_PREFIX + "NAME_WITH_LABEL": "{kind} ending {label}",
+        WORD_PREFIX + "PRODUCT": nth.split()[-1],
+        WORD_PREFIX + "NTH": "\n".join(nth.replace("{ordinal}", word) for word in ORDINAL_WORDS),
+        WORD_PREFIX + "AND": "and",
+    }
+    if spec is not None:
+        for kind in product_kinds(spec):
+            entries[WORD_PREFIX + "KIND_" + kind] = kind.replace("_", " ")
+    return entries
+
+
+def product_kinds(spec: Any) -> list[str]:
+    """The kind values the spec's rules name for the account's kind field."""
+    field = (spec.account.data or {}).get("product_kind_field")
+    found: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("field") == field:
+                for item in [value.get("equals"), *(value.get("in") or [])]:
+                    if isinstance(item, str) and item and item not in found:
+                        found.append(item)
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    if field:
+        walk(spec.offer.data)
+    return found
+
+
+_CURRENT_WORDS: dict[str, str] = {}
+
+
+def current_words() -> dict[str, str]:
+    """The translated product words while ``localized`` is active ({} otherwise)."""
+    return dict(_CURRENT_WORDS)
+
+
+def _the_placeholders(name: str, text: str) -> str:
+    """The generated code replaces "the [product]" and "the [next]" (T-044): a translated message
+    keeps that form, so a name is put in whatever the word order."""
+    if name != "OFFER_VERDICT_MESSAGES":
+        return text
+    return re.sub(r"(?<!the )\[(product|next)\]", r"the [\1]", text)
+
+
+def translate_table(code: str, complete: Callable[[str, str], str],
+                    extra: dict[str, str] | None = None) -> tuple[dict[str, str], list[str]]:
     """({name: translated text}, notes). ``complete(system, user)`` makes the one model call.
-    A line that fails its check keeps the English text (a note says why)."""
+    A line that fails its check keeps the English text (a note says why). ``extra``: more
+    entries in the same call (the product words)."""
     english = {item.name: item.text for item in spoken_definitions()}
+    english.update(extra or {})
     notes: list[str] = []
     try:
         raw = complete(SPOKEN_TABLE_TRANSLATE_SYSTEM.text.replace("{language}", language_name(code)),
@@ -108,7 +176,7 @@ def translate_table(code: str, complete: Callable[[str, str], str]) -> tuple[dic
         if problem:
             notes.append(f"spoken line {name} kept in English: {problem}")
         else:
-            table[name] = answer[name]
+            table[name] = _the_placeholders(name, answer[name])
     return table, notes
 
 
@@ -116,6 +184,8 @@ def translate_table(code: str, complete: Callable[[str, str], str]) -> tuple[dic
 def localized(table: dict[str, str]) -> Iterator[None]:
     """Swap the translated texts into the prompt definitions while the workflow is rendered."""
     saved = {}
+    _CURRENT_WORDS.clear()
+    _CURRENT_WORDS.update({key: value for key, value in table.items() if key.startswith(WORD_PREFIX)})
     try:
         for item in spoken_definitions():
             if item.name in table:
@@ -126,6 +196,7 @@ def localized(table: dict[str, str]) -> Iterator[None]:
         for item in spoken_definitions():
             if item.name in saved:
                 object.__setattr__(item, "text", saved[item.name])
+        _CURRENT_WORDS.clear()
 
 
 @contextlib.contextmanager
@@ -149,7 +220,7 @@ def spoken_language(spec: Any, trace: Any, client: Any = None) -> Iterator[None]
     def complete(system: str, user: str) -> str:
         return client.complete(system, [{"role": "user", "content": [text_block(user)]}], "spoken_lines").text
 
-    table, notes = translate_table(code, complete)
+    table, notes = translate_table(code, complete, product_word_entries(spec))
     for note in notes:
         trace.add("warning", note)
     trace.add("spoken_lines", json.dumps({"language": code, "table": table}, ensure_ascii=False))

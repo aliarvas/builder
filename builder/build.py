@@ -66,6 +66,14 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--validate", action="store_true", help="run only Freya's dry-run validation")
     parser.add_argument("--slot", help="stable workflow slot name")
     parser.add_argument(
+        "--generic", action="store_true",
+        help="generic mode: the case documents decide the workflow (default for a case folder + mock URL)",
+    )
+    parser.add_argument(
+        "--collections", action="store_true",
+        help="use the collections spec renderer for a case folder (the old T-040 path)",
+    )
+    parser.add_argument(
         "--no-self-test", action="store_true",
         help="save and publish without post-publish chat checks (development only)",
     )
@@ -337,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
     trace = TraceWriter(_trace_path(slot, args.print_only, args.validate))
     trace.add("slot", slot)
     status = "failed"
+    if (case and not args.collections) or args.generic:
+        return _main_generic(args, slot, trace, build_started)
     try:
         if case:
             trace.add("input_form", "case folder + mock URL (T-040)")
@@ -516,6 +526,162 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         trace.finish(status)
     return 0
+
+
+# T-046/T-047: the whole generic build, self-tests included, stays under this many seconds.
+GENERIC_BUILD_SECONDS = 25 * 60
+FREYA_REPAIR_ROUNDS = 2
+
+
+def _main_generic(args: argparse.Namespace, slot: str, trace: TraceWriter, build_started: float) -> int:
+    """T-046: generic mode. The documents decide the workflow: contract, design, render,
+    validate and repair (``builder/generic.py``); then the same save, publish and export as
+    the collections path; then the T-047 self-test loop when it is there."""
+    import importlib
+
+    generic = importlib.import_module("builder.generic")
+    status = "failed"
+    try:
+        if not case_form(args.inputs):
+            raise BuilderInputError("generic mode needs a case folder (or .zip) and the mock URL (http...)")
+        if args.spec_path or args.single_step:
+            raise BuilderInputError("--spec and --single-step belong to the collections path")
+        trace.add("input_form", "case folder + mock URL (T-040)")
+        trace.add("renderer", "generic (T-046)")
+        source, mock_url = Path(args.inputs[0]), args.inputs[1]
+        try:
+            folder = unpack(source, Path("traces") / f"{slot}.case")
+            case = read_case(folder, mock_url)
+        except (CaseFolderError, OSError) as exc:
+            raise BuilderInputError(str(exc)) from exc
+        for warning in case.warnings:
+            trace.add("warning", warning)
+        for item in case.documents:
+            trace.add("case_document", f"{item.name} kind={item.kind} role={item.role} chars={len(item.text)}"
+                                       + (" pdf=attached" if item.pdf else ""))
+            trace.add_input(folder / item.name)
+        client = AnthropicClient(
+            log=lambda purpose, result: trace.add_model_call(
+                result.model, purpose, result.duration_seconds, result.input_tokens, result.output_tokens,
+                result.cache_read_tokens),
+            note=lambda message: trace.add("warning", message))
+        trace.add("model_settings", client.settings())
+        workflow, contract = generic.build(case, mock_url, trace, client)
+        contract_path = Path("traces") / f"{slot}.openapi.json"
+        contract_path.parent.mkdir(parents=True, exist_ok=True)
+        contract_path.write_text(json.dumps(contract, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        trace.add("contract_file", contract_path)
+        _trace_generic(workflow, trace)
+        if args.print_only:
+            print(json.dumps(workflow, indent=2, ensure_ascii=False))
+            trace.add("freya", "not contacted (--print)")
+            print(f"print: ok (slot={slot}, nodes={len(workflow.get('nodes') or {})})", file=sys.stderr)
+            status = "ok"
+            return 0
+        if not os.environ.get("FREYA_API_KEY"):
+            raise RuntimeError("FREYA_API_KEY is not set; workflow was not validated or saved")
+        workflow = _freya_validate_with_repair(case, workflow, slot, trace, client, generic)
+        if args.validate:
+            trace.add("freya", "dry-run validation passed; workflow not saved")
+            print(f"validate: ok (slot={slot}, nodes={len(workflow['nodes'])})")
+            status = "ok"
+            return 0
+        saved = save_with_slot_check(freya, slot, workflow, warn=lambda message: trace.add("warning", message))
+        workflow_id = saved["workflow_id"]
+        published_version = _ensure_published_version(workflow_id)
+        trace.add("workflow_id", workflow_id)
+        trace.add("agent_id", saved["agent_id"])
+        trace.add("published_version", published_version)
+        if args.no_self_test:
+            trace.add("self_test_summary", "skipped=--no-self-test")
+        else:
+            workflow = _generic_self_tests(case, workflow, workflow_id, slot, trace, client, generic, build_started)
+        output_path = Path("submission") / f"{slot}.workflow.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        freya.export_workflow(workflow_id, str(output_path))
+        trace.add("export", output_path)
+        print(f"save: ok (workflow_id={workflow_id}, agent_id={saved['agent_id']}, export={output_path}, "
+              f"trace={trace.path})")
+        status = "ok"
+        return 0
+    except BuilderInputError as exc:
+        trace.add("error", f"{type(exc).__name__}: {_error_text(exc)}")
+        trace.path = Path("traces") / f"{slot}.failed.log"
+        print(f"error: {_error_text(exc)}", file=sys.stderr)
+        return 2
+    except BaseException as exc:
+        trace.add("error", f"{type(exc).__name__}: {_error_text(exc)}")
+        trace.path = Path("traces") / f"{slot}.failed.log"
+        print(f"error: {_error_text(exc)}", file=sys.stderr)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        return 1
+    finally:
+        trace.add("build_seconds", f"{time.monotonic() - build_started:.0f}")
+        trace.finish(status)
+
+
+def _trace_generic(workflow: dict[str, Any], trace: TraceWriter) -> None:
+    trace.add("nodes", len(workflow.get("nodes") or {}))
+    trace.add("global_nodes", len(workflow.get("global_nodes") or {}))
+    trace.add("sent_agent_config", "present" if _has_key(workflow, "agent_config") else "absent")
+    trace.add("sent_nulls", _count_nulls(workflow))
+    for step, step_tools in workflow_tools_by_step(workflow).items():
+        trace.add("step", f"{step}: tools={','.join(step_tools) if step_tools else 'none'}")
+
+
+def _freya_validate_with_repair(case: Any, workflow: dict[str, Any], slot: str, trace: TraceWriter, client: Any,
+                                generic: Any) -> dict[str, Any]:
+    """Freya's dry run; a rejection goes back to the model as a repair, at most FREYA_REPAIR_ROUNDS."""
+    for round_number in range(FREYA_REPAIR_ROUNDS + 1):
+        try:
+            freya.validate_workflow(slot, workflow)
+            trace.add("freya_validation", f"passed (round {round_number})")
+            return workflow
+        except Exception as exc:
+            error = _error_text(exc)
+            trace.add("freya_validation", f"rejected (round {round_number}): {error[:2000]}")
+            if round_number == FREYA_REPAIR_ROUNDS:
+                raise
+            workflow = generic.repair(case, workflow, ["Freya rejected the workflow: " + error[:4000]], trace, client)
+    return workflow
+
+
+def _generic_self_tests(case: Any, workflow: dict[str, Any], workflow_id: str, slot: str, trace: TraceWriter,
+                        client: Any, generic: Any, build_started: float) -> dict[str, Any]:
+    """T-047 (claude-dev2): chat self-tests, judge, repair, keep the best; skipped when absent."""
+    try:
+        import importlib
+
+        generic_selftest = importlib.import_module("builder.generic_selftest")
+    except ImportError as exc:
+        trace.add("self_test_summary", f"skipped=no self-test module ({exc})")
+        return workflow
+    current = {"workflow": workflow}
+
+    def save(candidate: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        candidate = _freya_validate_with_repair(case, candidate, slot, trace, client, generic)
+        saved = save_with_slot_check(freya, slot, candidate, warn=lambda message: trace.add("warning", message))
+        _ensure_published_version(saved["workflow_id"])
+        current["workflow"] = candidate
+        # The validated version is the one saved: the loop keeps it, so the export is what is live.
+        return saved["workflow_id"], candidate
+
+    def repair(problems: list[str], candidate: dict[str, Any] | None = None) -> dict[str, Any]:
+        return generic.repair(case, candidate or current["workflow"], problems, trace, client)
+
+    try:
+        best, results = generic_selftest.self_test_loop(
+            case, workflow, save, repair, trace, model=client, chat=freya_chat,
+            deadline=build_started + GENERIC_BUILD_SECONDS, workflow_id=workflow_id)
+        counts = {name: sum(getattr(item, "verdict", "") == name for item in results) for name in ("pass", "fail", "error")}
+        trace.add("self_test_summary", f"total={len(results)} pass={counts['pass']} fail={counts['fail']} "
+                                       f"error={counts['error']}")
+        print(f"self-test: total={len(results)} pass={counts['pass']} fail={counts['fail']} error={counts['error']}")
+        return best
+    except Exception as exc:
+        trace.add("self_test_summary", "platform_error=" + _error_text(exc))
+        return current["workflow"]
 
 
 if __name__ == "__main__":

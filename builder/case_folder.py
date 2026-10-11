@@ -20,12 +20,16 @@ from pathlib import Path
 from typing import Any, Callable
 from xml.etree import ElementTree
 
-TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".yaml", ".yml")
+TEXT_SUFFIXES = (".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".yaml", ".yml", ".eml", ".html", ".htm", ".xml")
 BRIEF_NAME = "brief.md"
 README_NAME = "readme.md"
 # Words in a file name that mark example material: test customers and sample calls. A plain
 # "customer" is not one ("customer-contact-policy" is policy); "customers" or "test" is.
-REFERENCE_WORDS = ("conversation", "sample", "transcript", "dialog", "dialogue", "example", "test", "customers")
+# A meeting transcript is not one: meetings record decisions (T-046, the final's pack).
+REFERENCE_WORDS = ("conversation", "sample", "example", "test", "customers")
+# A reference document longer than this is cut (the final's test-customer file was 700 KB, about
+# 175k tokens): the rest of the context must still fit and stay fast.
+REFERENCE_CHAR_LIMIT = 20000
 # Words that mark the service contract.
 CONTRACT_WORDS = ("contract", "openapi", "swagger", "api", "tool", "service", "endpoint")
 PDF_MEDIA_TYPE = "application/pdf"
@@ -115,7 +119,8 @@ def case_files(folder: Path) -> list[Path]:
 
     def order(path: Path) -> tuple[int, str]:
         name = path.name.lower()
-        rank = 0 if name == BRIEF_NAME else 1 if name == README_NAME else 2
+        depth = len(path.relative_to(folder).parts)
+        rank = 0 if name == BRIEF_NAME and depth == 1 else 1 if name == README_NAME and depth == 1 else 2
         return rank, str(path.relative_to(folder)).lower()
 
     return sorted(files, key=order)
@@ -170,6 +175,11 @@ def read_case(folder: Path, mock_url: str) -> Case:
         raise CaseFolderError(f"{folder}: no readable document")
     if openapi is not None:
         openapi = with_server(openapi, mock_url)
+    for item in documents:
+        if item.role == "reference" and len(item.text) > REFERENCE_CHAR_LIMIT:
+            cut = len(item.text) - REFERENCE_CHAR_LIMIT
+            item.text = item.text[:REFERENCE_CHAR_LIMIT] + f"\n[... {cut} more characters of this reference file left out]\n"
+            warnings.append(f"{item.name}: reference file cut to {REFERENCE_CHAR_LIMIT} characters ({cut} left out)")
     return Case(folder, documents, openapi, openapi_source, warnings)
 
 
@@ -185,7 +195,7 @@ def role_of(name: str, text: str) -> str:
         return "reference"
     # A transcript: most non-empty lines start with a speaker label.
     lines = [line for line in text.splitlines() if line.strip()]
-    speakers = [line for line in lines if re.match(r"\s*\**(agent|assistant|bot|customer|caller|user|bank)\**\s*:", line, re.I)]
+    speakers = [line for line in lines if re.match(r"\s*\**(agent|assistant|bot|customer|caller)\**\s*:", line, re.I)]
     if len(lines) >= 4 and len(speakers) * 2 >= len(lines):
         return "reference"
     return "policy"

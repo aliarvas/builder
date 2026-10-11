@@ -77,3 +77,19 @@ python3 builder/build.py organizer-sim/hidden-03-twists/brief.md organizer-sim/h
 ## Note: a variant not included
 
 Real APIs often have a path that differs from the `operationId` (for example `/members/confirm` with `operationId: confirm_member`). The builder names tools from the path (`_unique_tool_name`), so the brief's tool names would then not match. I kept the paths equal to the tool names, as in the kit and hidden-01, so this brief tests the policy twists. If you want that risk tested too, it is a separate small package.
+
+## Update (T-043): the seven fixed tool names
+
+The kit fixes the tool names and lets only fields and values change. So the hidden-03 tools now use the seven fixed names:
+
+| Was | Now |
+|---|---|
+| `confirm_member` | `verify_identity` |
+| `fetch_holdings` | `get_account` |
+| `log_pledge` | `create_promise` |
+| `file_remark` | `add_note` |
+| `book_return_call` | `schedule_callback` |
+| `route_to_team` | `transfer_to_agent` |
+| `end_interaction` | `close_call` |
+
+The fields and values are unchanged. `register_bereavement` was removed: the bereavement notice now asks nothing else and closes `ESTATE_NOTIFIED` with no tool call (rules 9 and 10). Rows 12 and 18 of the twist table above are superseded by this.

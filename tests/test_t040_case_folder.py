@@ -226,7 +226,7 @@ class CliTests(unittest.TestCase):
     def test_the_case_form_reaches_extraction_with_labels_pdf_and_mock(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = make_case(Path(tmp) / "case")
-            _, captured = self.run_build([str(folder), MOCK], tmp)
+            _, captured = self.run_build(["--collections", str(folder), MOCK], tmp)
         labels = [name for name, _ in captured["documents"]]
         self.assertEqual(["BRIEF.md", "README.md"], labels[:2])
         self.assertIn("policy/calendar.xlsx", labels)

@@ -110,7 +110,43 @@ _RECORDED_WORD = re.compile(r"\brecorded\b", re.IGNORECASE)
 RECORDING_NOTICE_WORDS = "we are recording this call"
 
 
-def present_recording_notice(text: str) -> tuple[str, str]:
+# T-044: the same rule in Turkish. A past, perfect, aorist or future recording verb on the call
+# ("bu görüşme kaydedilmiştir", "aramanız kaydedilir") becomes the present continuous; a present
+# form ("kaydediliyor", "kaydedilmektedir") stays; "may be" ("kaydedilebilir") stays with a note.
+_TR_CALL = r"(?:bu |)(?:görüşme(?:miz|niz)?|arama(?:mız|nız)?|çağrı(?:mız|nız)?|konuşma(?:mız|nız)?)"
+_TR_NOTICE = re.compile(
+    r"(?<![\w])" + _TR_CALL + r" (?:(kaydedil|kayıt altına alın)(dı|di|mıştır|miştir|mış|miş|ır|ir|acaktır|ecektir|acak|ecek|abilir|ebilir))(?![\w])",
+    re.IGNORECASE)
+TR_RECORDING_NOTICE_WORDS = "görüşmemiz kayıt altına alınıyor"
+
+
+def present_recording_notice_tr(text: str) -> tuple[str, str]:
+    """Turkish: (text, note) as ``present_recording_notice``."""
+    notes: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        if match.group(2).lower() in ("abilir", "ebilir"):
+            notes.append("the notice says the call may be recorded; saying it in the present would change its meaning")
+            return match.group(0)
+        before = text[:match.start()].rstrip()
+        start = not before or before[-1] in ".!?"
+        return TR_RECORDING_NOTICE_WORDS[0].upper() + TR_RECORDING_NOTICE_WORDS[1:] if start else TR_RECORDING_NOTICE_WORDS
+
+    rewritten = _TR_NOTICE.sub(replace, text)
+    if notes:
+        return rewritten, "'recorded' is left in the line because " + "; ".join(notes)
+    if rewritten != text:
+        return rewritten, f"recording notice said in the present: {rewritten!r}"
+    return text, ""
+
+
+def present_recording_notice(text: str, language: str = "en") -> tuple[str, str]:
+    if language == "tr":
+        return present_recording_notice_tr(text)
+    return present_recording_notice_en(text)
+
+
+def present_recording_notice_en(text: str) -> tuple[str, str]:
     """(text, note): the call-recording clause of a spoken line rewritten to the present
     continuous ("this call is recorded" -> "we are recording this call"). The note says what
     changed, or why a "recorded" left in the line was not touched; "" when nothing to say."""

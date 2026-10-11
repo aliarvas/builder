@@ -40,6 +40,8 @@ class AgentSpec:
     # Short fixed line spoken while the account is fetched (F-043); empty: the builder's
     # English default. Written in the call's language.
     wait_line: str = ""
+    # T-044: the currency word the documents use for amounts ("TL"); empty: none is said.
+    currency: str = ""
 
 
 @dataclass(frozen=True)
@@ -177,6 +179,7 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
         _string(_required(agent_data, "language", "agent"), "agent.language"),
         _rule(_required(agent_data, "introduction", "agent"), "agent.introduction"),
         _string(agent_data.get("wait_line", ""), "agent.wait_line", empty=True).strip(),
+        _string(agent_data.get("currency", ""), "agent.currency", empty=True).strip(),
     )
     stages = {name: _stage(root, name) for name in (
         "opening", "third_party", "identity", "account", "negotiation", "confirmation", "closing",
