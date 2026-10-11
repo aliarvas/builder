@@ -26,6 +26,17 @@ AMOUNT_KIND_NONE = FRAMEWORK_NONE_VALUE
 # F-060: offer_amount is a float field and the platform rejects "" (the old value stays). The
 # code resets it to this value, which no customer amount can be, and reads it as no amount.
 AMOUNT_NONE_VALUE = -1.0
+# F-061/F-062: per-product refusal and note state, owned by code.
+PRODUCT_NOTE_REASONS = "product_note_reasons"
+NOTES_WRITTEN = "notes_written"
+PERSUASION_USED = "persuasion_used_by_product"
+PERSUASION_ATTEMPT = "persuasion_attempt"
+PRODUCT_REFUSAL_STATE = "product_refusal_state"
+NOTE_STATE = "note_state"
+NOTE_NUMBER = "note_number"
+NOTE_PRODUCT_ID = "note_product_id"
+NOTE_REASON = "note_reason"
+NOTE_RESULT = "note_result_ok"
 # F-052: the customer accepts the date (and amount) the agent just proposed without naming it.
 OFFER_ACCEPTS = "offer_accepts_proposal"
 ACCEPTS_YES = "yes"
@@ -552,6 +563,25 @@ def handled_numbers(accepted):
     return numbers
 
 
+def json_value(name, empty):
+    # A call variable holding JSON (a list or a dict), or ``empty`` when unset or unreadable.
+    value = vars.get(name)
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or '0')
+        except Exception:
+            value = None
+    return value if isinstance(value, type(empty)) else empty
+
+
+def mark_note_reason(number, reason):
+    # F-061: the reason code chose for a product that ends without a promise.
+    if reason and number:
+        reasons = json_value(CONFIG['state']['note_reasons'], dict())
+        reasons[str(number)] = reason
+        vars[CONFIG['state']['note_reasons']] = json.dumps(reasons)
+
+
 def summary(accepted):
     # Read-back in spoken words (F-044). The product number in brackets is for the promise tool only.
     products = load_products()
@@ -592,6 +622,7 @@ vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
 vars[CONFIG['proposed_kind_var']] = 'full'
 vars[CONFIG['accepts_var']] = CONFIG['kind_none']
 vars[CONFIG['progress']] = 'none'
+vars[CONFIG['state']['persuasion_attempt']] = 0
 """
 
 
@@ -703,6 +734,7 @@ try:
         vars['offer_rejections'] = rejections
         if rejections >= rejected_offer_limit(product):
             exhausted = True
+            mark_note_reason(number, CONFIG['refused_reason'])
             noted = noted_numbers()
             if number not in noted:
                 noted.append(number)
@@ -742,6 +774,9 @@ if progress == 'more':
     if not upcoming and not message:
         message = CONFIG['messages'].get('product_unknown', '')
     if upcoming:
+        # F-062: the next product starts at its own persuasion attempt count.
+        vars[CONFIG['state']['persuasion_attempt']] = int(
+            json_value(CONFIG['state']['persuasion_used'], dict()).get(str(upcoming)) or 0)
         next_amount = limits(products_now[upcoming - 1])[3]
         message = (message + ' ' + CONFIG['messages'].get('more', '')).strip()
         message = message.replace('the [next]', the_name(upcoming)).replace(
@@ -800,6 +835,12 @@ try:
         if number not in noted:
             noted.append(number)
         vars[CONFIG['noted']] = json.dumps(noted)
+        if CONFIG.get('is_note_tool'):
+            # F-061: the note is written; the closing note loop skips this product.
+            written = json_value(CONFIG['state']['notes_written'], list())
+            if number not in written:
+                written.append(number)
+            vars[CONFIG['state']['notes_written']] = json.dumps(written)
     products = load_products()
     accepted = accepted_offers()
     if products and accepted and len(handled_numbers(accepted)) >= len(products):
@@ -808,6 +849,177 @@ except Exception:
     pass
 vars[CONFIG['progress']] = progress
 """
+
+
+PRODUCT_REFUSAL_BODY = """state = 'persuade'
+message = ''
+try:
+    products = load_products()
+    accepted = accepted_offers()
+    handled = handled_numbers(accepted)
+    # The product being discussed: the one the customer's turn names when it is still open
+    # (review finding 4), else the first one, in account order, not yet handled.
+    try:
+        named = int(str(vars.get(CONFIG['product_var'])).strip())
+    except Exception:
+        named = None
+    if named is not None and 1 <= named <= len(products) and named not in handled:
+        current = named
+    else:
+        current = next((index for index in range(1, len(products) + 1) if index not in handled), None)
+    intent = str(vars.get(CONFIG['intent_var']) or '')
+    end = intent in CONFIG['product_end_values']
+    if current is not None and not end and intent in CONFIG['attempt_values']:
+        rule = first_rule(products[current - 1], OFFER.get('persuasion_attempts', []))
+        if rule is None:
+            # No rule matches this product (review finding 5): no attempts, the product ends.
+            end = True
+        else:
+            used_by_product = json_value(CONFIG['state']['persuasion_used'], dict())
+            used = int(used_by_product.get(str(current)) or 0)
+            if used < int(rule.get('value')):
+                used_by_product[str(current)] = used + 1
+                vars[CONFIG['state']['persuasion_used']] = json.dumps(used_by_product)
+                vars[CONFIG['state']['persuasion_attempt']] = used + 1
+            else:
+                end = True
+    if end:
+        if current is not None:
+            mark_note_reason(current, CONFIG['refused_reason'])
+            noted = noted_numbers()
+            if current not in noted:
+                noted.append(current)
+            vars[CONFIG['noted']] = json.dumps(noted)
+        handled = handled_numbers(accepted)
+        upcoming = next((index for index in range(1, len(products) + 1) if index not in handled), None)
+        if upcoming is not None:
+            state = 'more'
+            product = products[upcoming - 1]
+            name = product_name(upcoming, product, len(products))
+            message = CONFIG['messages'].get('more', '').replace(
+                'the [next]', name if name.startswith('the ') else 'the ' + name).replace(
+                '[next_amount]', say_spoken_amount(limits(product)[3]))
+            vars[CONFIG['proposed_kind_var']] = 'full'
+            vars[CONFIG['state']['persuasion_attempt']] = int(
+                json_value(CONFIG['state']['persuasion_used'], dict()).get(str(upcoming)) or 0)
+        elif accepted:
+            state = 'ready'
+        else:
+            state = 'closing'
+            if intent not in CONFIG['product_end_values'] and CONFIG['product_end_values']:
+                # Attempts used up by count: the closing reads the refusal value.
+                vars[CONFIG['intent_var']] = CONFIG['product_end_values'][0]
+except Exception:
+    state = 'persuade'
+vars[CONFIG['refusal_state']] = state
+if state == 'more':
+    vars['offer_message'] = message
+    vars['offer_verdict'] = 'none'
+    vars[CONFIG['progress']] = 'more'
+if state != 'closing':
+    vars[CONFIG['intent_var']] = CONFIG['kind_none']
+"""
+
+
+NOTE_NEXT_BODY = """state = 'done'
+try:
+    notes = CONFIG['notes']
+    written = json_value(CONFIG['state']['notes_written'], list())
+    given_up = json_value('notes_given_up', list())
+    products = load_products()
+    numbers_by_id = dict((str(product.get(CONFIG['product_id_field'])), index)
+                         for index, product in enumerate(products, start=1))
+    # A closing special path that wrote a note with the same tool: that product is noted.
+    if vars.get('note_loop_started') != 'yes':
+        vars['note_loop_started'] = 'yes'
+        for result_var in CONFIG['note_special_results']:
+            if str(vars.get(result_var)).lower() == 'true':
+                args = json_value(notes['tool'] + '_args', dict())
+                noted_id = vars.get(notes['tool'] + '_args.' + notes['product_field'], args.get(notes['product_field']))
+                number = numbers_by_id.get(str(noted_id))
+                if not number:
+                    # The special path may name the product by its number (filled into the id by its hook).
+                    raw = vars.get(notes['tool'] + '_args.' + CONFIG['number_field'], args.get(CONFIG['number_field']))
+                    try:
+                        number = int(str(raw).strip())
+                    except Exception:
+                        number = None
+                if number and 1 <= number <= len(products) and number not in written:
+                    written.append(number)
+    # The result of the note just sent: written, or retried once and then given up.
+    pending = vars.get(CONFIG['note_number'])
+    if pending not in (None, ''):
+        pending = int(pending)
+        if str(vars.get(CONFIG['note_result'])).lower() == 'true':
+            written.append(pending)
+        else:
+            tries = json_value('note_attempts', dict())
+            tries[str(pending)] = int(tries.get(str(pending)) or 0) + 1
+            vars['note_attempts'] = json.dumps(tries)
+            if tries[str(pending)] >= 2:
+                given_up.append(pending)
+        vars[CONFIG['note_number']] = ''
+        vars[CONFIG['note_result']] = ''
+    vars[CONFIG['state']['notes_written']] = json.dumps(written)
+    vars['notes_given_up'] = json.dumps(given_up)
+    if str(vars.get('close_outcome') or '') not in notes['skip_outcomes']:
+        accepted = accepted_offers()
+        recorded = [int(item) for item in json_value(CONFIG['recorded_numbers'], list())]
+        reasons = json_value(CONFIG['state']['note_reasons'], dict())
+        close_reason = str(vars.get('close_reason') or '')
+        for index, product in enumerate(products, start=1):
+            if index in recorded or index in written or index in given_up:
+                continue
+            # Accepted but not recorded (attempts used up, or never reached): never a refusal.
+            if str(index) in accepted:
+                reason = notes['failed_reason']
+            elif reasons.get(str(index)):
+                reason = reasons.get(str(index))
+            elif close_reason in notes['reasons'] and close_reason != notes['failed_reason']:
+                reason = close_reason
+            else:
+                reason = notes['refused_reason']
+            vars[CONFIG['note_number']] = index
+            vars[CONFIG['note_product_id']] = str(product.get(CONFIG['product_id_field']))
+            vars[CONFIG['note_reason']] = reason
+            state = 'note'
+            break
+except Exception:
+    state = 'done'
+vars[CONFIG['note_state']] = state
+"""
+
+
+def product_refusal_code(spec: PhoneAgentSpec) -> str:
+    """F-062: a refusal of the product being discussed; counts persuasion attempts when the
+    spec gives them, notes the product as refused, and moves to the next product."""
+    negotiation = spec.negotiation.data
+    config = _full_config(spec, [])
+    config.update({
+        "intent_var": negotiation["intent_variable"],
+        "product_end_values": list(negotiation.get("product_end_values") or []),
+        "attempt_values": list(negotiation.get("attempt_values") or []),
+        "refusal_state": PRODUCT_REFUSAL_STATE,
+    })
+    return _prelude(spec, config) + PRODUCT_REFUSAL_BODY
+
+
+def note_next_code(spec: PhoneAgentSpec, recorded_numbers: str, special_results: list[str]) -> str:
+    """F-061: choose the next product that ended without a promise and the reason of its note."""
+    config = _full_config(spec, [])
+    config.update({
+        "notes": spec.closing.data["product_notes"],
+        "recorded_numbers": recorded_numbers,
+        "note_special_results": special_results,
+        "note_state": NOTE_STATE, "note_number": NOTE_NUMBER, "note_product_id": NOTE_PRODUCT_ID,
+        "note_reason": NOTE_REASON, "note_result": NOTE_RESULT,
+    })
+    return _prelude(spec, config) + NOTE_NEXT_BODY
+
+
+def _prelude(spec: PhoneAgentSpec, config: dict[str, Any]) -> str:
+    reader = product_reader_code(spec.account.data["products_variable"], spec.account.data["products_field"])
+    return PRELUDE.replace("__CONFIG__", _py_literal(config)).replace("__PRODUCT_READER__", reader)
 
 
 def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, Any]:
@@ -822,6 +1034,12 @@ def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, 
         "id_field": spec.confirmation.data["promise_product_id_field"],
         "date_field": spec.confirmation.data["promise_date_field"],
         "amount_field": spec.confirmation.data["promise_amount_field"],
+        # F-061/F-062: per-product refusal and note state.
+        "state": {
+            "note_reasons": PRODUCT_NOTE_REASONS, "notes_written": NOTES_WRITTEN,
+            "persuasion_used": PERSUASION_USED, "persuasion_attempt": PERSUASION_ATTEMPT,
+        },
+        "refused_reason": (spec.closing.data.get("product_notes") or {}).get("refused_reason", ""),
     })
     return config
 
@@ -855,6 +1073,7 @@ def special_noted_code(spec: PhoneAgentSpec, result_variable: str, tool_name: st
         "result_var": result_variable,
         "number_arg": tool_name + "_args." + number_field if has_number else "",
         "args_var": tool_name + "_args",
+        "is_note_tool": tool_name == (spec.closing.data.get("product_notes") or {}).get("tool"),
     })
     reader = product_reader_code(
         spec.account.data["products_variable"], spec.account.data["products_field"]

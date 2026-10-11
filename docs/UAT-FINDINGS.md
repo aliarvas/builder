@@ -30,6 +30,39 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-063: Each promise re-enters confirm_record, so the model may read back again
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A+B, PUB-11 (offline, `tasks/MULTI-READY-report.md` finding 5)
+- **Symptom:** With three accepted offers, `confirm_record -> confirmation_progress -> confirm_record` runs three times. The task says "read these back and ask for a clear confirmation" on every entry, so the model may repeat the read-back after the customer already confirmed. PUB-11 expects one read-back and one confirmation for all products.
+- **Root cause:** The record loop is driven by the model, one tool call per message.
+- **Category:** policy
+- **Fix / lesson:** After one confirmation, code runs the record loop (silent api steps, product from code).
+- **Status:** fixed offline (F-063): `confirm_record` has no tool; after one read-back and one yes, code records each accepted product (`record_next` → silent `record_promise` → `confirmation_progress`), continuing past a product whose attempts are used up; a partial failure is said ("could not record every promise"). Reviewed (re-review: merge). Retest pending (PUB-11; long passthrough chain [TO-CONFIRM]).
+- **Retest:** -
+
+### F-062: One product's refusal ends the whole negotiation
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A+B, PUB-12 (offline, MULTI-READY finding 2)
+- **Symptom:** After the card is accepted, refusing the personal loan routes straight to the read-back; the car loan is never discussed. Persuasion attempts per product are counted only in the prompt.
+- **Root cause:** The "attempts used up" intent routes to `confirm_record`/`closing`, not to a code step that marks the current product and moves on.
+- **Category:** policy / multi-product
+- **Fix / lesson:** A code step marks the product refused (reason from spec) and continues with the next product (`more`), or goes to read-back/closing when none is left. Per-product attempt counting in code where the spec gives a number.
+- **Status:** fixed offline (F-061/062): spec flags for per-product refusals and persuasion attempts (evidence-checked); a `product_refusal` code step marks the product and continues with the next one. Reviewed (re-review: merge). Retest pending after a fresh A+B extraction (PUB-12).
+- **Retest:** -
+
+### F-061: No step writes the notes the brief requires for products without a promise
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A+B, PUB-12 (offline, MULTI-READY finding 1)
+- **Symptom:** The expected ledger has `add_note refused` for two products. No negotiation, record or closing step has `add_note`, and no code step writes notes. A note rule after two failed `create_promise` calls is in the prompt of a step without the tool.
+- **Root cause:** Notes exist only in product-level special paths; per-product outcome notes were never modelled. In two extracted specs the rule is in `coverage.unmapped`.
+- **Category:** ledger / multi-product
+- **Fix / lesson:** Spec data for "note per product without a promise" (reasons as values), a code-owned per-product note state, and a silent `add_note` loop before closing (skipped when the spec says so, e.g. after a transfer). Code, not the model, guarantees the ledger.
+- **Status:** fixed offline (F-061/062): optional `closing.product_notes` spec block; code keeps a per-product note reason and a silent `add_note` loop runs before closing (skipped for the spec's skip outcomes); accepted but unrecorded products get the failure reason, never refused; an unrenderable block is dropped with a warning. Reviewed (re-review: merge). Retest pending after a fresh A+B extraction (PUB-12).
+- **Retest:** -
+
 ### F-060: The offer check resets the numeric amount with an empty value, which the platform rejects
 
 - **Date:** 2026-10-11
@@ -142,7 +175,7 @@ PUB-09 (restructuring request) **passed the ledger** on version 13: the global s
 - **Root cause:** (1) The amount is taken only from the customer's words, but in this brief the agent proposes every amount, so a customer who only names a date accepts the proposed amount. (2) The negotiate prompt lets the model reason about dates and limits when the code verdict is missing (`offer_verdict = none`), and the model treats the code step's name as a tool. Also `offer_setup` writes a value the `offer_amount_kind` enum rejects ("rejected by schema validation").
 - **Category:** routing / honesty
 - **Fix / lesson:** Route to `check_offer` when a date is set. A missing amount defaults to the amount the agent last proposed: track the proposed kind (full by default, minimum after a floor offer) in state, and let the code fill the number. The negotiate prompt must never state a date or amount limit that is not in `offer_message`, and must not name internal steps. Fix the enum reset in `offer_setup` (write an allowed value or leave the variable unset).
-- **Status:** open
+- **Status:** fixed offline (657e6a6, F-052 follow-up 12d9226): a date alone routes to `check_offer`, the amount defaults to the agent's last proposal, the prompt states no limit outside `offer_message`, and enum resets use allowed values. PUB-07 passed the ledger on version 13; a retest of the version 13 judge risks (F-053, F-054) is pending.
 - **Retest:** -
 
 Also seen in this run: no 502 at the end of identity (F-050 fix works live); the debt statement and the first persuasion were correct; the Turkish platform filler appeared once more during a slow turn (F-043).

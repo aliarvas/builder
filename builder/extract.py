@@ -39,6 +39,7 @@ from .prompts import (
     PromptDefinition,
     render_prompt,
 )
+from .product_notes import NOTES_DROPPED
 from .spoken import agent_directed, spoken_words
 from .spec import (
     CLOSE_STATE_NAMES,
@@ -290,9 +291,14 @@ class _Checker:
 
     def __init__(
         self, brief: str, contract: dict[str, Any], openapi_strings: set[str], *, spoken_soft: bool = False,
+        optional_soft: bool = False,
     ) -> None:
         # In the last round a spoken-text problem is a warning: the renderer then uses its fallback.
         self.spoken_soft = spoken_soft
+        # In the last round a problem in an optional block (OPTIONAL_BLOCKS) drops the block
+        # with a warning instead of failing the build (F-061/F-062 review finding 2).
+        self.optional_soft = optional_soft
+        self.dropped: set[str] = set()
         self.brief = brief
         self.brief_normal = _normal(brief)
         self.contract = contract
@@ -318,6 +324,14 @@ class _Checker:
 
     def warn(self, path: str, message: str) -> None:
         self.warnings.append((path, message))
+
+    def optional(self, path: str, message: str, block: str) -> None:
+        """An error in an optional block: repaired in earlier rounds, dropped in the last."""
+        if self.optional_soft:
+            self.dropped.add(block)
+            self.warn(path, f"{message}; optional block {block} dropped")
+        else:
+            self.error(path, message)
 
     # Brief evidence -------------------------------------------------------
     def in_brief(self, value: str) -> bool:
@@ -566,6 +580,21 @@ def _check_flow(data: dict[str, Any], check: _Checker) -> None:
     negotiation = _routed(data["negotiation"].get("intents"), NEGOTIATION_ROUTES, "negotiation.intents", check, pairs=True)
     if negotiation and not _count_route(negotiation, "readback"):
         check.error("negotiation.intents", "needs a value with route readback")
+    # F-062: per_product (route end) and uses_attempt (route stay) are optional booleans.
+    for index, entry in enumerate(data["negotiation"].get("intents") or []):
+        if not isinstance(entry, dict):
+            continue
+        for flag, route in (("per_product", "end"), ("uses_attempt", "stay")):
+            value = entry.get(flag, False)
+            where = f"negotiation.intents[{index}].{flag}"
+            if not isinstance(value, bool):
+                check.optional(where, "must be true or false", "intent_flags")
+            elif value and entry.get("route") != route:
+                check.optional(where, f"may be true only with route {route}", "intent_flags")
+    if any(isinstance(e, dict) and e.get("uses_attempt") for e in data["negotiation"].get("intents") or []) and not any(
+            isinstance(e, dict) and e.get("per_product") for e in data["negotiation"].get("intents") or []):
+        check.optional("negotiation.intents", "a uses_attempt value needs a per_product end value (the refusal "
+                       "when the attempts are used up)", "intent_flags")
     confirmation = data["confirmation"]
     _positive_int(check, "confirmation.max_attempts_per_product", confirmation.get("max_attempts_per_product"))
     intents = _routed(confirmation.get("intents"), CONFIRMATION_ROUTES, "confirmation.intents", check, pairs=False)
@@ -579,6 +608,26 @@ def _check_offer(data: dict[str, Any], check: _Checker) -> None:
         check.error("offer", "must be an object")
         return
     check.rules(data["offer"].get("rules", []), "offer.rules")
+    attempts = data["offer"].get("persuasion_attempts", [])
+    if attempts in (None, []):
+        return
+    where = "offer.persuasion_attempts"
+    if not isinstance(attempts, list):
+        check.optional(where, "must be an array of {when, value} rules or []", "persuasion_attempts")
+        return
+    for index, item in enumerate(attempts):
+        value = item.get("value") if isinstance(item, dict) else None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            check.optional(f"{where}[{index}].value", "must be a positive integer", "persuasion_attempts")
+        elif not check.count_written(value):
+            check.optional(f"{where}[{index}].value", f"{value} is not written in the documents as a number "
+                           "or a word; copy the persuasion attempts the documents give", "persuasion_attempts")
+    source = (data.get("sources") or {}).get(where)
+    if not isinstance(source, str) or not source.strip():
+        check.optional(f"sources.{where}", "needs a source excerpt copied from the documents for the "
+                       "persuasion attempts", "persuasion_attempts")
+    else:
+        check.excerpt(f"sources.{where}", source)
 
 
 def _check_outcomes(data: dict[str, Any], check: _Checker) -> None:
@@ -624,6 +673,50 @@ def _check_outcomes(data: dict[str, Any], check: _Checker) -> None:
                 check.error(f"derived_states.{state}", "needs a short reason for the chosen row")
     if not isinstance(data.get("special_paths"), list):
         check.error("special_paths", "must be an array (empty when the brief has none)")
+    if isinstance(closing, dict) and closing.get("product_notes") is not None:
+        _check_product_notes(closing["product_notes"], rows, check)
+
+
+def _check_product_notes(notes: Any, rows: list[Any], check: _Checker) -> None:
+    """F-061: the note rule for products without a promise; tool fields from the contract."""
+    where = "closing.product_notes"
+
+    def fail(path: str, message: str) -> None:
+        check.optional(path, message, "product_notes")
+
+    if not isinstance(notes, dict):
+        fail(where, "must be an object or null")
+        return
+    tool = notes.get("tool")
+    if not isinstance(tool, str) or not check.tool_fields(tool, "request"):
+        fail(where + ".tool", "must be a tool of the contract with request fields")
+        return
+    fields = check.tool_fields(tool, "request")
+    for key in ("product_field", "reason_field"):
+        if notes.get(key) not in fields:
+            fail(f"{where}.{key}", f"must be a request field of {tool}: one of {sorted(fields)}")
+    reason_field = fields.get(notes.get("reason_field"), {})
+    reasons = notes.get("reasons")
+    if not isinstance(reasons, list) or not reasons or not all(isinstance(item, str) and item for item in reasons):
+        fail(where + ".reasons", "must list the note reason values")
+        reasons = []
+    allowed = reason_field.get("enum") if isinstance(reason_field, dict) else None
+    for value in reasons:
+        if allowed and value not in allowed:
+            fail(where + ".reasons", f"{value!r} is not in the {tool} enum {allowed}")
+        elif not allowed and not check.in_brief(value):
+            fail(where + ".reasons", f"{value!r} does not appear in the documents")
+    for key in ("refused_reason", "failed_reason"):
+        if notes.get(key) not in reasons:
+            fail(f"{where}.{key}", f"must be one of reasons {reasons}")
+    skip = notes.get("skip_outcomes", [])
+    known = {row.get("outcome") for row in rows if isinstance(row, dict)}
+    if not isinstance(skip, list) or not set(skip) <= known:
+        fail(where + ".skip_outcomes", f"must list outcomes of the closing table: {sorted(map(str, known))}")
+    if not isinstance(notes.get("source"), str) or not notes["source"].strip():
+        fail(where + ".source", "needs a source excerpt copied from the documents")
+    else:
+        check.excerpt(where + ".source", notes["source"])
 
 
 GROUP_CHECKS = {
@@ -655,6 +748,24 @@ def _call_variable(check: _Checker, path: str, name: Any) -> None:
 
 def _values(entries: list[dict[str, Any]], route: str | None = None) -> list[str]:
     return [entry["value"] for entry in entries if route is None or entry.get("route") == route]
+
+
+OPTIONAL_BLOCKS = ("product_notes", "persuasion_attempts", "intent_flags")
+
+
+def drop_optional(groups: dict[str, dict[str, Any]], blocks: set[str]) -> dict[str, dict[str, Any]]:
+    """Group replies without the named optional blocks (F-061/F-062 review finding 2). The
+    per-product flags carry the persuasion count, so dropping them drops it too."""
+    groups = copy.deepcopy(groups)
+    if "product_notes" in blocks and isinstance(groups["outcomes"].get("closing"), dict):
+        groups["outcomes"]["closing"]["product_notes"] = None
+    if "intent_flags" in blocks:
+        for entry in groups["flow"].get("negotiation", {}).get("intents") or []:
+            if isinstance(entry, dict):
+                entry["per_product"] = entry["uses_attempt"] = False
+    if blocks & {"persuasion_attempts", "intent_flags"} and isinstance(groups["offer"].get("offer"), dict):
+        groups["offer"]["offer"]["persuasion_attempts"] = []
+    return groups
 
 
 def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -710,6 +821,11 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "intent_values": _values(negotiation_in["intents"]),
         "confirm_values": _values(negotiation_in["intents"], "readback"),
         "close_values": _values(negotiation_in["intents"], "end"),
+        # F-062: refusals of one product (route end) and refusals that use one persuasion attempt.
+        "product_end_values": [entry["value"] for entry in negotiation_in["intents"]
+                               if entry.get("route") == "end" and entry.get("per_product") is True],
+        "attempt_values": [entry["value"] for entry in negotiation_in["intents"]
+                           if entry.get("route") == "stay" and entry.get("uses_attempt") is True],
     }
     confirmation_in = flow["confirmation"]
     confirmation = {
@@ -788,6 +904,7 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "rules": closing_in.get("rules", []),
             "outcome_field": closing_in.get("outcome_field"),
             "reason_field": closing_in.get("reason_field"),
+            **({"product_notes": closing_in["product_notes"]} if closing_in.get("product_notes") else {}),
         },
         "offer": offer,
         "provenance": provenance,
@@ -797,6 +914,11 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def _cross_group_checks(groups: dict[str, dict[str, Any]], check: _Checker) -> None:
     """Routed closing pairs must be rows of the closing table (owned by other groups)."""
+    intents = groups["flow"].get("negotiation", {}).get("intents") or []
+    if groups["offer"].get("offer", {}).get("persuasion_attempts") and not any(
+            isinstance(entry, dict) and entry.get("uses_attempt") is True for entry in intents):
+        check.optional("offer.persuasion_attempts", "needs a negotiation intent with uses_attempt true (the "
+                       "refusal that uses one attempt)", "persuasion_attempts")
     rows = groups["outcomes"].get("outcomes", [])
     pairs = {(row.get("outcome"), row.get("reason") or "") for row in rows if isinstance(row, dict)}
     listed = ", ".join(f"{outcome}/{reason or '-'}" for outcome, reason in sorted(pairs, key=str))
@@ -1047,7 +1169,11 @@ def spec_problems(
     try:
         from .workflow import build_spec_workflow  # local import: workflow imports spec helpers
 
-        build_spec_workflow(parsed, tools, [])
+        render_warnings: list[str] = []
+        build_spec_workflow(parsed, tools, render_warnings)
+        for warning in render_warnings:
+            if warning.startswith(NOTES_DROPPED):
+                check.optional("closing.product_notes", warning, "product_notes")
     except (SpecError, KeyError, ValueError) as exc:
         check.error(_path_in(str(exc)), f"render check: {exc}")
         return None
@@ -1141,19 +1267,24 @@ def extract_spec(
     parsed: PhoneAgentSpec | None = None
     check = _Checker(brief, contract, openapi_strings)
     for round_number in range(MAX_REPAIR_ROUNDS + 1):
-        check = _Checker(brief, contract, openapi_strings, spoken_soft=round_number == MAX_REPAIR_ROUNDS)
+        last = round_number == MAX_REPAIR_ROUNDS
+        check = _Checker(brief, contract, openapi_strings, spoken_soft=last, optional_soft=last)
         failing: dict[str, list[str]] = {}
         for name, conversation in conversations.items():
             if conversation.reply is None:
                 failing[name] = [conversation.parse_error]
                 continue
-            group_check = _Checker(brief, contract, openapi_strings)
+            group_check = _Checker(brief, contract, openapi_strings, optional_soft=last)
             GROUP_CHECKS[name](conversation.reply, group_check)
+            check.dropped |= group_check.dropped
+            check.warnings.extend(warning for warning in group_check.warnings if "optional block" in warning[1])
             if group_check.errors:
                 failing[name] = [f"{path}: {message}" for path, message in group_check.errors]
         if not failing:
             replies = {name: conversation.reply for name, conversation in conversations.items()}
             _cross_group_checks(replies, check)
+            if check.dropped:
+                replies = drop_optional(replies, check.dropped)
             candidate = merge_groups(replies)
             parsed = spec_problems(candidate, contract, tools, check)
             for path, message in check.errors:

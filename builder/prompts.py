@@ -214,12 +214,16 @@ OFFER_VERDICT_MESSAGES = PromptDefinition(
     "amount_too_high: The amount due on the [product] is [amount]. Could you pay [amount]?",
 )
 CONFIRM_TASK_TEMPLATE = PromptDefinition(
-    "CONFIRM_TASK_TEMPLATE", "Reads back and records a confirmed arrangement.", "phone agent",
+    "CONFIRM_TASK_TEMPLATE", "Reads back the checked offers once and asks for one confirmation; the program "
+    "records them (F-063).", "phone agent",
     "builder/workflow.py — confirm_record",
-    "Checked offers: {{offers_summary}}\nRead these back in these words and ask for a clear confirmation. "
-    "The product number in square brackets is only for the promise tool: never say it to the customer. "
-    "After a clear yes, call the promise tool once per product, giving only its product number. "
-    "Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.\nRules:\n{rules}",
+    "Checked offers: {{offers_summary}}\nRead all of these back once, in these words, and ask for one clear "
+    "confirmation. Never say the product number in square brackets. "
+    "After a clear yes, say nothing more: the program records the promises and the closing tells the customer. "
+    "Never say a promise is recorded. "
+    "Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.\n"
+    "You have no tool here: where a rule below speaks of calling, retrying or checking the promise tool, "
+    "the program does that after the yes.\nRules:\n{rules}",
     ("{rules}",),
 )
 ACCOUNT_WAIT_LINE = PromptDefinition(
@@ -231,6 +235,21 @@ REVISE_ASK_LINE = PromptDefinition(
     "REVISE_ASK_LINE", "Fixed line when the customer wants to change the read-back (F-053).",
     "phone agent (fixed spoken line)", "builder/workflow.py — revise_ask",
     "Of course. Which date or amount would you like instead?",
+)
+PERSUASION_STATE_LINE = PromptDefinition(
+    "PERSUASION_STATE_LINE", "Tells the negotiation step which persuasion attempt it is on (F-062).", "phone agent",
+    "builder/product_notes.py — negotiate (only when the spec gives persuasion attempts)",
+    "Persuasion attempt for the product being discussed, counted by the bank system: {attempt} (0: no attempt "
+    "made yet). The bank system moves on to the next product when its attempts are used up.",
+    ("{attempt}",),
+)
+PRODUCT_INTENT_DESCRIPTION = PromptDefinition(
+    "PRODUCT_INTENT_DESCRIPTION", "Extraction meaning of the per-product refusal values (F-062).", "extraction model",
+    "builder/product_notes.py — negotiate extraction field",
+    "Values {product_end} end only the product being discussed; the call goes on with the other products. "
+    "Values {attempt} are a flat refusal or a non-answer about the product being discussed, which uses one "
+    "persuasion attempt.",
+    ("{product_end}", "{attempt}"),
 )
 CLOSING_FALLBACK_SAY = PromptDefinition(
     "CLOSING_FALLBACK_SAY", "Spoken goodbye when the matched outcome row has an empty closing sentence.", "phone agent (fixed spoken line)",
@@ -269,6 +288,13 @@ SPECIAL_TOOL_FAILED_SAY = PromptDefinition(
     "for that state (F-059).",
     "phone agent (fixed spoken line)", "builder/workflow.py — closing code, special_tool_failed",
     "I am sorry, I could not complete that request right now.",
+)
+PROMISE_NOT_ALL_RECORDED_SAY = PromptDefinition(
+    "PROMISE_NOT_ALL_RECORDED_SAY",
+    "Said before the closing sentence when a promise could not be recorded and the outcome row is not the "
+    "spec's own row for that (for example another promise was recorded) (F-063).",
+    "phone agent (fixed spoken line)", "builder/workflow.py — closing code, promise_failed",
+    "I am sorry, I could not record every promise.",
 )
 CALLBACK_COLLECT_RULE = PromptDefinition(
     "CALLBACK_COLLECT_RULE",
@@ -487,11 +513,16 @@ EXTRACT_FLOW_TASK = PromptDefinition(
     ' "negotiation": {"rules": [RULE] (what to ask first, what counts as a refusal, persuasion attempts and what each '
     "proposes, what never to offer, per-product handling),\n"
     '  "intents": [{"value": "snake_case code", "meaning": "...", "route": "readback | end | stay", '
-    '"outcome": "...", "reason": "...", "source": "..."}]\n'
+    '"outcome": "...", "reason": "...", "per_product": true or false, "uses_attempt": true or false, '
+    '"source": "..."}]\n'
     "   (the customer's state after each turn. route readback: an agreed date and amount are ready to read back. "
     "end: the customer refuses any arrangement after the allowed attempts; give the closing-table outcome and reason. "
     "stay: keep negotiating. At least one readback and one end value. Only refusing to pay or to talk may use "
-    "route end. Situations with their own sentence or tool (the payment was already made, the debt is denied, "
+    "route end. per_product true (route end only): the refusal ends only the product being discussed when the "
+    "documents handle several products one at a time; the call goes on with the next product and closes with this "
+    "outcome only when no product is left. uses_attempt true (route stay only): a flat refusal or a non-answer that "
+    "uses one persuasion attempt; code counts these per product when the offer section gives persuasion_attempts. "
+    "Leave both false when the documents give no such rule. Situations with their own sentence or tool (the payment was already made, the debt is denied, "
     "a transfer is requested, financial difficulty) are special paths, extracted elsewhere: never list them here, or the call would close without "
     "the sentence or the tool.)},\n"
     ' "confirmation": {"rules": [RULE] (read-back, explicit confirmation, changes, one promise per product, '
@@ -542,7 +573,10 @@ EXTRACT_OFFER_TASK = PromptDefinition(
     "out-of-policy offers; give the source \"fallback: no invalid-offer limit in the documents\"),\n"
     '  "max_rejected_offers_by_product": [{"when": [CONDITION], "value": integer, at least 2}] (only if the documents '
     "set different invalid-offer limits for different products; otherwise []. Persuasion attempts per band are "
-    "not invalid-offer limits)\n"
+    "not invalid-offer limits),\n"
+    '  "persuasion_attempts": [{"when": [CONDITION], "value": integer, at least 1}] (the number of persuasion '
+    "attempts after a flat refusal, per product, when the documents give it, for example per band; first match "
+    "wins; [] when the documents give no number)\n"
     " },\n"
     " CONDITION is {\"field\": \"product field\", and one or more of \"min\": number, \"max\": number, "
     "\"equals\": value, \"in\": [values]} (min and max are inclusive). Product fields come from the account tool's "
@@ -562,7 +596,14 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     ' "closing": {"rules": [RULE] (how the call ends; most are enforced_by closing_outcome. An instruction for '
     "what the agent does during the call, such as notes or transfers, belongs to the step where it happens, not here), "
     '"outcome_field": "closing tool request field for the outcome", '
-    '"reason_field": "closing tool request field for the reason"},\n'
+    '"reason_field": "closing tool request field for the reason", '
+    '"product_notes": null or {"tool": "note tool name", "product_field": "note tool request field for the product id", '
+    '"reason_field": "note tool request field for the reason", "reasons": ["every reason value the documents allow"], '
+    '"refused_reason": "reason for a product the customer turned down or never agreed to", '
+    '"failed_reason": "reason for a product whose promise could not be recorded", '
+    '"skip_outcomes": ["call outcomes after which no note is added at all, for example a transfer"], '
+    '"source": "excerpt"} (only when the documents require a note for each product that ended without a promise; '
+    "code then writes those notes before the closing tool; null otherwise)},\n"
     ' "outcomes": [{"outcome": "...", "reason": "... or \\"\\"", "when": RULE, "say": RULE (text: the exact words '
     "the agent says to the customer before the closing tool, word for word, read aloud as written; include every "
     "sentence the brief requires in that situation and end with a goodbye. Never an instruction such as "
@@ -691,6 +732,7 @@ PROMPTS = (
     SPECIAL_ASK_TASK_TEMPLATE,
     SPECIAL_SAY_FALLBACK,
     SPECIAL_TOOL_FAILED_SAY,
+    PROMISE_NOT_ALL_RECORDED_SAY,
     SPECIAL_ASK_PHRASED_TEMPLATE,
     CALLBACK_COLLECT_RULE,
     CALLBACK_DAY_DESCRIPTION,

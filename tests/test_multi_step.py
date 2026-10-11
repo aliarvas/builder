@@ -625,7 +625,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 nodes = workflow["nodes"]
                 successors = graph(workflow)
                 # Remove the close path; then end_call must be unreachable from everywhere else.
-                close_path = {"closing", "closing_say", "close_attempt", "close_record"}
+                close_path = {"closing", "closing_say", "close_attempt", "close_record", "note_next", "note_record"}
                 reached = {"opening"}
                 pending = ["opening"]
                 while pending:
@@ -634,7 +634,13 @@ class MultiStepWorkflowTests(unittest.TestCase):
                             reached.add(target)
                             pending.append(target)
                 self.assertNotIn("end_call", reached)
-                self.assertEqual(["closing_say"], edges(nodes["closing"]))
+                if "note_next" in nodes:
+                    # F-061: the note loop runs between the outcome and the goodbye.
+                    self.assertEqual(["note_next"], edges(nodes["closing"]))
+                    self.assertEqual(["note_record", "closing_say"], edges(nodes["note_next"]))
+                    self.assertEqual(["note_next"], edges(nodes["note_record"]))
+                else:
+                    self.assertEqual(["closing_say"], edges(nodes["closing"]))
                 self.assertEqual(["end_call", "close_attempt"], edges(nodes["closing_say"]))
                 self.assertEqual(["close_record"], edges(nodes["close_attempt"]))
                 # Tagging steps (states no variable identifies) only write their state.
@@ -689,7 +695,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
                                                              "offers_accepted_count": 1})]),
             ("promise_failed", [("confirmation_progress", {
                 **verified, "promise_result_ok": "false", "offers_accepted_count": 1,
-                "create_promise_args." + confirmation["product_number_field"]: 1,
+                "promise_record_number": 1,
                 "promise_attempts_1": confirmation["max_attempts_per_product"] - 1,
             })]),
             ("turn_limit", [(self.render(index)["nodes"]["negotiate"]["max_turn_transition"], dict(verified))]),
@@ -901,12 +907,13 @@ class MultiStepWorkflowTests(unittest.TestCase):
     def test_tools_are_scoped(self):
         nodes = self.render()["nodes"]
         self.assertEqual(["verify_identity"], tool_names(nodes["identity"]))
-        self.assertEqual(["create_promise"], tool_names(nodes["confirm_record"]))
+        # F-063: no model tool records promises; the silent record_promise step runs it.
+        self.assertEqual([], tool_names(nodes["confirm_record"]))
+        self.assertEqual(["create_promise"], [a["function"]["name"] for a in nodes["record_promise"]["pre_actions"]])
         for key, node in nodes.items():
             if key != "identity":
                 self.assertNotIn("verify_identity", tool_names(node))
-            if key != "confirm_record":
-                self.assertNotIn("create_promise", tool_names(node))
+            self.assertNotIn("create_promise", tool_names(node))
             self.assertNotIn("close_call", tool_names(node))
 
     def test_freya_extraction_and_passthrough_wire_shapes(self):
@@ -974,7 +981,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
             exec(code, {"config": config, "vars": {"late_products": products}, "json": json})
 
     def test_promise_values_come_from_checked_offers(self):
-        tool = self.render(1)["nodes"]["confirm_record"]["tools"][0]
+        tool = self.render(1)["nodes"]["record_promise"]["pre_actions"][0]
         body = tool["function"]["parameters"]["properties"]["body"]
         self.assertEqual({"customer_id", "selected_product_number"}, set(body["properties"]))
         hook = tool["pre_process_code"]
@@ -1000,28 +1007,26 @@ class MultiStepWorkflowTests(unittest.TestCase):
     def test_confirmation_progress_supports_multiple_products_and_one_retry(self):
         node = self.render(1)["nodes"]["confirmation_progress"]
         code = node["pre_actions"][0]["function"]["parameters"]["properties"]["code"]["default"]
-        variables = {"agreed_item_count": 2, "create_promise_args.selected_product_number": 1, "promise_result_ok": True}
+        variables = {"agreed_item_count": 2, "promise_record_number": 1, "promise_result_ok": True}
         exec(code, {"vars": variables})
         self.assertEqual("continue", variables["promise_progress_state"])
         self.assertEqual("consumed", variables["promise_result_ok"])
-        variables.update({"create_promise_args.selected_product_number": 2, "promise_result_ok": True})
+        variables.update({"promise_record_number": 2, "promise_result_ok": True})
         exec(code, {"vars": variables})
         self.assertEqual("complete", variables["promise_progress_state"])
+        self.assertEqual([1, 2], json.loads(variables["promises_recorded_numbers"]))
 
-        variables = {"agreed_item_count": 1, "create_promise_args.selected_product_number": 1, "promise_result_ok": False}
+        variables = {"agreed_item_count": 1, "promise_record_number": 1, "promise_result_ok": False}
         exec(code, {"vars": variables})
         self.assertEqual("retry", variables["promise_progress_state"])
         variables["promise_result_ok"] = False
         exec(code, {"vars": variables})
         self.assertEqual("exhausted", variables["promise_progress_state"])
 
-        variables = {
-            "offers_accepted_count": 1,
-            "create_promise_args": json.dumps({"selected_product_number": 1}),
-            "create_promise_response.data.ok": "true",
-        }
+        # A call that returned no mapped result (HTTP error) counts as a failed attempt.
+        variables = {"offers_accepted_count": 1, "promise_record_number": 1, "promise_result_ok": ""}
         exec(code, {"vars": variables})
-        self.assertEqual("complete", variables["promise_progress_state"])
+        self.assertEqual("retry", variables["promise_progress_state"])
 
     def test_opening_unclear_counter_close_and_stay_routes(self):
         nodes = self.render()["nodes"]
@@ -1099,18 +1104,18 @@ class MultiStepWorkflowTests(unittest.TestCase):
 
     def test_model_product_field_is_never_written_as_a_workflow_variable(self):
         workflow = self.render(1)
-        tool = workflow["nodes"]["confirm_record"]["tools"][0]
+        tool = workflow["nodes"]["record_promise"]["pre_actions"][0]
         hook = tool["pre_process_code"]
         progress = workflow["nodes"]["confirmation_progress"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]["default"]
         self.assertNotIn("vars['selected_product_number'] =", hook)
-        self.assertIn("create_promise_args.selected_product_number", progress)
+        # F-063: the record loop sends its own variable, never the model field's name.
+        number = tool["function"]["parameters"]["properties"]["body"]["properties"]["selected_product_number"]
+        self.assertEqual("{{promise_record_number}}", number["default"])
+        self.assertIn("promise_record_number", progress)
         self.assertNotIn("vars.pop('promise_result_ok'", progress)
         transitions = workflow["nodes"]["confirm_record"]["transitions"]
-        result_transition = next(item for item in transitions if item["target_node"] == "confirmation_progress")
-        self.assertEqual(
-            ["true", "True", "false", "False"],
-            [condition["operand"] for condition in result_transition["condition"]["conditions"]],
-        )
+        record = next(item for item in transitions if item["target_node"] == "record_next")
+        self.assertEqual(["confirmed"], [condition["operand"] for condition in record["condition"]["conditions"]])
 
     def test_special_paths_are_global_nodes_with_scoped_exclusions(self):
         def exits(item):
@@ -1511,7 +1516,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         allowed_fixed_tools = allowed_fixed_tools | CALL_VARIABLES
         # Common words allowed only in the files that use them for their own meaning.
         file_scoped = {
-            "type": {"tools_from_openapi.py", "workflow.py", "llm.py"},  # JSON schema / Freya node / Anthropic block keyword
+            "type": {"tools_from_openapi.py", "workflow.py", "llm.py", "product_notes.py"},  # JSON schema / Freya node / Anthropic block keyword
             "default": {"spec.py", "tools_from_openapi.py", "workflow.py"},  # schema default, default row
             "close": {"spec.py", "workflow.py"},                     # special path then=close
             "return": {"spec.py", "workflow.py"},                    # special path then=return

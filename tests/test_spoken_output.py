@@ -108,7 +108,7 @@ class ReadBackTests(unittest.TestCase):
         self.assertNotIn("p-card", facts)
 
     def test_confirm_prompt_keeps_the_number_for_the_tool_only(self):
-        self.assertIn("never say it to the customer", CONFIRM_TASK_TEMPLATE.text)
+        self.assertIn("Never say the product number in square brackets", CONFIRM_TASK_TEMPLATE.text)
         self.assertIn("{{offers_summary}}", nodes_for(FIXTURE_A)["confirm_record"]["task_message"])
 
     def test_naming_fields_are_optional_strings(self):

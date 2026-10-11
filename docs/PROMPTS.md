@@ -237,14 +237,15 @@ amount_too_high: The amount due on the [product] is [amount]. Could you pay [amo
 
 ## CONFIRM_TASK_TEMPLATE
 
-- Purpose: Reads back and records a confirmed arrangement.
+- Purpose: Reads back the checked offers once and asks for one confirmation; the program records them (F-063).
 - Receiver: phone agent
 - Used at: builder/workflow.py — confirm_record
-- Approximate tokens: ~99 static + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~137 static + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Checked offers: {{offers_summary}}
-Read these back in these words and ask for a clear confirmation. The product number in square brackets is only for the promise tool: never say it to the customer. After a clear yes, call the promise tool once per product, giving only its product number. Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.
+Read all of these back once, in these words, and ask for one clear confirmation. Never say the product number in square brackets. After a clear yes, say nothing more: the program records the promises and the closing tells the customer. Never say a promise is recorded. Do not change a date or an amount yourself; if the customer wants a change, ask for the new value.
+You have no tool here: where a rule below speaks of calling, retrying or checking the promise tool, the program does that after the yes.
 Rules:
 {rules}
 ```
@@ -340,6 +341,17 @@ Thank you for letting me know.
 
 ```text
 I am sorry, I could not complete that request right now.
+```
+
+## PROMISE_NOT_ALL_RECORDED_SAY
+
+- Purpose: Said before the closing sentence when a promise could not be recorded and the outcome row is not the spec's own row for that (for example another promise was recorded) (F-063).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/workflow.py — closing code, promise_failed
+- Approximate tokens: ~12 (characters ÷ 4)
+
+```text
+I am sorry, I could not record every promise.
 ```
 
 ## SPECIAL_ASK_PHRASED_TEMPLATE
@@ -542,7 +554,7 @@ Return this JSON shape:
 - Purpose: Extracts the account, negotiation and confirmation sections.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'flow'
-- Approximate tokens: ~642 (characters ÷ 4)
+- Approximate tokens: ~776 (characters ÷ 4)
 
 ```text
 Extract the sections account, negotiation and confirmation. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
@@ -551,8 +563,8 @@ Return this JSON shape:
 {
  "account": {"rules": [RULE] (how to state the debt and the products, in which order), "products_field": "account tool response field (array) with the late products", "product_id_field": "field of one product item that identifies it for the promise tool", "product_kind_field": "product item field with the kind of product, or """, "product_label_field": "product item field the customer recognises the product by, such as its last digits, or """},
  "negotiation": {"rules": [RULE] (what to ask first, what counts as a refusal, persuasion attempts and what each proposes, what never to offer, per-product handling),
-  "intents": [{"value": "snake_case code", "meaning": "...", "route": "readback | end | stay", "outcome": "...", "reason": "...", "source": "..."}]
-   (the customer's state after each turn. route readback: an agreed date and amount are ready to read back. end: the customer refuses any arrangement after the allowed attempts; give the closing-table outcome and reason. stay: keep negotiating. At least one readback and one end value. Only refusing to pay or to talk may use route end. Situations with their own sentence or tool (the payment was already made, the debt is denied, a transfer is requested, financial difficulty) are special paths, extracted elsewhere: never list them here, or the call would close without the sentence or the tool.)},
+  "intents": [{"value": "snake_case code", "meaning": "...", "route": "readback | end | stay", "outcome": "...", "reason": "...", "per_product": true or false, "uses_attempt": true or false, "source": "..."}]
+   (the customer's state after each turn. route readback: an agreed date and amount are ready to read back. end: the customer refuses any arrangement after the allowed attempts; give the closing-table outcome and reason. stay: keep negotiating. At least one readback and one end value. Only refusing to pay or to talk may use route end. per_product true (route end only): the refusal ends only the product being discussed when the documents handle several products one at a time; the call goes on with the next product and closes with this outcome only when no product is left. uses_attempt true (route stay only): a flat refusal or a non-answer that uses one persuasion attempt; code counts these per product when the offer section gives persuasion_attempts. Leave both false when the documents give no such rule. Situations with their own sentence or tool (the payment was already made, the debt is denied, a transfer is requested, financial difficulty) are special paths, extracted elsewhere: never list them here, or the call would close without the sentence or the tool.)},
  "confirmation": {"rules": [RULE] (read-back, explicit confirmation, changes, one promise per product, what to say after a recorded promise, what to do when recording fails),
   "promise_product_id_field": "promise tool request field for the product id",
   "promise_date_field": "promise tool request field for the date",
@@ -570,7 +582,7 @@ Return this JSON shape:
 - Purpose: Extracts the date and amount rules that code uses to check every offer.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'offer'
-- Approximate tokens: ~743 (characters ÷ 4)
+- Approximate tokens: ~807 (characters ÷ 4)
 
 ```text
 Extract the section offer: the calendar, the date limits and the amount limits a promise must meet. Code evaluates them against the call's current date; you only copy the rule data. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
@@ -589,7 +601,8 @@ Return this JSON shape:
   "max_amount": [same shape as min_amount],
   "next_weekday": "following_week | upcoming | ask" (what "next <weekday>" means. following_week: that weekday in the following calendar week. upcoming: the nearest such weekday after today. Use one of these two only if the documents define "next <weekday>"; otherwise ask, and the agent asks which date is meant),
   "max_rejected_offers": integer, at least 2 (an invalid-offer counter: how many distinct customer offers that fail the date or amount checks above a product may have before it is given up. It is NOT the number of persuasion attempts after a refusal: never copy a persuasion or attempt count here. Use 2 (one invalid offer, then the agent's counter-offer may be rejected once) unless the documents set a limit on invalid or out-of-policy offers; give the source "fallback: no invalid-offer limit in the documents"),
-  "max_rejected_offers_by_product": [{"when": [CONDITION], "value": integer, at least 2}] (only if the documents set different invalid-offer limits for different products; otherwise []. Persuasion attempts per band are not invalid-offer limits)
+  "max_rejected_offers_by_product": [{"when": [CONDITION], "value": integer, at least 2}] (only if the documents set different invalid-offer limits for different products; otherwise []. Persuasion attempts per band are not invalid-offer limits),
+  "persuasion_attempts": [{"when": [CONDITION], "value": integer, at least 1}] (the number of persuasion attempts after a flat refusal, per product, when the documents give it, for example per band; first match wins; [] when the documents give no number)
  },
  CONDITION is {"field": "product field", and one or more of "min": number, "max": number, "equals": value, "in": [values]} (min and max are inclusive). Product fields come from the account tool's product items in the tool contract.
  "sources": {"offer.<field>": "excerpt or fallback: why", one entry per field above},
@@ -602,13 +615,13 @@ Return this JSON shape:
 - Purpose: Extracts the closing table, the special paths and the closing tool fields.
 - Receiver: builder model
 - Used at: builder/extract.py — extraction call 'outcomes'
-- Approximate tokens: ~1017 static + `{states}` characters ÷ 4 at runtime
+- Approximate tokens: ~1184 static + `{states}` characters ÷ 4 at runtime
 
 ```text
 Extract the sections outcomes, special_paths and closing. RULE means {"text": "...", "source": "verbatim excerpt", "enforced_by": "optional, see RULES THE PROGRAM ALREADY ENFORCES"}.
 Return this JSON shape:
 {
- "closing": {"rules": [RULE] (how the call ends; most are enforced_by closing_outcome. An instruction for what the agent does during the call, such as notes or transfers, belongs to the step where it happens, not here), "outcome_field": "closing tool request field for the outcome", "reason_field": "closing tool request field for the reason"},
+ "closing": {"rules": [RULE] (how the call ends; most are enforced_by closing_outcome. An instruction for what the agent does during the call, such as notes or transfers, belongs to the step where it happens, not here), "outcome_field": "closing tool request field for the outcome", "reason_field": "closing tool request field for the reason", "product_notes": null or {"tool": "note tool name", "product_field": "note tool request field for the product id", "reason_field": "note tool request field for the reason", "reasons": ["every reason value the documents allow"], "refused_reason": "reason for a product the customer turned down or never agreed to", "failed_reason": "reason for a product whose promise could not be recorded", "skip_outcomes": ["call outcomes after which no note is added at all, for example a transfer"], "source": "excerpt"} (only when the documents require a note for each product that ended without a promise; code then writes those notes before the closing tool; null otherwise)},
  "outcomes": [{"outcome": "...", "reason": "... or \"\"", "when": RULE, "say": RULE (text: the exact words the agent says to the customer before the closing tool, word for word, read aloud as written; include every sentence the brief requires in that situation and end with a goodbye. Never an instruction such as "Thank the customer and say goodbye."; write "Thank you for your time. Goodbye." instead), "wins_over_promise": true or false (true only if this row is used even after a promise was recorded), "states": ["call-end state names below that close with this row"]}]
    (one row per outcome and reason pair the brief allows; every pair from the closing table.)
  "special_paths": [{"id": "snake_case", "when": RULE (what the customer says), "say": RULE (text: the exact words said to the customer, read aloud as written; never an instruction to the agent), "ask": RULE (optional; leave the key out unless the documents require one question before acting, for example whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer and waits for the answer, so it must be one question ending with "?", never an instruction), "tool": "tool name or \"\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", "available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]

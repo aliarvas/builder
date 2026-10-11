@@ -47,9 +47,13 @@ def groups_from_spec(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
         },
         "flow": {
             "account": {key: s["account"][key] for key in ("rules", "products_field", "product_id_field")},
-            "negotiation": {"rules": n["rules"], "intents": entries(n["intent_values"], lambda v: (
-                "readback" if v in n["confirm_values"] else "end" if v in n["close_values"] else "stay"
-            ), "negotiation:")},
+            "negotiation": {"rules": n["rules"], "intents": [
+                {**entry, "per_product": entry["value"] in n.get("product_end_values", []),
+                 "uses_attempt": entry["value"] in n.get("attempt_values", [])}
+                for entry in entries(n["intent_values"], lambda v: (
+                    "readback" if v in n["confirm_values"] else "end" if v in n["close_values"] else "stay"
+                ), "negotiation:")
+            ]},
             "confirmation": {
                 **{key: c[key] for key in (
                     "rules", "promise_product_id_field", "promise_date_field", "promise_amount_field",

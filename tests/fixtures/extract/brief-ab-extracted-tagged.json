@@ -292,6 +292,12 @@
   "close_values": [
    "refused_attempts_exhausted",
    "refuses_to_talk"
+  ],
+  "product_end_values": [
+   "refused_attempts_exhausted"
+  ],
+  "attempt_values": [
+   "refusal_attempts_left"
   ]
  },
  "confirmation": {
@@ -841,7 +847,25 @@
    }
   ],
   "outcome_field": "outcome",
-  "reason_field": "reason"
+  "reason_field": "reason",
+  "product_notes": {
+   "tool": "add_note",
+   "product_field": "product_id",
+   "reason_field": "reason",
+   "reasons": [
+    "refused",
+    "hardship",
+    "dispute",
+    "paid",
+    "service_error"
+   ],
+   "refused_reason": "refused",
+   "failed_reason": "service_error",
+   "skip_outcomes": [
+    "transferred"
+   ],
+   "source": "For each product without a promise call `add_note` with that `product_id` and a reason"
+  }
  },
  "offer": {
   "rules": [
@@ -985,7 +1009,29 @@
   ],
   "next_weekday": "following_week",
   "max_rejected_offers": 2,
-  "max_rejected_offers_by_product": []
+  "max_rejected_offers_by_product": [],
+  "persuasion_attempts": [
+   {
+    "when": [
+     {
+      "field": "days_late",
+      "min": 1,
+      "max": 7
+     }
+    ],
+    "value": 1
+   },
+   {
+    "when": [
+     {
+      "field": "days_late",
+      "min": 8,
+      "max": 45
+     }
+    ],
+    "value": 2
+   }
+  ]
  },
  "provenance": {
   "opening.max_unclear_asks": "If it is still unclear after the second ask, close as `not_reached` / `unclear`.",
@@ -1021,7 +1067,10 @@
   "outcomes.state.special_tool_failed": "derived: A failed special tool means the action could not be done, so no_promise / service_error.",
   "outcomes.state.hangup": "derived: A verified customer who leaves without a promise is treated as a refusal, no_promise / refused.",
   "outcomes.state.hangup_unverified": "derived: Leaving before identity is verified is treated as not answering the questions, not_verified / declined.",
-  "outcomes.state.default": "derived: Any other end with no promise uses the generic refusal row, no_promise / refused."
+  "outcomes.state.default": "derived: Any other end with no promise uses the generic refusal row, no_promise / refused.",
+  "closing.product_notes": "added by hand (F-061/F-062), as the F-061 extraction prompt asks: For each product without a promise call `add_note` with that `product_id` and a reason; On any transfer ... add no notes at all",
+  "offer.persuasion_attempts": "added by hand (F-062): Brief A rule 18 table, column Persuasion attempts",
+  "negotiation.product_end_values": "added by hand (F-062): Persuasion attempts are counted per product"
  },
  "overrides": [
   {

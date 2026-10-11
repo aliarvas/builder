@@ -15,6 +15,7 @@ from .prompts import (
     SPECIAL_ASK_PHRASED_TEMPLATE,
     SPECIAL_SAY_FALLBACK,
     SPECIAL_TOOL_FAILED_SAY,
+    PROMISE_NOT_ALL_RECORDED_SAY,
     CLOSING_FALLBACK_SAY,
     CONVERSATION_NO_TOOL_RULE,
     CONVERSATION_TOOL_RULE_TEMPLATE,
@@ -34,10 +35,16 @@ from .prompts import (
     render_prompt,
 )
 from .offer_check import (
-    OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED_COUNT,
+    OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED, OFFERS_ACCEPTED_COUNT,
     OFFER_AMOUNT_KIND, OFFER_PROPOSED_KIND, AMOUNT_KINDS, AMOUNT_KIND_NONE, OFFER_ACCEPTS, ACCEPTS_YES, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
     promise_values_hook, special_noted_code, ESTIMATED_PRODUCTS, RUNTIME_TEXT_CHARACTERS,
 )
+from .record_loop import (
+    FAILED_NUMBERS, RECORD_NEXT, RECORD_NUMBER, RECORD_PROMISE, RECORD_STATE, RECORDED_NUMBERS,
+    RESULT_VARIABLE as RECORD_RESULT,
+    record_next_code, record_promise_node, record_values,
+)
+from .product_notes import add_product_steps
 from .spec import ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
 from .spoken import agent_directed, spoken_words
 from .callback import (
@@ -567,9 +574,14 @@ def _increment_code(variable: str, clear_variable: str, clear_value: str = "") -
 
 
 def _confirmation_progress_code(spec: PhoneAgentSpec) -> str:
+    """After each promise call of the record loop (F-063): count it, apply the per-product
+    retry rule, and remember which products are recorded so ``record_next`` moves on.
+    Decision (F-061/F-062 review finding 1): a product whose attempts are used up is set aside
+    and the loop goes on with the next accepted product. With none left the state is
+    ``complete`` (all recorded) or ``exhausted`` (one or more failed: the closing says not every
+    promise was recorded)."""
     confirmation = spec.confirmation.data
     expected = confirmation["expected_count_variable"]
-    number = "create_promise_args." + confirmation["product_number_field"]
     maximum = confirmation["max_attempts_per_product"]
     return f"""import json
 try:
@@ -580,47 +592,68 @@ try:
     recorded_count = int(vars.get('promise_recorded_count') or 0)
 except Exception:
     recorded_count = 0
-raw_number = vars.get({number!r})
-if raw_number is None:
-    raw_args = vars.get('create_promise_args')
-    if isinstance(raw_args, str):
-        try:
-            raw_args = json.loads(raw_args)
-        except Exception:
-            raw_args = None
-    if isinstance(raw_args, dict):
-        raw_number = raw_args.get({confirmation["product_number_field"]!r})
-product_number = str(raw_number or '')
+product_number = str(vars.get({RECORD_NUMBER!r}) or '')
 attempt_key = 'promise_attempts_' + product_number
 try:
     attempts = int(vars.get(attempt_key) or 0)
 except Exception:
     attempts = 0
-ok_value = vars.get('promise_result_ok')
-if ok_value is None:
-    ok_value = vars.get('create_promise_response.data.ok')
-if ok_value is None:
-    response = vars.get('create_promise_response')
-    if isinstance(response, str):
-        try:
-            response = json.loads(response)
-        except Exception:
-            response = None
-    if isinstance(response, dict):
-        data = response.get('data')
-        if isinstance(data, dict):
-            ok_value = data.get('ok')
+ok_value = vars.get({RECORD_RESULT!r})
 ok = ok_value is True or str(ok_value).lower() == 'true'
 if ok:
     recorded_count += 1
     vars['promise_recorded_count'] = recorded_count
     vars[attempt_key] = 0
-    vars['promise_progress_state'] = 'complete' if recorded_count >= expected_count else 'continue'
+    try:
+        recorded = vars.get({RECORDED_NUMBERS!r})
+        if isinstance(recorded, str):
+            recorded = json.loads(recorded or '[]')
+        recorded = [int(item) for item in (recorded or [])]
+    except Exception:
+        recorded = []
+    try:
+        recorded.append(int(product_number))
+    except Exception:
+        pass
+    vars[{RECORDED_NUMBERS!r}] = json.dumps(recorded)
+    vars['promise_progress_state'] = 'continue'
 else:
     attempts += 1
     vars[attempt_key] = attempts
-    vars['promise_progress_state'] = 'exhausted' if attempts >= {maximum!r} else 'retry'
-vars['promise_result_ok'] = 'consumed'
+    vars['promise_progress_state'] = 'retry'
+    if attempts >= {maximum!r}:
+        try:
+            failed = vars.get({FAILED_NUMBERS!r})
+            if isinstance(failed, str):
+                failed = json.loads(failed or '[]')
+            failed = [int(item) for item in (failed or [])]
+            failed.append(int(product_number))
+            vars[{FAILED_NUMBERS!r}] = json.dumps(failed)
+            vars['promise_progress_state'] = 'continue'
+        except Exception:
+            vars['promise_progress_state'] = 'exhausted'
+# With no accepted product left to record, the loop ends: complete, or exhausted when one failed.
+if vars['promise_progress_state'] == 'continue':
+    try:
+        accepted = vars.get({OFFERS_ACCEPTED!r})
+        if isinstance(accepted, str):
+            accepted = json.loads(accepted) if accepted.strip() else dict()
+        done = set()
+        for name in ({RECORDED_NUMBERS!r}, {FAILED_NUMBERS!r}):
+            value = vars.get(name)
+            if isinstance(value, str):
+                value = json.loads(value or '[]')
+            done.update(int(item) for item in (value or []))
+        failed_any = vars.get({FAILED_NUMBERS!r}) not in (None, '', '[]')
+        if isinstance(accepted, dict) and accepted:
+            left = [key for key in accepted if str(key).strip().isdigit() and int(key) not in done]
+        else:
+            left = [] if len(done) >= expected_count else ['?']  # no offer list: the agreed count
+        if not left:
+            vars['promise_progress_state'] = 'exhausted' if failed_any else 'complete'
+    except Exception:
+        vars['promise_progress_state'] = 'complete' if recorded_count >= expected_count else 'continue'
+vars[{RECORD_RESULT!r}] = 'consumed'
 """
 
 
@@ -847,12 +880,18 @@ def _closing_code(spec: PhoneAgentSpec) -> str:
     F-056/F-059: closing special paths are silent, so their line is said here, before the
     closing sentence (once when one already contains the other), and only on the state that
     the path's success sets. A failed special-path tool gets a plain line, unless the spec
-    has a row for that state.
+    has a row for that state. F-063: when a promise could not be recorded but another one was
+    (the recorded-promise row wins), the closing first says so plainly.
+
+    Each FIRST_LINES row is (state, line, always); a row that is not ``always`` is only a
+    fallback, said when the chosen outcome row is not the state's own row, or when that
+    row's sentence is only the generic goodbye (empty or an instruction replaced, F-047).
     """
-    first_lines = [("special:" + path.id, path.say.text) for path in spec.special_paths if path.then == "close"]
+    first_lines = [("special:" + path.id, path.say.text, True) for path in spec.special_paths if path.then == "close"]
     if any(path.then == "close" and path.tool for path in spec.special_paths):
-        first_lines.append(("special_tool_failed", SPECIAL_TOOL_FAILED_SAY.text))
-    rows = "".join(f"    ({_py_str(state)}, {_py_str(line)}),\n" for state, line in first_lines)
+        first_lines.append(("special_tool_failed", SPECIAL_TOOL_FAILED_SAY.text, False))
+    first_lines.append(("promise_failed", PROMISE_NOT_ALL_RECORDED_SAY.text, False))
+    rows = "".join(f"    ({_py_str(state)}, {_py_str(line)}, {always!r}),\n" for state, line, always in first_lines)
     return _close_state_derivation_code(spec) + _outcome_choice_code(spec) + f"""
 FIRST_LINES = [
 {rows}]
@@ -880,11 +919,13 @@ if chosen[2]:
     vars['close_reason'] = chosen[2]
 sentence = chosen[3] or {_py_str(CLOSING_FALLBACK_SAY.text)}
 try:
-    # A spec row for the state itself says what to say; the builder line is only a fallback.
-    if chosen[0] != state or state != 'special_tool_failed':
-        for line_state, line in FIRST_LINES:
-            if line_state == state:
-                sentence = join_lines(line, sentence)
+    # A spec row for the state itself says what to say; a fallback line is not added to it.
+    # Review fix 2: a row whose sentence is the generic goodbye (empty, or an instruction
+    # replaced by the spoken-text fallback, F-047) does not say the failure: add the line.
+    own_row = chosen[0] == state and sentence != {_py_str(CLOSING_FALLBACK_SAY.text)}
+    for line_state, line, always in FIRST_LINES:
+        if line_state == state and (always or not own_row):
+            sentence = join_lines(line, sentence)
 except Exception:
     pass
 vars['closing_sentence'] = sentence
@@ -1028,7 +1069,7 @@ def _render_spec_workflow(
     ] + [(negotiation["intent_variable"], FRAMEWORK_NONE_VALUE), (confirmation["intent_variable"], FRAMEWORK_NONE_VALUE)]
     used = {
         "opening", "opening_reask", "opening_unclear", "third_party", IDENTITY_CHECK, "identity", "account", "negotiate",
-        "confirm_record", "confirmation_progress", "closing", "closing_say", "close_attempt",
+        "confirm_record", RECORD_NEXT, RECORD_PROMISE, "confirmation_progress", "closing", "closing_say", "close_attempt",
         "offer_setup", "check_offer", OFFER_SAY, REVISE_ASK,
         "close_record", "end_call",
     }
@@ -1207,16 +1248,24 @@ def _render_spec_workflow(
             },
         "confirm_record": _conversation("confirm_record", render_prompt(
             CONFIRM_TASK_TEMPLATE, rules=_rule_lines(plan.rules("confirm_record"))
-        ), [promise_tool], [
+        ), [], [
             _transition(REVISE_ASK, "Customer revised or rejected the read-back", [
                 _condition(confirmation["intent_variable"], "equals", value)
                 for value in confirmation["revise_values"]
             ]),
-            _transition("confirmation_progress", "Promise tool returned a result", [
-                _condition("promise_result_ok", "equals", value)
-                for value in ("true", "True", "false", "False")
+            # F-063: one read-back, one yes; code records every accepted offer.
+            _transition(RECORD_NEXT, "Customer confirmed the read-back", [
+                _condition(confirmation["intent_variable"], "equals", value)
+                for value in record_values(spec)
             ]),
         ]),
+        RECORD_NEXT: _code_node(RECORD_NEXT, record_next_code(), [
+            _transition("closing", "Every accepted offer has been recorded", [
+                _condition(RECORD_STATE, "equals", "done")
+            ]),
+            {"target_node": RECORD_PROMISE, "description": "Record the next product", "condition": {"operator": "always"}},
+        ]),
+        RECORD_PROMISE: record_promise_node(spec, promise_tool, "confirmation_progress"),
         "confirmation_progress": _code_node(
             "confirmation_progress", _confirmation_progress_code(spec) + _write_close_state([
                 ("vars.get('promise_progress_state') == 'complete'", "promise_recorded"),
@@ -1228,7 +1277,7 @@ def _render_spec_workflow(
                 _transition("closing", "A product exhausted its recording attempts", [
                     _condition("promise_progress_state", "equals", "exhausted")
                 ]),
-                {"target_node": "confirm_record", "description": "Record the next product or retry once", "condition": {"operator": "always"}},
+                {"target_node": RECORD_NEXT, "description": "Record the next product or retry once", "condition": {"operator": "always"}},
             ],
         ),
         "closing": _code_node("closing", _closing_code(spec), [
@@ -1355,6 +1404,14 @@ def _render_spec_workflow(
         "description": "Whether the customer confirms or revises the read-back",
         "enum_values": [*confirmation["intent_values"], FRAMEWORK_NONE_VALUE], "min_confidence": 0.8,
     }]
+
+    # F-061/F-062 (builder/product_notes.py): the per-product refusal step and the note loop
+    # before the goodbye, both only when the spec asks for them.
+    notes_tool = (spec.closing.data.get("product_notes") or {}).get("tool")
+    add_product_steps(spec, nodes, by_name, _code_node, [
+        special_result_variable(path) for path in spec.special_paths
+        if path.then == "close" and path.tool and path.tool == notes_tool
+    ], OFFER_SAY, warnings)
 
     # F-053 (fix): the check result and the revise question are spoken by fixed lines on two
     # copies of negotiate (same prompt, routes and extraction). Each waits for the customer, and

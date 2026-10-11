@@ -17,7 +17,7 @@ A case passes only if all three pass: **outcome** (bank ledger correct, promise 
 
 ### L1 — Static and offline checks (no Freya, no model) `[VERIFIED: tests]`
 
-`python3 -m unittest` runs every suite in `tests/` (245 tests, all passing on 2026-10-11 after the F-045/046 fix; re-count before each commit). The model is replaced by recorded replies and Freya by fakes.
+`python3 -m unittest` runs every suite in `tests/` (373 tests, all passing on 2026-10-11 in the working tree after b2ebfa8 with F-063 and the F-061/062 work in progress; re-count before each commit). The model is replaced by recorded replies and Freya by fakes.
 
 | Suite | Covers |
 |---|---|
@@ -27,6 +27,13 @@ A case passes only if all three pass: **outcome** (bank ledger correct, promise 
 | `test_prompt_budget.py` | Budget stages, rule placement, every spec rule placed somewhere (T-009) |
 | `test_spoken_output.py` | Wait line said by the identity step, no passthrough api step speaks (F-043, F-050), spoken read-back (F-044) |
 | `test_spoken_text.py` | `spoken.py` detector, extraction repair and renderer fallback for agent-directed spoken text (F-047), `identity_check` re-entry (F-049), introduction only in the opening (F-048) |
+| `test_callback.py` | F-055: callback day/time resolution, window, two-turn day then time, bounded re-asks, booking step shape, extraction of the window |
+| `test_offer_date_only.py`, `test_offer_amount_reset.py` | F-051/F-052 date-only offers and accepted proposals; F-060 amount sentinel under the platform's typed-write rule |
+| `test_offer_speech.py` | F-053 check result spoken by `offer_say`, no dead air on returns; F-054 spoken calendar |
+| `test_closing_speech.py` | F-056/F-059: at most one spoken step per customer turn from every special-path entry, silent closing paths, line only after ok, failure lines |
+| `test_record_loop.py` | F-063: one read-back, code-run record loop, retry and stop rule, honest partial failure, hook number, revise path |
+| `test_product_notes.py` | F-061/F-062 per-product refusal and notes: to be documented with that task |
+| `test_multi_ready.py` | Multi-product practice cases PUB-11/12/13 walked through the A+B renders offline (simulated extraction, real generated code) |
 | `test_selftest.py` | Self-test case generation and plausible answers, reached steps, validation rules, 5xx turn states, budget (T-007, T-007b, F-045, F-046, F-049) |
 | `test_submission_check.py` | Offline submission check, `sent_*` trace lines (T-008) |
 | `test_slots.py` | Stale-slot recovery (F-005) |
@@ -112,7 +119,10 @@ The trace holds input hashes, model calls, the spec path, Freya workflow/agent I
 | 2026-10-10 20:21 | official command, extracted spec, version 11 (trace overwritten by the 20:39 run) | A | builder self-test, 3 cases | 0/3 | every case "missing node(s): opening" (F-045); placeholder answers, no `verify_identity` (F-046); instruction spoken as the closing line (F-047); introduction repeated (F-048); all fixed offline |
 | 2026-10-11 | version 11 | A | 2 chat runs (PUB-07) | ledger fail | 502 on the turn after identity, call rolled back (F-049, F-050); fixed offline (silent account step, `identity_check`) |
 | 2026-10-10 20:39 | official command, extracted spec, version 12 (`traces/brief-a.log`) | A | builder self-test, 3 cases | 2 pass, 1 `platform_error` | `third_party_close`: `close_call` pre-action not visible as an event (see L2); 193 s total; `submission_check` 19/19 PASS with 2 WARN |
-| 2026-10-11 | version 12 | A | 1 chat run (PUB-07) | ledger fail | **F-051 (open):** the customer gave only dates, `offer_amount` stayed empty, `check_offer` never ran; the model printed an internal step call and invented a date limit. The F-050 fix held (no 502); the Turkish filler appeared once (F-043) |
+| 2026-10-11 | version 12 | A | 1 chat run (PUB-07) | ledger fail | **F-051:** the customer gave only dates, `offer_amount` stayed empty, `check_offer` never ran; the model printed an internal step call and invented a date limit. The F-050 fix held (no 502); the Turkish filler appeared once (F-043). F-051 was fixed in code since (657e6a6, 12d9226), and PUB-07 passed the ledger on version 13 |
+| 2026-10-11 | version 13 (audit: `tasks/LIVE-AUDIT-report.md`, `traces/live-runs/`) | A | chat runs PUB-07, PUB-02, PUB-09 | PUB-07 ledger pass, PUB-02 fail, PUB-09 ledger pass | PUB-07: weekday wrong in a proposal (F-054), check result printed as a tool call (F-053), judge risk; PUB-02: callback year wrong (F-055); PUB-09: closing line said twice, post-goodbye branch and a 2nd refused `close_call` (F-056, F-057, F-058). F-053..F-056, F-059, F-060, F-063 fixed offline since; live retest pending |
+
+`ledger.ok: true` in a saved run is the ledger API status, not a pass: compare promises, callbacks, transfers, outcome and reason with the case's `expected`.
 
 The single-case rows are chat tests scored on the ledger only, not `run_cases.py` with the judge and three runs. A full scored run of the current builder (13 cases, `--reps 3`) has not been recorded yet.
 

@@ -79,6 +79,79 @@ class ExtractionPipelineTests(unittest.TestCase):
     def test_multi_document_round_trip(self):
         result, _, _ = run(groups_from_spec(FIXTURE_B), BRIEF_AB)
         self.assertEqual([], compare_specs(result.spec_data, FIXTURE_B))
+        # F-061/F-062: the note rule and the per-product refusal survive the extraction.
+        self.assertEqual(FIXTURE_B["closing"]["product_notes"], result.spec_data["closing"]["product_notes"])
+        self.assertEqual(["no_arrangement"], result.spec_data["negotiation"]["product_end_values"])
+        self.assertEqual([], result.spec_data["negotiation"]["attempt_values"])
+
+    def test_single_brief_has_no_note_rule(self):
+        # Brief A never uses the note tool: no product_notes, no per-product values.
+        result, _, _ = run()
+        self.assertNotIn("product_notes", result.spec_data["closing"])
+        self.assertEqual([], result.spec_data["negotiation"]["product_end_values"])
+        self.assertEqual([], result.spec.offer.data["persuasion_attempts"])
+
+    def assertOptionalDropped(self, broken, block, text):
+        """Repaired first; still broken in the last round: the block is dropped with a warning
+        and the extraction goes on (F-061/F-062 review finding 2)."""
+        result, client, _ = run(broken, BRIEF_AB)
+        self.assertTrue(any(purpose.startswith("repair1:") for purpose in client.purposes()))
+        dropped = [warning for warning in result.warnings if f"optional block {block} dropped" in warning]
+        self.assertTrue(dropped, result.warnings)
+        self.assertTrue(any(text in warning for warning in dropped), dropped)
+        return result
+
+    def test_note_rule_errors_go_to_repair_then_drop_the_block(self):
+        groups = groups_from_spec(FIXTURE_B)
+        notes = groups["outcomes"]["closing"]["product_notes"]
+        for change, text in (
+            ({"tool": "write_memo"}, "closing.product_notes.tool"),
+            ({"reason_field": "why"}, "closing.product_notes.reason_field"),
+            ({"reasons": [*notes["reasons"], "lost"]}, "not in the add_note enum"),
+            ({"refused_reason": "lost"}, "closing.product_notes.refused_reason"),
+            ({"skip_outcomes": ["moved"]}, "closing.product_notes.skip_outcomes"),
+            ({"source": ""}, "closing.product_notes.source"),  # a missing excerpt; a loose one only warns
+        ):
+            with self.subTest(change=change):
+                broken = copy.deepcopy(groups)
+                broken["outcomes"]["closing"]["product_notes"] = {**notes, **change}
+                result = self.assertOptionalDropped(broken, "product_notes", text)
+                self.assertNotIn("product_notes", result.spec_data["closing"])
+                self.assertEqual(["no_arrangement"], result.spec_data["negotiation"]["product_end_values"])
+
+    def test_intent_flags_are_checked(self):
+        groups = groups_from_spec(FIXTURE_B)
+        for flag, value, text in (("per_product", "yes", "must be true or false"),
+                                  ("uses_attempt", True, "may be true only with route stay")):
+            with self.subTest(flag=flag):
+                broken = copy.deepcopy(groups)
+                entry = next(e for e in broken["flow"]["negotiation"]["intents"] if e["route"] == "end")
+                entry[flag] = value
+                result = self.assertOptionalDropped(broken, "intent_flags", text)
+                self.assertEqual([], result.spec_data["negotiation"]["product_end_values"])
+                self.assertIn("product_notes", result.spec_data["closing"])  # another block stays
+
+    def test_persuasion_attempts_need_evidence_and_a_source(self):
+        # Review finding 3: each count is written in the documents; the list has a source.
+        tagged = json.loads((ROOT / "tests/fixtures/extract/brief-ab-extracted-tagged.json").read_text(encoding="utf-8"))
+        groups = groups_from_spec(FIXTURE_B)
+        for entry in groups["flow"]["negotiation"]["intents"]:
+            if entry["value"] == "continue":
+                entry["uses_attempt"] = True  # a refusal that uses one attempt
+        good = copy.deepcopy(groups)
+        good["offer"]["offer"]["persuasion_attempts"] = tagged["offer"]["persuasion_attempts"]
+        good["offer"]["sources"]["offer.persuasion_attempts"] = "Persuasion attempts"
+        result, _, _ = run(good, BRIEF_AB)
+        self.assertEqual(tagged["offer"]["persuasion_attempts"], result.spec.offer.data["persuasion_attempts"])
+        for change, text in (
+            (lambda g: g["offer"]["offer"]["persuasion_attempts"][1].update(value=97), "97 is not written"),
+            (lambda g: g["offer"]["sources"].pop("offer.persuasion_attempts"), "needs a source excerpt"),
+        ):
+            with self.subTest(text=text):
+                broken = copy.deepcopy(good)
+                change(broken)
+                result = self.assertOptionalDropped(broken, "persuasion_attempts", text)
+                self.assertEqual([], result.spec.offer.data["persuasion_attempts"])
 
     def test_group_calls_run_in_parallel(self):
         # Each first call waits for the other three: a sequential pipeline would break the barrier.

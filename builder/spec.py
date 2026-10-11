@@ -258,8 +258,15 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
     _string_list(stages["negotiation"].data, "intent_values", "negotiation")
     _string_list(stages["negotiation"].data, "confirm_values", "negotiation")
     _string_list(stages["negotiation"].data, "close_values", "negotiation")
+    _validate_product_intents(stages["negotiation"].data)
     _string_list(stages["confirmation"].data, "intent_values", "confirmation")
     _string_list(stages["confirmation"].data, "revise_values", "confirmation")
+    # F-063: every confirmation value that is not a revise value is a clear yes and starts
+    # the code-run record loop; at least one must exist.
+    confirmation_data = stages["confirmation"].data
+    if not [value for value in confirmation_data["intent_values"] if value not in confirmation_data["revise_values"]]:
+        raise SpecError("confirmation.intent_values needs a value that is not in revise_values: "
+                        "the clear yes that records the promises")
     for stage_name, keys in {
         "opening": ("who_answered_variable", "unclear_count_variable", "confirmation_question", "unclear_instruction"),
         "third_party": ("intent_variable",),
@@ -302,7 +309,58 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
     )
     _validate_close_states(spec)
     _validate_offer(stages["offer"].data)
+    _validate_product_notes(spec)
+    if stages["offer"].data["persuasion_attempts"] and not stages["negotiation"].data["attempt_values"]:
+        raise SpecError("offer.persuasion_attempts needs negotiation.attempt_values (the refusals that use one)")
     return spec
+
+
+def _validate_product_intents(data: dict[str, Any]) -> None:
+    """F-062, optional. product_end_values: close values that end only the product being
+    discussed (other products are still discussed). attempt_values: stay values for a refusal
+    that uses one persuasion attempt; counted by code when offer.persuasion_attempts is set."""
+    product_end = data.setdefault("product_end_values", [])
+    attempts = data.setdefault("attempt_values", [])
+    _string_list(data, "product_end_values", "negotiation")
+    _string_list(data, "attempt_values", "negotiation")
+    if not set(product_end) <= set(data["close_values"]):
+        raise SpecError("negotiation.product_end_values must be close_values")
+    routed = set(data["confirm_values"]) | set(data["close_values"])
+    if not set(attempts) <= set(data["intent_values"]) or set(attempts) & routed:
+        raise SpecError("negotiation.attempt_values must be intent_values that neither confirm nor close")
+    if attempts and not product_end:
+        raise SpecError("negotiation.attempt_values needs product_end_values (the refusal when none are left)")
+
+
+def _validate_product_notes(spec: "PhoneAgentSpec") -> None:
+    """F-061, optional closing.product_notes: a note for each product that ended without a promise.
+
+    {tool, product_field, reason_field, reasons, refused_reason, failed_reason, skip_outcomes}:
+    refused_reason for a product that was refused or never agreed, failed_reason for one whose
+    promise could not be recorded, skip_outcomes: call outcomes that get no notes at all. The
+    tool and its fields are checked against the OpenAPI tools when the workflow is rendered.
+    """
+    notes = spec.closing.data.get("product_notes")
+    if notes is None:
+        return
+    notes = _object(notes, "closing.product_notes")
+    unknown = set(notes) - {"tool", "product_field", "reason_field", "reasons", "refused_reason",
+                            "failed_reason", "skip_outcomes", "source"}
+    if unknown:
+        raise SpecError(f"closing.product_notes has unknown keys: {sorted(unknown)}")
+    for key in ("tool", "product_field", "reason_field", "refused_reason", "failed_reason"):
+        _string(_required(notes, key, "closing.product_notes"), f"closing.product_notes.{key}")
+    reasons = _string_list(notes, "reasons", "closing.product_notes")
+    if not reasons:
+        raise SpecError("closing.product_notes.reasons must list the note reasons")
+    for key in ("refused_reason", "failed_reason"):
+        if notes[key] not in reasons:
+            raise SpecError(f"closing.product_notes.{key} must be one of reasons {reasons}")
+    notes.setdefault("skip_outcomes", [])
+    skip = _string_list(notes, "skip_outcomes", "closing.product_notes")
+    known = {item.outcome for item in spec.outcomes}
+    if not set(skip) <= known:
+        raise SpecError(f"closing.product_notes.skip_outcomes must be outcomes of the closing table: {sorted(known)}")
 
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -423,6 +481,8 @@ def _validate_offer(data: dict[str, Any]) -> None:
       and the customer can reject it before the product is exhausted.
     - max_rejected_offers_by_product: optional ordered rules {when?, value}; first match
       overrides max_rejected_offers for that product, with the same invalid-offer meaning.
+    - persuasion_attempts: optional ordered rules {when?, value}; first match is the number of
+      persuasion attempts for that product after a flat refusal (F-062). Empty: not counted.
     ``when`` is a list of conditions on product fields: {field, min?, max?, equals?, in?}; all must hold.
     """
     _string(_required(data, "today_variable", "offer"), "offer.today_variable")
@@ -469,6 +529,16 @@ def _validate_offer(data: dict[str, Any]) -> None:
         if unknown:
             raise SpecError(f"{where} has unknown keys: {sorted(unknown)}")
         _int(_required(obj, "value", where), f"{where}.value", minimum=2)
+        _validate_when(obj.get("when", []), f"{where}.when")
+    # F-062, optional: persuasion attempts per product after a flat refusal; first match wins.
+    attempts = data.setdefault("persuasion_attempts", [])
+    for index, item in enumerate(_list(attempts, "offer.persuasion_attempts")):
+        where = f"offer.persuasion_attempts[{index}]"
+        obj = _object(item, where)
+        unknown = set(obj) - {"when", "value"}
+        if unknown:
+            raise SpecError(f"{where} has unknown keys: {sorted(unknown)}")
+        _int(_required(obj, "value", where), f"{where}.value", minimum=1)
         _validate_when(obj.get("when", []), f"{where}.when")
 
 
