@@ -70,6 +70,10 @@ def _parser() -> argparse.ArgumentParser:
         help="generic mode: the case documents decide the workflow (default for a case folder + mock URL)",
     )
     parser.add_argument(
+        "--no-design", action="store_true",
+        help="generic mode: skip the separate design call and render straight from the documents",
+    )
+    parser.add_argument(
         "--collections", action="store_true",
         help="use the collections spec renderer for a case folder (the old T-040 path)",
     )
@@ -530,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
 
 # T-046/T-047: the whole generic build, self-tests included, stays under this many seconds.
 GENERIC_BUILD_SECONDS = 25 * 60
+# T-051: generic calls stream; the timeout is per silent gap between chunks, not per reply.
+GENERIC_READ_TIMEOUT_SECONDS = 120
 FREYA_REPAIR_ROUNDS = 2
 
 
@@ -564,9 +570,9 @@ def _main_generic(args: argparse.Namespace, slot: str, trace: TraceWriter, build
             log=lambda purpose, result: trace.add_model_call(
                 result.model, purpose, result.duration_seconds, result.input_tokens, result.output_tokens,
                 result.cache_read_tokens),
-            note=lambda message: trace.add("warning", message))
+            note=lambda message: trace.add("warning", message), stream=True, timeout=GENERIC_READ_TIMEOUT_SECONDS)
         trace.add("model_settings", client.settings())
-        workflow, contract = generic.build(case, mock_url, trace, client)
+        workflow, contract = generic.build(case, mock_url, trace, client, design=not args.no_design)
         contract_path = Path("traces") / f"{slot}.openapi.json"
         contract_path.parent.mkdir(parents=True, exist_ok=True)
         contract_path.write_text(json.dumps(contract, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

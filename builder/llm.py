@@ -28,6 +28,10 @@ EXTRACTION_TEMPERATURE: float | None = None
 # organizer rehearsal, which stopped the build. The limit is only a ceiling; replies are billed by use.
 MAX_OUTPUT_TOKENS = 48000
 REQUEST_TIMEOUT_SECONDS = 600
+# T-052: a reply cut at the output limit is continued at most this many times.
+MAX_CONTINUATIONS = 2
+CONTINUE_NOTE = ("Your reply was cut at the output limit. Continue exactly where you stopped: write only the "
+                 "remaining text, starting with the next character, with no repetition and no comment.")
 KEY_ENV = "ANTHROPIC_API_KEY"
 ANTHROPIC_KEY_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
 RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
@@ -76,6 +80,8 @@ class AnthropicClient:
         opener: Callable[..., Any] = urllib.request.urlopen,
         temperature: float | None = EXTRACTION_TEMPERATURE,
         note: Callable[[str], None] | None = None,
+        stream: bool = False,
+        continuations: int = MAX_CONTINUATIONS,
     ) -> None:
         if not os.environ.get(KEY_ENV):
             raise LLMError(f"{KEY_ENV} is not set; the spec cannot be extracted (use --spec for a written spec)")
@@ -86,13 +92,21 @@ class AnthropicClient:
         self._opener = opener
         self.temperature = temperature
         self.note = note
+        # T-046: long replies (a whole workflow) stream, so a reply longer than the timeout is
+        # not cut: the timeout then applies to each silent gap, not to the whole reply.
+        self.stream = stream
+        self.continuations = continuations
+        # T-052: continue with the cut text as an assistant prefill; a model that rejects a
+        # prefill gets the cut text as an assistant turn plus a user note instead.
+        self._prefill = True
         # Shared by parallel calls: read and cleared under the lock.
         self._lock = threading.Lock()
 
     def settings(self) -> str:
         """One trace line describing the request settings."""
         sent = "not sent" if self.temperature is None else str(self.temperature)
-        return f"model={self.model} temperature={sent} max_tokens={self.max_tokens} timeout_seconds={self.timeout:g}"
+        return (f"model={self.model} temperature={sent} max_tokens={self.max_tokens} timeout_seconds={self.timeout:g}"
+                + (" stream=yes" if self.stream else ""))
 
     def _drop_temperature(self) -> None:
         with self._lock:
@@ -102,10 +116,10 @@ class AnthropicClient:
         if self.note is not None:
             self.note(f"model {self.model} rejected the temperature setting; requests are sent without it")
 
-    def _payload(self, system: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def _payload(self, system: str, messages: list[dict[str, Any]], max_tokens: int | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens or self.max_tokens,
             "system": system,
             "messages": messages,
         }
@@ -113,6 +127,8 @@ class AnthropicClient:
             temperature = self.temperature
         if temperature is not None:
             payload["temperature"] = temperature
+        if self.stream:
+            payload["stream"] = True
         return payload
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -127,14 +143,57 @@ class AnthropicClient:
             method="POST",
         )
         with self._opener(request, timeout=self.timeout) as response:
+            if payload.get("stream"):
+                return _read_stream(response)
             return json.loads(response.read().decode("utf-8"))
 
-    def complete(self, system: str, messages: list[dict[str, Any]], purpose: str) -> LLMResult:
+    def complete(self, system: str, messages: list[dict[str, Any]], purpose: str, *, max_tokens: int | None = None,
+                 continuations: int | None = None) -> LLMResult:
+        """One reply; a reply cut at the output limit is continued (T-052) and the parts joined.
+        Still cut after the last continuation: LLMError."""
+        limit = max_tokens or self.max_tokens
+        allowed = self.continuations if continuations is None else continuations
+        result = self._once(system, messages, purpose, limit)
+        text, results = result.text, [result]
+        while result.stop_reason == "max_tokens" and len(results) <= allowed:
+            prefill = text.rstrip()
+            purpose_next = f"{purpose}_continue_{len(results)}"
+            if self._prefill:
+                try:
+                    result = self._once(system, [*messages, {"role": "assistant", "content": prefill}],
+                                        purpose_next, limit)
+                    text = prefill + _rejoin(text[len(prefill):], result.text)
+                    results.append(result)
+                    continue
+                except LLMError as exc:
+                    if "HTTP 400" not in str(exc):
+                        raise
+                    self._prefill = False
+                    if self.note is not None:
+                        self.note(f"model {self.model} rejected an assistant prefill; continuing with a user note")
+            result = self._once(system, [*messages, {"role": "assistant", "content": prefill},
+                                         {"role": "user", "content": CONTINUE_NOTE}], purpose_next, limit)
+            text = prefill + _rejoin(text[len(prefill):], _without_overlap(prefill, result.text))
+            results.append(result)
+        if result.stop_reason == "max_tokens":
+            raise LLMError(f"model call {purpose!r} hit the output limit ({limit} tokens"
+                           + (f", {len(results) - 1} continuation(s))" if len(results) > 1 else ")"))
+        if len(results) == 1:
+            return result
+        return LLMResult(
+            text=text, model=result.model,
+            input_tokens=sum(item.input_tokens for item in results),
+            output_tokens=sum(item.output_tokens for item in results),
+            cache_read_tokens=sum(item.cache_read_tokens for item in results),
+            duration_seconds=sum(item.duration_seconds for item in results),
+            stop_reason=result.stop_reason)
+
+    def _once(self, system: str, messages: list[dict[str, Any]], purpose: str, max_tokens: int) -> LLMResult:
         started = time.monotonic()
         attempt = 0
         while True:
             attempt += 1
-            payload = self._payload(system, messages)
+            payload = self._payload(system, messages, max_tokens)
             try:
                 body = self._post(payload)
                 break
@@ -148,6 +207,13 @@ class AnthropicClient:
                     # Decided by this request's payload, not by the shared setting, so every
                     # parallel call that sent it is resent; it does not use up the transport retry.
                     self._drop_temperature()
+                    attempt -= 1
+                    continue
+                if exc.code == 400 and "max_tokens" in detail and max_tokens > MAX_OUTPUT_TOKENS:
+                    # T-052: a model with a smaller output cap; the continuations make up the rest.
+                    if self.note is not None:
+                        self.note(f"model {self.model} refused max_tokens={max_tokens}; using {MAX_OUTPUT_TOKENS}")
+                    max_tokens = MAX_OUTPUT_TOKENS
                     attempt -= 1
                     continue
                 if exc.code in RETRY_STATUS and attempt == 1:
@@ -177,9 +243,49 @@ class AnthropicClient:
         )
         if self.log is not None:
             self.log(purpose, result)
-        if result.stop_reason == "max_tokens":
-            raise LLMError(f"model call {purpose!r} hit the output limit ({self.max_tokens} tokens)")
         return result
+
+
+def _rejoin(trimmed: str, continuation: str) -> str:
+    """The whitespace trimmed from the prefill (the API refuses it) comes back, unless the
+    continuation starts with its own."""
+    return continuation if continuation[:1].isspace() else trimmed + continuation
+
+
+def _without_overlap(before: str, after: str) -> str:
+    """A continuation that repeats the end of the cut text (20+ characters) loses the repeat."""
+    for size in range(min(len(before), len(after), 400), 19, -1):
+        if before.endswith(after[:size]):
+            return after[size:]
+    return after
+
+
+def _read_stream(response: Any) -> dict[str, Any]:
+    """A streamed Messages reply (server-sent events) as the body a plain reply would have."""
+    text: list[str] = []
+    body: dict[str, Any] = {"usage": {}, "stop_reason": ""}
+    for raw in response:
+        line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        kind = event.get("type")
+        if kind == "message_start":
+            message = event.get("message") or {}
+            body["model"] = message.get("model")
+            body["usage"].update(message.get("usage") or {})
+        elif kind == "content_block_delta" and (event.get("delta") or {}).get("type") == "text_delta":
+            text.append(event["delta"].get("text", ""))
+        elif kind == "message_delta":
+            body["stop_reason"] = (event.get("delta") or {}).get("stop_reason") or body["stop_reason"]
+            body["usage"].update({key: value for key, value in (event.get("usage") or {}).items() if value is not None})
+        elif kind == "error":
+            raise json.JSONDecodeError(f"stream error: {event.get('error')}", "", 0)
+    body["content"] = [{"type": "text", "text": "".join(text)}]
+    return body
 
 
 def _retry_delay(error: urllib.error.HTTPError) -> float:

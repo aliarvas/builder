@@ -1,18 +1,30 @@
-# T-048 report: final mock (status: BLOCKED on inputs, 17:32 UTC)
+# T-048 report: final mock, deployed
 
-**What is in `~/Desktop/final-case/case/` (unchanged since 17:10 UTC, checked every 5 s for 20 minutes):** only `BRIEF.md` and `statement-debt-call-flow.pdf`. The folders `sources/` (integration document, section 6), `test-environment/` (`test-customers.md`, `test-customers.json`, rules), `cloudflare-mock/`, `README.md` and `example-scenarios.md` have **not arrived**. The sync does not seem to be running (no new file, no change of the folder time). I searched Desktop, Downloads and Documents for the files: not there.
+**URL:** `https://freya-final-mock.cf-smoke.workers.dev` (Worker `freya-final-mock`, deployed 17:35 UTC with `npx wrangler deploy`).
+Tool base for the workflow: `https://freya-final-mock.cf-smoke.workers.dev/voice/v1/` (so `POST .../voice/v1/cards.list`). `/v1/<service>` and `/<service>` also work. `GET /health` answers `ok`.
+Not done (as asked): no Freya, no builder edit, no commit.
 
-**Why I cannot write the mock yet:** paths, field names, request and response shapes, status codes and the test customers' exact answers all come from those files. Guessing them would produce a mock that fails the scorers' calls. Nothing is written from guesses.
+## What it does
+- **Seven services** from the contract (section 5): `cards.list`, `cards.balance`, `statement.week.get`, `statement.week.decide`, `statement.week.change`, `contact.email.get`, `statement.pdf.send`. POST, JSON in and out, envelope `{data, call}` -> `{data, result}`. Also `POST /oauth2/token` (returns a token; not checked).
+- **Test customers:** 34 from `test-customers.json` (bundled). Lookups as `test-customers.md` says: customer number for `cards.list`, `contact.email.get`, `statement.pdf.send`; card number (exactly as `cards.list` gave it) for balance, week.get; card then week for decide and change. `customerNo` string or number and `newStatementWeek` string or number are the same. The answer is the stored body with the stored status. The one `delaySeconds` entry (customer 94907600, `cards.balance`, 12 s) is waited out and is not in the body; checked live: 200 after 12.3 s.
+- **Not in the data:** unknown customer: `cards.list` 404 `FB_IVR_CHANNEL_102`; unknown card: `cards.balance` 404 `…_120`, `statement.week.get` 404 `…_121`; `statement.pdf.send` for a customer without an entry (94907600, 96125950, 97631186, 97783309, 93821776 and unknown ones) 404 `…_107`; decide, change and `contact.email.get` with no entry (unknown card, a week with no entry such as the card's current week, unknown customer) 400 `INVALID_ARGUMENTS_ERROR` with no `data`.
+- **Required fields:** a missing or empty required field gives 400 `INVALID_ARGUMENTS_ERROR`, message `"<field> cannot be empty"` (`card number cannot be empty` as in the contract). Required: `customerNo` (cards.list), `cardNumber` (balance, week.get), `cardNumber`+`newStatementWeek`+`statementDay` (decide, change), `customerNo`+`intAddressInfoType` (email.get), `customerNo`+`cardNumber`+`currencyType`+`statementDate`+`emailAddress` (pdf.send). Error bodies: `returnCode == code`, `messageText == message`, `type` ERROR/WARNING, `details.guid == result.guid`.
+- **Template variables:** a value starting with `{{` (the panel's Test API Request) gets the first customer's valid answer, like the organizer's example.
+- **State:** a Durable Object (`STATE`, SQLite) keeps a ledger of every call. A successful `statement.week.change` (`exitState` OK) and `statement.pdf.send` (`DONE`) are marked `week_changed` / `statement_sent`. `GET /ledger` or `GET /ledger?customerNo=...` shows them, `POST /admin/reset` clears. The answers never wait for the Durable Object (`waitUntil`), so a ledger fault cannot fail a call.
+- Files: `mock-final/{worker.js, core.js, wrangler.toml, test-customers.json, test/local-test.mjs, test/remote-test.mjs}`.
 
-**Prepared (generic, no case content):**
-- `mock-final/wrangler.toml`: Worker `freya-final-mock`, Durable Object binding `STATE` (class `CustomerState`, SQLite, free plan), as in T-042.
-- The pattern to reuse from `mock/` (T-042): `core.js` with an injected store, `worker.js` routing by customer, node test with an in-memory store.
+## Tests
+- `node mock-final/test/local-test.mjs`: **1104 listed answers equal** (every service, every customer, card and week, string and number forms, status and delay included), plus the unknown, 400, template and path cases.
+- `node mock-final/test/remote-test.mjs https://freya-final-mock.cf-smoke.workers.dev`: **617 requests against the deployed Worker, 0 mismatches** (body and status).
+- Deploy check: a 1101 on the very first requests after deploy (the 12 s card, the ledger) did not come back; repeated calls and `wrangler tail` are clean.
 
-**What the PDF (call flow drawing) already tells us about the services** (names are my reading of the drawing, to be replaced by the integration document):
-1. A card-list service for the customer number (eligible cards, how many, card name, last 4/last 6 digits, card selected).
-2. Statement debt per card: TL debt with payment status (none paid / minimum or more paid / below minimum paid), USD/EUR/GBP debt, cut-off date, due date, minimum.
-3. Cut-off week: read the card's cut-off week, shared statement (primary or linked card), list the other weeks, confirm and change it.
-4. Registered e-mail: read it, send the statement by e-mail.
-5. Second factor (back to the IVR) and "transfer to agent".
+## Rules the test environment states
+1. Return exactly the listed body and status; never make data up. 2. Token, headers, `call`, `aiFlow` and `intAddressInfoType` are not checked or do not change the answer. 3. Dates `dd.MM.yyyy` fixed in the data, amounts are numbers. 4. Fixed errors: 500 `FBE00099` for customers 97073972 (cards.list), 92335586 (contact.email.get), 94835408 (statement.week.get), 94339861 (decide for weeks 1, 3, 4); 404 `FB_IVR_CHANNEL_102` for 93821776; 404 `FB_IVR_CHANNEL_107` for 93635512 (pdf.send). 5. `statement.week.change` returns `statementWeek` and `statementDay` as strings. 6. The card's current week has no decide/change entry. 7. Cards.balance can lack a `debtGBP` block; one product name is empty; customer 93075404 has a prompt-injection product name; two cards with the same name and last four digits exist (92030487, 93931069, 94030575, 95110230, 98814070).
 
-**What I need (from the CTO):** copy the rest of the pack to `~/Desktop/final-case/case/` by hand (or tell me another path), starting with `test-environment/` and the integration document. With them I expect about 30-40 minutes to write, test and deploy (the core and the worker pattern exist; the work is mapping the shapes and the 8 to N test customers).
+## Doubts (documents disagree or are silent)
+1. **State visible later in the call.** The task asks for a confirmed week change to be visible later; the contract says the test environment returns the listed answers exactly. I kept the answers exact: `statement.week.get` still returns the old week after a change. The change and the e-mail are recorded in the ledger only. If the scorers expect the new week in a later `week.get`, we would have to invent `statementDate` etc., which "never make data up" forbids. Tell me if you want it anyway (a flag, 10 minutes).
+2. **Message texts not in the contract:** the 404 text for `statement.week.get` (`…_121`) and all 400 messages except `card number cannot be empty` and `intAddressInfoType cannot be empty` are mine. Only the code matters for the agent (`messageText` is "for logs").
+3. **Required `statementDay`.** The contract says the request model requires it for decide/change; the test-environment text says only data fields decide the answer. I return 400 when it is missing (the real service would). An agent that forgets it fails that call.
+4. **pdf.send for a customer with no entry:** 404 `…_107` (the contract's 404 for that service); the md says "a few customers have no entry at all".
+5. **Duplicate cards across customers:** none found (index is first-wins anyway).
+6. **Time:** `cards.balance` for 7211 takes 12 s on purpose; the workflow's tool timeout must be above 12 s (the builder's write-tool timeout is 30 s; read tools: please check).

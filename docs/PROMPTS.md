@@ -22,7 +22,7 @@ You build a phone agent on the Freya platform from a company's documents. A prog
 - Purpose: Workflow rules learned in our live runs, given to every generic-mode call (T-046).
 - Receiver: builder model
 - Used at: builder/generic.py — the cached context of every generic-mode call
-- Approximate tokens: ~733 (characters ÷ 4)
+- Approximate tokens: ~755 (characters ÷ 4)
 
 ```text
 1. The agent speaks the language the documents give for the calls, in every task_message, every fixed tts line and every spoken example. Amounts are read with their currency, dates in the spoken form of that language.
@@ -35,7 +35,7 @@ You build a phone agent on the Freya platform from a company's documents. A prog
 8. Every conversation node has a way out when the caller says goodbye or wants to end the call: a global node with a `matches_intent` condition (a clear leave-taking only; thanks or okay alone is not a goodbye) that goes to the closing and an `end_call` node. Every path reaches an `end_call` node.
 9. Side questions and interruptions that can come anywhere (a request for a person, a question the documents answer, a complaint) are global nodes; after answering they return with `__previous__`. List terminal nodes and nodes where an interrupt would do harm in `excluded_nodes`. Global nodes need `condition` and `description`; plain nodes never carry `condition`, `description` or `excluded_nodes`.
 10. A loop of code and api_request nodes must also leave on the engine counters `<node>_success_count` / `<node>_failure_count` (`greater_than` a small number), so it ends even when code fails.
-11. Give conversation nodes `max_node_turns` with a `max_turn_transition` to a polite closing.
+11. Give conversation nodes `max_node_turns` with a `max_turn_transition` to a polite closing. Give every api tool `"config": {"timeoutMs": 30000}` or more: some services answer slowly.
 12. No `agent_config`, no `null`, node `name` equals its key in snake_case.
 ```
 
@@ -55,7 +55,7 @@ Write the company's services that the phone agent must call, from the integratio
 - Purpose: Asks for the workflow design from the documents and the contract (T-046).
 - Receiver: builder model
 - Used at: builder/generic.py — make_design
-- Approximate tokens: ~210 (characters ÷ 4)
+- Approximate tokens: ~297 (characters ÷ 4)
 
 ```text
 The services, as the program will expose them to the agent:
@@ -63,7 +63,7 @@ The services, as the program will expose them to the agent:
 
 Design the phone agent as one JSON object:
 {"language": ..., "call_variables": [{"name", "example"}], "steps": [{"key", "node_type" (conversation | api_request | code | end_call | global), "purpose", "spoken_rules" (what the agent says and must not say here, in the call's language, with the exact sentences the documents require), "tools", "extraction" (fields with enum values), "transitions" [{"to", "when"}]}], "edge_cases" [{"case", "handling", "step"}]}.
-Cover every branch of the documents' flow, every service result and error status, every rule about what may and may not be said, and every situation the FAQ, mails, meetings and examples mention. Resolve conflicts by the newest decision and say which you chose in "edge_cases". Follow the platform rules.
+Cover every branch of the documents' flow, every service result and error status, every rule about what may and may not be said, and every situation the FAQ, mails, meetings and examples mention. Resolve conflicts by the newest decision and say which you chose in "edge_cases". Follow the platform rules. The design must stay under 6000 tokens; a design over 8000 tokens is cut off and thrown away. So: short phrases, not sentences; rules that hold in many steps written once (in the first step or an edge case), not per step; exact required sentences only once; no copied document text; merge steps that differ only in wording. The next step expands it.
 ```
 
 ## GENERIC_RENDER_TASK
@@ -71,7 +71,7 @@ Cover every branch of the documents' flow, every service result and error status
 - Purpose: Asks for the Freya workflow JSON from the design (T-046).
 - Receiver: builder model
 - Used at: builder/generic.py — render
-- Approximate tokens: ~105 (characters ÷ 4)
+- Approximate tokens: ~204 (characters ÷ 4)
 
 ```text
 Design:
@@ -80,7 +80,7 @@ Design:
 Services (call them at {mock_url} plus the path):
 {contract}
 
-Write the complete Freya workflow JSON for this design, exactly in the platform format (top-level `initial_node`, `system_prompt`, `nodes`, `global_nodes`, `test_variables`). Every task_message is complete and self-contained for its step and written in the call's language. Follow the platform rules. Reply with the workflow object only.
+Write the complete Freya workflow JSON for this design, exactly in the platform format (top-level `initial_node`, `system_prompt`, `nodes`, `global_nodes`, `test_variables`). Every task_message is complete and written in the call's language. Keep the JSON small: rules that hold in every step (tone, honesty, language, privacy, how to say amounts and dates) go once in the global `system_prompt`, not in each task_message; each task_message holds only what is particular to its step, as short instructions, with the exact required sentences; do not copy the design's or the documents' wording beyond those sentences; no comments, no unused keys, no empty lists or objects. Follow the platform rules. Reply with the workflow object only.
 ```
 
 ## GENERIC_REPAIR_TASK

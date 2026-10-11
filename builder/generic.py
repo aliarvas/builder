@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from .case_folder import Case, CaseDocument, with_server
 from .code_cycles import code_cycle_gaps
-from .llm import text_block
+from .llm import AnthropicClient, LLMError, text_block
 from .prompts import (
     GENERIC_CONTRACT_TASK, GENERIC_DESIGN_TASK, GENERIC_PLATFORM_RULES, GENERIC_RENDER_TASK, GENERIC_REPAIR_TASK,
     GENERIC_SYSTEM,
@@ -34,6 +34,11 @@ from .prompts import (
 ROOT = Path(__file__).resolve().parents[1]
 KIT_DOCS = ("build-the-builder-v2/docs/workflow-format.md", "build-the-builder-v2/docs/tools-and-code.md")
 REPAIR_ROUNDS = 3
+# T-052: the design must stay short; the render may be long (and is continued when cut).
+DESIGN_MAX_TOKENS = 8000
+RENDER_MAX_TOKENS = 64000
+DESIGN_TOO_LONG = ("Your design was cut at the output limit ({limit} tokens). Write the whole design again, much "
+                   "shorter (at most about 5000 tokens): merge similar steps, short phrases, no copied text.")
 CONTRACT_REPAIR_ROUNDS = 1
 NODE_TYPES = ("conversation", "api_request", "code", "end_call")
 OPERATORS = ("equals", "not_equals", "greater_than", "less_than", "contains", "is_set", "is_not_set", "always",
@@ -57,14 +62,22 @@ class GenericBuildError(RuntimeError):
 # Entry points (T-047 uses build and repair)
 # ---------------------------------------------------------------------------
 
-def build(case: Case, mock_url: str, trace: Trace, client: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Contract, design, render, validate and repair. Returns (workflow, contract)."""
+def build(case: Case, mock_url: str, trace: Trace, client: Any = None, design: bool = True
+          ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Contract, design (optional), render, validate and repair. Returns (workflow, contract)."""
     complete = _completer(client, trace)
     context = _context_blocks(case)
     contract = derive_contract(case, mock_url, complete, context, trace)
+    mock_url = base_url(mock_url, contract)
+    contract = with_server(contract, mock_url)
+    trace.add("tool_base_url", mock_url)
     _write_trace_json(trace, "contract", contract)
-    design = make_design(contract, complete, context, trace)
-    _write_trace_json(trace, "design", design)
+    if design:
+        design = make_design(contract, complete, context, trace)
+        _write_trace_json(trace, "design", design)
+    else:
+        design = {"note": "no separate design step: design the workflow from the documents directly"}
+        trace.add("design", "skipped (render from the documents)")
     workflow, messages = render(design, contract, complete, context, trace)
     workflow = _repair_loop(workflow, contract, mock_url, messages, complete, trace, [])
     _LAST.update(case=case, contract=contract, mock_url=mock_url, design=design, complete=complete,
@@ -91,16 +104,16 @@ def repair(case: Case, workflow: dict[str, Any], problems: list[str], trace: Tra
 
 def _completer(client: Any, trace: Trace) -> Complete:
     if client is None:
-        from .llm import AnthropicClient
-
         client = AnthropicClient(
             log=lambda purpose, result: trace.add_model_call(
                 result.model, purpose, result.duration_seconds, result.input_tokens, result.output_tokens,
                 result.cache_read_tokens),
             note=lambda message: trace.add("warning", message))
     if callable(client) and not hasattr(client, "complete"):
-        return client
-    return lambda system, messages, purpose: client.complete(system, messages, purpose).text
+        return lambda system, messages, purpose, **limits: client(system, messages, purpose)
+    if not isinstance(client, AnthropicClient):  # a test client: no per-call limits
+        return lambda system, messages, purpose, **limits: client.complete(system, messages, purpose).text
+    return lambda system, messages, purpose, **limits: client.complete(system, messages, purpose, **limits).text
 
 
 def _context_blocks(case: Case) -> list[dict[str, Any]]:
@@ -114,8 +127,9 @@ def _context_blocks(case: Case) -> list[dict[str, Any]]:
                        + "\n\n# PLATFORM RULES LEARNED IN LIVE RUNS\n\n" + GENERIC_PLATFORM_RULES.text, cache=True)]
 
 
-def _ask(complete: Complete, messages: list[dict[str, Any]], purpose: str) -> tuple[dict[str, Any] | None, str]:
-    reply = complete(GENERIC_SYSTEM.text, messages, purpose)
+def _ask(complete: Complete, messages: list[dict[str, Any]], purpose: str, **limits: int
+         ) -> tuple[dict[str, Any] | None, str]:
+    reply = complete(GENERIC_SYSTEM.text, messages, purpose, **limits)
     messages.append({"role": "assistant", "content": reply or "(empty reply)"})
     try:
         value = json.loads(json_object(reply))
@@ -159,6 +173,20 @@ def derive_contract(case: Case, mock_url: str, complete: Complete, context: list
         raise GenericBuildError("no service contract could be derived from the documents")
     trace.add("contract", f"derived: {len(contract['paths'])} path(s): {', '.join(contract['paths'])}")
     return with_server(contract, mock_url)
+
+
+def base_url(mock_url: str, contract: dict[str, Any]) -> str:
+    """The URL the tools put in front of a contract path. A mock URL given with the services'
+    common path prefix ("https://host/v1/" while the paths are "/v1/...") loses that prefix,
+    so the prefix is not sent twice."""
+    from urllib.parse import urlsplit
+
+    url = mock_url.rstrip("/")
+    prefix = urlsplit(url).path.rstrip("/")
+    paths = [str(path) for path in (contract.get("paths") or {})]
+    if prefix and paths and all(path == prefix or path.startswith(prefix + "/") for path in paths):
+        return url[: len(url) - len(prefix)]
+    return url
 
 
 def documents_text(case: Case) -> str:
@@ -232,11 +260,25 @@ def make_design(contract: dict[str, Any], complete: Complete, context: list[dict
                 trace: Trace) -> dict[str, Any]:
     messages = [{"role": "user", "content": [*context, text_block(GENERIC_DESIGN_TASK.text.replace(
         "{contract}", json.dumps(contract, indent=1, ensure_ascii=False)))]}]
-    design, problem = _ask(complete, messages, "generic:design")
+    limits = dict(max_tokens=DESIGN_MAX_TOKENS, continuations=0)
+    try:
+        design, problem = _ask(complete, messages, "generic:design", **limits)
+    except LLMError as exc:
+        if "output limit" not in str(exc):
+            raise
+        messages.append({"role": "assistant", "content": "(cut at the output limit)"})
+        messages.append({"role": "user", "content": DESIGN_TOO_LONG.replace("{limit}", str(DESIGN_MAX_TOKENS))})
+        try:
+            design, problem = _ask(complete, messages, "generic:design_shorter", **limits)
+        except LLMError as again:
+            if "output limit" not in str(again):
+                raise
+            trace.add("warning", "design still too long after one shorter request: render from the documents")
+            return {"note": "no separate design step: design the workflow from the documents directly"}
     if design is None:
         messages.append({"role": "user", "content": GENERIC_REPAIR_TASK.text.replace("{problems}", "- " + problem)
                          .replace("{what}", "the whole design JSON")})
-        design, problem = _ask(complete, messages, "generic:design_repair")
+        design, problem = _ask(complete, messages, "generic:design_repair", **limits)
     if design is None:
         raise GenericBuildError("no design: " + problem)
     trace.add("design", f"{len(design.get('steps') or [])} step(s)")
@@ -253,11 +295,11 @@ def _render_request(design: dict[str, Any], contract: dict[str, Any]) -> str:
 def render(design: dict[str, Any], contract: dict[str, Any], complete: Complete, context: list[dict[str, Any]],
            trace: Trace) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     messages = [{"role": "user", "content": [*context, text_block(_render_request(design, contract))]}]
-    workflow, problem = _ask(complete, messages, "generic:render")
+    workflow, problem = _ask(complete, messages, "generic:render", max_tokens=RENDER_MAX_TOKENS)
     if workflow is None:
         messages.append({"role": "user", "content": GENERIC_REPAIR_TASK.text.replace("{problems}", "- " + problem)
                          .replace("{what}", "the whole workflow JSON")})
-        workflow, problem = _ask(complete, messages, "generic:render_retry")
+        workflow, problem = _ask(complete, messages, "generic:render_retry", max_tokens=RENDER_MAX_TOKENS)
     if workflow is None:
         raise GenericBuildError("no workflow: " + problem)
     workflow = workflow.get("workflow", workflow) if isinstance(workflow.get("workflow"), dict) else workflow
@@ -329,6 +371,7 @@ def clean(workflow: dict[str, Any]) -> dict[str, Any]:
         return value
 
     result = strip(workflow)
+    _tool_timeouts(result)
     result.pop("agent_config", None)
     result.pop("nodePositions", None)
     for section in ("nodes", "global_nodes"):
@@ -336,6 +379,27 @@ def clean(workflow: dict[str, Any]) -> dict[str, Any]:
             if isinstance(node, dict):
                 node["name"] = key
     return result
+
+
+# A slow bank service (one test answer waits 12 s) must not fail on the tool's own timeout.
+TOOL_TIMEOUT_MS = 30000
+
+
+def _tool_timeouts(workflow: dict[str, Any]) -> None:
+    """Every api tool waits at least TOOL_TIMEOUT_MS per attempt."""
+    tools = list(workflow.get("tools") or [])
+    for section in ("nodes", "global_nodes"):
+        for node in (workflow.get(section) or {}).values():
+            if isinstance(node, dict):
+                tools += [*(node.get("tools") or []), *(node.get("pre_actions") or [])]
+    for tool in tools:
+        if isinstance(tool, dict) and (tool.get("function") or {}).get("handler") == "__function__:api_call":
+            config = tool.setdefault("config", {})
+            try:
+                current = int(config.get("timeoutMs") or 0)
+            except (TypeError, ValueError):
+                current = 0
+            config["timeoutMs"] = max(current, TOOL_TIMEOUT_MS)
 
 
 def validate(workflow: dict[str, Any], contract: dict[str, Any], mock_url: str) -> list[str]:

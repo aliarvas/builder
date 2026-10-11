@@ -201,3 +201,165 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class T051Tests(unittest.TestCase):
+    """T-051: streaming replies, the tool base URL, tool timeouts and render without a design."""
+
+    def test_a_streamed_reply_is_read_whole(self):
+        import os
+        from builder.llm import AnthropicClient
+
+        events = [{"type": "message_start", "message": {"model": "m", "usage": {"input_tokens": 5}}},
+                  {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "{\"a\":"}},
+                  {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "1}"}},
+                  {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}}]
+        data = b"".join(b"event: x\ndata: " + json.dumps(item).encode() + b"\n\n" for item in events)
+
+        class Reply(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        sent = {}
+
+        def opener(request, timeout):
+            sent.update(json.loads(request.data), timeout=timeout)
+            return Reply(data)
+
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"}):
+            client = AnthropicClient(stream=True, timeout=120, opener=opener)
+            result = client.complete("s", [{"role": "user", "content": "hi"}], "t")
+        self.assertEqual(('{"a":1}', 5, 7, "end_turn"),
+                         (result.text, result.input_tokens, result.output_tokens, result.stop_reason))
+        self.assertTrue(sent["stream"])
+        self.assertEqual(120, sent["timeout"])
+
+    def test_the_base_url_drops_a_prefix_the_paths_already_have(self):
+        contract = {"paths": {"/v1/a.list": {}, "/v1/b.get": {}}}
+        self.assertEqual("https://h.dev", generic.base_url("https://h.dev/v1/", contract))
+        self.assertEqual("https://h.dev", generic.base_url("https://h.dev", contract))
+        self.assertEqual("https://h.dev/api", generic.base_url("https://h.dev/api", contract))
+
+    def test_api_tools_wait_at_least_30_seconds(self):
+        cleaned = generic.clean(WORKFLOW)
+        tool = cleaned["nodes"]["lookup"]["pre_actions"][0]
+        self.assertEqual(generic.TOOL_TIMEOUT_MS, tool["config"]["timeoutMs"])
+
+    def test_render_without_a_design_call(self):
+        model = FakeModel([CONTRACT, WORKFLOW])
+        with tempfile.TemporaryDirectory() as tmp:
+            case = read_case(folder(Path(tmp) / "case"), MOCK)
+            workflow, _ = generic.build(case, MOCK, Trace(), model, design=False)
+        self.assertEqual(["generic:contract", "generic:render"], [purpose for purpose, _ in model.calls])
+        self.assertEqual("lookup", workflow["initial_node"])
+
+
+class T052Tests(unittest.TestCase):
+    """T-052: a reply cut at the output limit is continued; the design has its own small limit."""
+
+    @staticmethod
+    def client(replies, sent, **options):
+        import os
+        from builder.llm import AnthropicClient
+
+        def opener(request, timeout):
+            payload = json.loads(request.data)
+            sent.append(payload)
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            text, stop = reply
+            body = {"model": "m", "content": [{"type": "text", "text": text}], "stop_reason": stop,
+                    "usage": {"input_tokens": 1, "output_tokens": 10}}
+
+            class Reply(io.BytesIO):
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+            return Reply(json.dumps(body).encode())
+
+        patcher = mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"})
+        patcher.start()
+        try:
+            return AnthropicClient(opener=opener, temperature=None, **options)
+        finally:
+            patcher.stop()
+
+    def complete(self, client, **limits):
+        import os
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"}):
+            return client.complete("s", [{"role": "user", "content": "hi"}], "render", **limits)
+
+    def test_a_cut_reply_is_continued_with_a_prefill_and_joined(self):
+        sent = []
+        client = self.client([('{"a": "one ', "max_tokens"), ('two", ', "max_tokens"), ('"b": 2}', "end_turn")], sent)
+        result = self.complete(client, max_tokens=64000)
+        self.assertEqual('{"a": "one two", "b": 2}', result.text)
+        self.assertEqual(30, result.output_tokens)
+        self.assertEqual([64000] * 3, [item["max_tokens"] for item in sent])
+        self.assertEqual({"role": "assistant", "content": '{"a": "one'}, sent[1]["messages"][-1])
+        self.assertEqual('{"a": "one two",', sent[2]["messages"][-1]["content"])
+
+    def test_still_cut_after_two_continuations_is_an_error(self):
+        from builder.llm import LLMError
+        client = self.client([("x" * 5, "max_tokens")] * 3, [])
+        with self.assertRaisesRegex(LLMError, "output limit"):
+            self.complete(client)
+
+    def test_a_rejected_prefill_continues_with_a_user_note_without_the_repeat(self):
+        import urllib.error
+        sent = []
+        rejected = urllib.error.HTTPError("u", 400, "bad", {}, io.BytesIO(b'{"error": "prefill not supported"}'))
+        head = '{"steps": ["alpha beta gamma delta epsilon"'
+        client = self.client([(head, "max_tokens"), rejected, ('beta gamma delta epsilon", "zeta"]}', "end_turn")], sent)
+        result = self.complete(client)
+        self.assertEqual('{"steps": ["alpha beta gamma delta epsilon", "zeta"]}', result.text)
+        self.assertEqual("user", sent[2]["messages"][-1]["role"])
+
+    def test_the_design_is_limited_and_asked_shorter_once(self):
+        from builder.llm import LLMError
+        calls = []
+
+        def complete(system, messages, purpose, **limits):
+            calls.append((purpose, limits))
+            if purpose == "generic:design":
+                raise LLMError("model call 'generic:design' hit the output limit (8000 tokens)")
+            return json.dumps({"steps": [{"key": "a"}]})
+
+        design = generic.make_design({}, complete, [], Trace())
+        self.assertEqual([{"key": "a"}], design["steps"])
+        self.assertEqual([("generic:design", {"max_tokens": 8000, "continuations": 0}),
+                          ("generic:design_shorter", {"max_tokens": 8000, "continuations": 0})], calls)
+
+    def test_a_design_too_long_twice_falls_back_to_no_design(self):
+        from builder.llm import LLMError
+
+        def complete(system, messages, purpose, **limits):
+            raise LLMError(f"model call {purpose!r} hit the output limit (8000 tokens)")
+
+        trace = Trace()
+        self.assertIn("note", generic.make_design({}, complete, [], trace))
+
+    def test_the_render_asks_for_64000_tokens(self):
+        calls = []
+
+        def complete(system, messages, purpose, **limits):
+            calls.append((purpose, limits))
+            return json.dumps(WORKFLOW)
+
+        generic.render({}, {}, complete, [], Trace())
+        self.assertEqual([("generic:render", {"max_tokens": 64000})], calls)
+
+    def test_a_refused_64000_limit_falls_back_to_48000(self):
+        import urllib.error
+        sent = []
+        refused = urllib.error.HTTPError("u", 400, "bad", {}, io.BytesIO(b'{"error": "max_tokens: 64000 > 48000"}'))
+        client = self.client([refused, ("{}", "end_turn")], sent)
+        self.assertEqual("{}", self.complete(client, max_tokens=64000).text)
+        self.assertEqual([64000, 48000], [item["max_tokens"] for item in sent])
