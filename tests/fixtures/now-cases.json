@@ -1,0 +1,727 @@
+{
+ "about": "NOW-CASES: public cases replayed on other 'now' values. Expected dates come from the spec calendar (tests/now_calendar.py, independent of the builder code); several are checked by hand in tests/test_now_cases.py.",
+ "cases": [
+  {
+   "id": "NOW-FRI-01",
+   "base": "PUB-01",
+   "brief": "A",
+   "description": "Friday before a weekend: pays the full amount today.",
+   "variables": {
+    "first_name": "Daniel",
+    "last_name": "Reyes",
+    "title": "Mr",
+    "now": "2026-10-16T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "4821",
+     "past_due": 420.0,
+     "days_late": 6,
+     "minimum_payment": 126.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "today"
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 420.0,
+      "date": "2026-10-16"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'today' = 2026-10-16; deadline 2026-11-04; allowed -> 2026-10-16"
+    ]
+   }
+  },
+  {
+   "id": "NOW-FRI-02",
+   "base": "PUB-01",
+   "brief": "A",
+   "description": "Friday before a weekend: 'tomorrow' is a Saturday; accepts the next business day offered.",
+   "variables": {
+    "first_name": "Daniel",
+    "last_name": "Reyes",
+    "title": "Mr",
+    "now": "2026-10-16T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "4821",
+     "past_due": 420.0,
+     "days_late": 6,
+     "minimum_payment": 126.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "tomorrow"
+    },
+    {
+     "kind": "accept",
+     "product": 1
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 420.0,
+      "date": "2026-10-19"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'tomorrow' = 2026-10-17; deadline 2026-11-04; not a business day -> 2026-10-19"
+    ]
+   }
+  },
+  {
+   "id": "NOW-FRI-03",
+   "base": "PUB-11",
+   "brief": "B",
+   "description": "Friday: all three products 'next Friday' (the following week's Friday).",
+   "variables": {
+    "first_name": "Sofia",
+    "last_name": "Almeida",
+    "title": "Ms",
+    "now": "2026-10-16T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "2288",
+     "past_due": 220.0,
+     "days_late": 9,
+     "minimum_payment": 66.0
+    },
+    {
+     "type": "personal_loan",
+     "past_due": 640.0,
+     "days_late": 9,
+     "instalment_amount": 213.0
+    },
+    {
+     "type": "car_loan",
+     "past_due": 75.0,
+     "days_late": 3,
+     "instalment_amount": 25.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "next friday"
+    },
+    {
+     "kind": "offer",
+     "product": 2,
+     "date": "next friday"
+    },
+    {
+     "kind": "offer",
+     "product": 3,
+     "date": "next friday"
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 220.0,
+      "date": "2026-10-23"
+     },
+     {
+      "product_id": "p2",
+      "amount": 640.0,
+      "date": "2026-10-23"
+     },
+     {
+      "product_id": "p3",
+      "amount": 75.0,
+      "date": "2026-10-23"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'next friday' = 2026-10-23; deadline 2026-10-28; allowed -> 2026-10-23",
+     "p2: 'next friday' = 2026-10-23; deadline 2026-10-28; allowed -> 2026-10-23",
+     "p3: 'next friday' = 2026-10-23; deadline 2026-11-04; allowed -> 2026-10-23"
+    ]
+   }
+  },
+  {
+   "id": "NOW-FRI-04",
+   "base": "PUB-04",
+   "brief": "A",
+   "description": "Friday: names a day after the deadline; the deadline counts business days over the weekend and the 26 October holiday; accepts it.",
+   "variables": {
+    "first_name": "Lena",
+    "last_name": "Hoffmann",
+    "title": "Ms",
+    "now": "2026-10-16T11:00"
+   },
+   "products": [
+    {
+     "type": "car_loan",
+     "past_due": 1250.0,
+     "days_late": 14,
+     "instalment_amount": 400.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "20 november"
+    },
+    {
+     "kind": "accept",
+     "product": 1
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 1250.0,
+      "date": "2026-10-28"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: '20 november' = 2026-11-20; deadline 2026-10-28; after the deadline -> 2026-10-28"
+    ]
+   }
+  },
+  {
+   "id": "NOW-HOL-01",
+   "base": "PUB-07",
+   "brief": "A",
+   "description": "Holiday week (Monday; Wednesday is a holiday): 'this Wednesday' moves to the next business day; accepts it.",
+   "variables": {
+    "first_name": "Samuel",
+    "last_name": "Ortiz",
+    "title": "Mr",
+    "now": "2026-11-09T11:00"
+   },
+   "products": [
+    {
+     "type": "personal_loan",
+     "past_due": 540.0,
+     "days_late": 5,
+     "instalment_amount": 180.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "this wednesday"
+    },
+    {
+     "kind": "accept",
+     "product": 1
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 540.0,
+      "date": "2026-11-12"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'this wednesday' = 2026-11-11; deadline 2026-11-27; not a business day -> 2026-11-12"
+    ]
+   }
+  },
+  {
+   "id": "NOW-HOL-02",
+   "base": "PUB-06",
+   "brief": "A",
+   "description": "Holiday week: the full amount is too much; takes the floor this Friday.",
+   "variables": {
+    "first_name": "Priya",
+    "last_name": "Nair",
+    "title": "Ms",
+    "now": "2026-11-09T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "1903",
+     "past_due": 2125.1,
+     "days_late": 12,
+     "minimum_payment": 637.5
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "this friday",
+     "amount_kind": "minimum"
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 637.5,
+      "date": "2026-11-13"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'this friday' = 2026-11-13; deadline 2026-11-19; allowed -> 2026-11-13"
+    ]
+   }
+  },
+  {
+   "id": "NOW-HOL-03",
+   "base": "PUB-13",
+   "brief": "B",
+   "description": "Holiday week: one date for both; the loan's deadline (7 business days, the holiday skipped) is earlier; accepts it.",
+   "variables": {
+    "first_name": "Elena",
+    "last_name": "Rossi",
+    "title": "Ms",
+    "now": "2026-11-09T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "6604",
+     "past_due": 300.0,
+     "days_late": 4,
+     "minimum_payment": 90.0
+    },
+    {
+     "type": "personal_loan",
+     "past_due": 900.0,
+     "days_late": 20,
+     "instalment_amount": 300.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "27 november"
+    },
+    {
+     "kind": "offer",
+     "product": 2,
+     "date": "27 november"
+    },
+    {
+     "kind": "accept",
+     "product": 2
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 300.0,
+      "date": "2026-11-27"
+     },
+     {
+      "product_id": "p2",
+      "amount": 900.0,
+      "date": "2026-11-19"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: '27 november' = 2026-11-27; deadline 2026-11-27; allowed -> 2026-11-27",
+     "p2: '27 november' = 2026-11-27; deadline 2026-11-19; after the deadline -> 2026-11-19"
+    ]
+   }
+  },
+  {
+   "id": "NOW-EVE-01",
+   "base": "PUB-10",
+   "brief": "A",
+   "description": "Day before a holiday: 'tomorrow' is the holiday; accepts the next business day; the first create_promise fails.",
+   "variables": {
+    "first_name": "Grace",
+    "last_name": "Lin",
+    "title": "Ms",
+    "now": "2026-11-25T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "7740",
+     "past_due": 365.0,
+     "days_late": 8,
+     "minimum_payment": 109.5
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "tomorrow"
+    },
+    {
+     "kind": "accept",
+     "product": 1
+    }
+   ],
+   "record_answers": [
+    false,
+    true
+   ],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 365.0,
+      "date": "2026-11-27"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'tomorrow' = 2026-11-26; deadline 2026-12-07; not a business day -> 2026-11-27"
+    ]
+   }
+  },
+  {
+   "id": "NOW-EVE-02",
+   "base": "PUB-12",
+   "brief": "B",
+   "description": "Day before a holiday: the card 'tomorrow' (holiday, moved to Friday); refuses the two loans.",
+   "variables": {
+    "first_name": "Marcus",
+    "last_name": "Bell",
+    "title": "Mr",
+    "now": "2026-11-25T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "9015",
+     "past_due": 510.0,
+     "days_late": 16,
+     "minimum_payment": 153.0
+    },
+    {
+     "type": "personal_loan",
+     "past_due": 1320.0,
+     "days_late": 16,
+     "instalment_amount": 440.0
+    },
+    {
+     "type": "car_loan",
+     "past_due": 140.0,
+     "days_late": 7,
+     "instalment_amount": 46.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "tomorrow"
+    },
+    {
+     "kind": "accept",
+     "product": 1
+    },
+    {
+     "kind": "refuse",
+     "product": 2
+    },
+    {
+     "kind": "refuse",
+     "product": 3
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 510.0,
+      "date": "2026-11-27"
+     }
+    ],
+    "notes": [
+     {
+      "product_id": "p2",
+      "reason": "refused"
+     },
+     {
+      "product_id": "p3",
+      "reason": "refused"
+     }
+    ],
+    "dates_why": [
+     "p1: 'tomorrow' = 2026-11-26; deadline 2026-12-07; not a business day -> 2026-11-27"
+    ]
+   }
+  },
+  {
+   "id": "NOW-YEAR-01",
+   "base": "PUB-01",
+   "brief": "A",
+   "description": "Month and year end: pays the full amount today.",
+   "variables": {
+    "first_name": "Daniel",
+    "last_name": "Reyes",
+    "title": "Mr",
+    "now": "2026-12-30T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "4821",
+     "past_due": 420.0,
+     "days_late": 6,
+     "minimum_payment": 126.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "today"
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 420.0,
+      "date": "2026-12-30"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'today' = 2026-12-30; deadline 2027-01-18; allowed -> 2026-12-30"
+    ]
+   }
+  },
+  {
+   "id": "NOW-YEAR-02",
+   "base": "PUB-10",
+   "brief": "A",
+   "description": "Month and year end: 'this Friday' is 1 January (holiday, next year); accepts the next business day; the first create_promise fails.",
+   "variables": {
+    "first_name": "Grace",
+    "last_name": "Lin",
+    "title": "Ms",
+    "now": "2026-12-30T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "7740",
+     "past_due": 365.0,
+     "days_late": 8,
+     "minimum_payment": 109.5
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "this friday"
+    },
+    {
+     "kind": "accept",
+     "product": 1
+    }
+   ],
+   "record_answers": [
+    false,
+    true
+   ],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 365.0,
+      "date": "2027-01-04"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'this friday' = 2027-01-01; deadline 2027-01-11; not a business day -> 2027-01-04"
+    ]
+   }
+  },
+  {
+   "id": "NOW-YEAR-03",
+   "base": "PUB-04",
+   "brief": "A",
+   "description": "Month and year end: names a January day after the deadline; the deadline crosses the year and skips 1 January; accepts it.",
+   "variables": {
+    "first_name": "Lena",
+    "last_name": "Hoffmann",
+    "title": "Ms",
+    "now": "2026-12-30T11:00"
+   },
+   "products": [
+    {
+     "type": "car_loan",
+     "past_due": 1250.0,
+     "days_late": 14,
+     "instalment_amount": 400.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "20 january"
+    },
+    {
+     "kind": "accept",
+     "product": 1
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 1250.0,
+      "date": "2027-01-11"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: '20 january' = 2027-01-20; deadline 2027-01-11; after the deadline -> 2027-01-11"
+    ]
+   }
+  },
+  {
+   "id": "NOW-YEAR-04",
+   "base": "PUB-11",
+   "brief": "B",
+   "description": "Month and year end: all three 'next Monday' (4 January, next year).",
+   "variables": {
+    "first_name": "Sofia",
+    "last_name": "Almeida",
+    "title": "Ms",
+    "now": "2026-12-30T11:00"
+   },
+   "products": [
+    {
+     "type": "credit_card",
+     "card_last4": "2288",
+     "past_due": 220.0,
+     "days_late": 9,
+     "minimum_payment": 66.0
+    },
+    {
+     "type": "personal_loan",
+     "past_due": 640.0,
+     "days_late": 9,
+     "instalment_amount": 213.0
+    },
+    {
+     "type": "car_loan",
+     "past_due": 75.0,
+     "days_late": 3,
+     "instalment_amount": 25.0
+    }
+   ],
+   "turns": [
+    {
+     "kind": "offer",
+     "product": 1,
+     "date": "next monday"
+    },
+    {
+     "kind": "offer",
+     "product": 2,
+     "date": "next monday"
+    },
+    {
+     "kind": "offer",
+     "product": 3,
+     "date": "next monday"
+    }
+   ],
+   "record_answers": [],
+   "expected": {
+    "outcome": "promise",
+    "reason": null,
+    "promises": [
+     {
+      "product_id": "p1",
+      "amount": 220.0,
+      "date": "2027-01-04"
+     },
+     {
+      "product_id": "p2",
+      "amount": 640.0,
+      "date": "2027-01-04"
+     },
+     {
+      "product_id": "p3",
+      "amount": 75.0,
+      "date": "2027-01-04"
+     }
+    ],
+    "notes": [],
+    "dates_why": [
+     "p1: 'next monday' = 2027-01-04; deadline 2027-01-11; allowed -> 2027-01-04",
+     "p2: 'next monday' = 2027-01-04; deadline 2027-01-11; allowed -> 2027-01-04",
+     "p3: 'next monday' = 2027-01-04; deadline 2027-01-18; allowed -> 2027-01-04"
+    ]
+   }
+  }
+ ]
+}
