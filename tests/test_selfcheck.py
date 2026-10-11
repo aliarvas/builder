@@ -39,12 +39,12 @@ SPECS = {
 }
 A_PLUS_B = ("spec-brief-b.json", "brief-ab-extracted.json", "brief-ab-extracted-tagged.json", "brief-ab-extracted-v2.json")
 # Known gaps (listed in tasks/T-010-report.md):
-# - Brief B "paid" and "dispute" rows are named only by a returning per-product path; the closing
-#   does not derive the call's outcome from the notes (AB-FRESH risk 5, open).
+# - In the recorded A+B extractions the "paid" and "dispute" rows are named only by a returning
+#   per-product path; they have no outcome_from_notes block (T-011; spec-brief-b has one).
 # - The REPRO 13:00 extraction has no path for a declined hardship offer (F-065).
 KNOWN = {
     **{name: {f"reach_outcomes[{index}]" for index in indexes} for name, indexes in (
-        ("spec-brief-b.json", (1, 3)), ("brief-ab-extracted.json", (1, 7)),
+        ("brief-ab-extracted.json", (1, 7)),
         ("brief-ab-extracted-tagged.json", (1, 7)), ("brief-ab-extracted-v2.json", (1, 7)))},
     "brief-a-repro-1300.json": {"reach_outcomes[6]"},
 }
@@ -132,7 +132,10 @@ class MutationTests(unittest.TestCase):
             workflow["nodes"]["close_record"]["pre_actions"] = []
         report = self.run_mutated(drop_close)
         self.assertTrue(all("api step close_record has no tool" in item.reason for item in report.builder_problems))
-        self.assertEqual(len(report.results), len(report.builder_problems))
+        # T-012: a hang-up is closed by the end-of-call tool, not by the closing chain.
+        chain = [item for item in report.results if not item.scenario.startswith("hangup_")]
+        self.assertEqual(len(chain), len(report.builder_problems))
+        self.assertEqual(4, len(report.results) - len(chain))
 
     def test_a_code_step_that_raises_is_caught(self):
         def break_code(workflow):

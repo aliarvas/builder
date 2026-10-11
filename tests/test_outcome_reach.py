@@ -54,14 +54,19 @@ class UnreachableOutcomeTests(unittest.TestCase):
         self.assertIn("the call can never end this way", found[0])
 
     def test_rows_named_only_by_a_returning_path_get_their_own_warning(self):
-        # Brief B: paid and dispute are per-product notes (then return); the closing does not yet
-        # derive the call's outcome from the notes (AB-FRESH risk 5, open).
-        for name in ("spec-brief-b.json", "extract/brief-ab-extracted-v2.json"):
-            with self.subTest(spec=name):
-                data = json.loads((ROOT / "tests/fixtures" / name).read_text(encoding="utf-8"))
-                found = unreachable_outcomes(parse_spec(data))
-                self.assertEqual(2, len(found), found)
-                self.assertTrue(all("only a special path that returns names it" in line for line in found))
+        # Brief B: paid and dispute are per-product notes (then return). The recorded extraction
+        # has no outcome_from_notes block, so the closing does not derive them (AB-FRESH risk 5).
+        data = json.loads((ROOT / "tests/fixtures/extract/brief-ab-extracted-v2.json").read_text(encoding="utf-8"))
+        found = unreachable_outcomes(parse_spec(data))
+        self.assertEqual(2, len(found), found)
+        self.assertTrue(all("only a special path that returns names it" in line for line in found))
+
+    def test_rows_the_notes_derive_are_reached(self):
+        # T-011: spec-brief-b carries closing.product_notes.outcome_from_notes.
+        data = json.loads((ROOT / "tests/fixtures/spec-brief-b.json").read_text(encoding="utf-8"))
+        self.assertEqual([], unreachable_outcomes(parse_spec(data)))
+        del data["closing"]["product_notes"]["outcome_from_notes"]
+        self.assertEqual(2, len(unreachable_outcomes(parse_spec(data))))
 
 
 class QuotedSpeechTests(unittest.TestCase):

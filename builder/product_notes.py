@@ -9,6 +9,8 @@ Both are driven by optional spec data, so a spec without it renders as before:
 - ``closing.product_notes``: ``closing`` -> ``note_next`` (code) -> ``note_record`` (silent
   passthrough api step with the note tool; F-050: no tts on an api step) -> ``note_next`` ...
   -> ``closing_say``. No notes when the call's outcome is in ``skip_outcomes`` (a transfer).
+  With ``outcome_from_notes`` (T-011), ``note_next`` -> ``notes_outcome`` (code: the outcome
+  from the notes) -> ``closing_say``.
 """
 
 from __future__ import annotations
@@ -18,9 +20,9 @@ from typing import Any, Callable
 
 from .offer_check import (
     NOTE_PRODUCT_ID, NOTE_REASON, NOTE_RESULT, NOTE_STATE, PERSUASION_ATTEMPT, PRODUCT_REFUSAL_STATE,
-    note_next_code, product_refusal_code,
+    note_next_code, notes_outcome_code, product_refusal_code,
 )
-from .prompts import PERSUASION_STATE_LINE, PRODUCT_END_COUNTED_DESCRIPTION, PRODUCT_INTENT_DESCRIPTION
+from .prompts import CLOSING_FALLBACK_SAY, PERSUASION_STATE_LINE, PRODUCT_END_COUNTED_DESCRIPTION, PRODUCT_INTENT_DESCRIPTION
 from .record_loop import FAILED_NUMBERS, RECORDED_NUMBERS
 from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec, SpecError
 from .tools_from_openapi import CALL_VARIABLES
@@ -28,6 +30,7 @@ from .tools_from_openapi import CALL_VARIABLES
 PRODUCT_REFUSAL = "product_refusal"
 NOTE_NEXT = "note_next"
 NOTE_RECORD = "note_record"
+NOTES_OUTCOME = "notes_outcome"
 # Trace warning prefix when the note rule cannot be rendered and is left out.
 NOTES_DROPPED = "closing.product_notes dropped (F-061 not applied)"
 
@@ -82,6 +85,20 @@ def note_tool(spec: PhoneAgentSpec, by_name: dict[str, dict[str, Any]]) -> dict[
     return tool
 
 
+def notes_outcome_gaps(spec: PhoneAgentSpec) -> list[str]:
+    """T-011 review #2: note reasons whose derived pair has no row. Such a note leaves the
+    provisional outcome, so the documents' rule is not applied for it (render warning)."""
+    notes = spec.closing.data.get("product_notes") or {}
+    rule = notes.get("outcome_from_notes")
+    if not rule:
+        return []
+    rows = {(item.outcome, item.reason) for item in spec.outcomes}
+    return [f"{NOTES_OUTCOME}: reason {reason} has no row {rule['otherwise_outcome']}/{reason}; a call whose "
+            "first other note has it keeps the outcome the call state gives"
+            for reason in notes["reasons"] if reason != rule["all_reason"]
+            and (rule["otherwise_outcome"], reason) not in rows]
+
+
 def add_product_steps(
     spec: PhoneAgentSpec,
     nodes: dict[str, Any],
@@ -132,10 +149,22 @@ def add_product_steps(
             if warnings is not None:
                 warnings.append(f"{NOTES_DROPPED}: {exc}")
             return
+        # T-011: with outcome_from_notes, the call's outcome is chosen again from the notes
+        # after the loop (closing only sets the provisional one the loop needs).
+        after_notes = "closing_say"
+        rule = spec.closing.data["product_notes"].get("outcome_from_notes")
+        if rule:
+            after_notes = NOTES_OUTCOME
+            if warnings is not None:
+                warnings.extend(notes_outcome_gaps(spec))
+            nodes[NOTES_OUTCOME] = code_node(NOTES_OUTCOME, notes_outcome_code(
+                spec, RECORDED_NUMBERS, CLOSING_FALLBACK_SAY.text), [
+                {"target_node": "closing_say", "description": "Outcome follows the notes", "condition": {"operator": "always"}},
+            ])
         nodes[NOTE_NEXT] = code_node(NOTE_NEXT, note_next_code(spec, RECORDED_NUMBERS, special_results, FAILED_NUMBERS), [
             _transition(NOTE_RECORD, "A product without a promise has no note yet",
                         [_condition(NOTE_STATE, "equals", "note")]),
-            {"target_node": "closing_say", "description": "Every note is written", "condition": {"operator": "always"}},
+            {"target_node": after_notes, "description": "Every note is written", "condition": {"operator": "always"}},
         ])
         nodes[NOTE_RECORD] = {
             "name": NOTE_RECORD, "node_type": "api_request", "on_enter": {"type": "silent"},

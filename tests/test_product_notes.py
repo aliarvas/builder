@@ -98,7 +98,11 @@ class StructureTests(unittest.TestCase):
                     self.assertEqual("{{note_reason}}", body[note["reason_field"]]["default"])
                     self.assertTrue(all(prop.get("default", "").startswith("{{") for prop in body.values()))
                     self.assertNotIn("text", body)  # no model fills it here
-                    self.assertEqual(["note_record", "closing_say"], edges(nodes["note_next"]))
+                    # T-011: the outcome from the notes runs after the loop when the spec has it.
+                    derived = bool(note.get("outcome_from_notes"))
+                    self.assertEqual(derived, "notes_outcome" in nodes)
+                    self.assertEqual(["note_record", "notes_outcome" if derived else "closing_say"],
+                                     edges(nodes["note_next"]))
                     self.assertNotIn("tts", json.dumps([nodes["note_next"]["on_enter"], record["on_enter"]]))
                 if refusal:
                     for key in ("negotiate", "offer_say", "revise_ask"):

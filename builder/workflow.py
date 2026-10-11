@@ -45,7 +45,10 @@ from .record_loop import (
     record_next_code, record_promise_node, record_values,
 )
 from .product_notes import NOTE_RECORD, PRODUCT_REFUSAL, add_product_steps, refusal_values
-from .spec import ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
+from .spec import (
+    ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath,
+    notes_outcome_pairs,
+)
 from .spoken import agent_directed, quoted_speech, spoken_words
 from .callback import (
     BOOK_FAILURE_COUNT, THIRD_PARTY_ASK, THIRD_PARTY_CLOSE_CHECK, add_collect_rule, callback_entry_transition,
@@ -522,8 +525,10 @@ def _model_tool_special(
     if returns:
         number_field = spec.confirmation.data["product_number_field"]
         body = scoped["function"]["parameters"]["properties"]["body"].get("properties", {})
+        notes = spec.closing.data.get("product_notes") or {}
         extra[done_key] = _code_node(done_key, special_noted_code(
-            spec, result_variable, path.tool, number_field in body
+            spec, result_variable, path.tool, number_field in body,
+            str((path.tool_args or {}).get(notes.get("reason_field", ""), "")),
         ), [
             *_done_transitions(source_variable, source_steps(path)),
         ])
@@ -1823,6 +1828,8 @@ def unreachable_outcomes(spec: PhoneAgentSpec) -> list[str]:
     # A returning path names a row only when it has a tool (a per-product note); a question
     # path that returns has no tool and reaches nothing (F-065 review LOW 1).
     returning = {(path.outcome, path.reason) for path in spec.special_paths if path.then != "close" and path.tool}
+    # T-011: the pairs the closing derives from the notes are reached.
+    closed |= notes_outcome_pairs(spec.closing.data.get("product_notes"))
     return [
         f"unreachable_outcome outcomes[{index}] {item.outcome}/{item.reason or '-'}: "
         + ("only a special path that returns names it; the closing does not derive it"

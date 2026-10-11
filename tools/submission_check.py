@@ -77,6 +77,20 @@ def _float(values: dict[str, list[str]], key: str) -> float | None:
         return None
 
 
+SELF_CHECK_SUMMARY = re.compile(
+    r"^scenarios=(\d+) pass=(\d+) fail=(\d+) spec=(\d+) builder=(\d+)(?: |$)")
+
+
+def _self_check_counts(line: str) -> tuple[int, ...] | None:
+    """The five counts of a ``self_check_summary`` line, in order, or None if malformed."""
+    match = SELF_CHECK_SUMMARY.match(line)
+    if not match:
+        return None
+    counts = tuple(int(value) for value in match.groups())
+    scenarios, passed, failed = counts[:3]
+    return counts if passed + failed == scenarios else None
+
+
 def _resolve_named_path(raw: str, trace_path: Path) -> Path:
     path = Path(raw)
     if path.is_absolute():
@@ -224,6 +238,16 @@ def check_submission(
         f"{len(self_tests)} case line(s), summary={'yes' if self_summary else 'no'}",
         "self-test not passed: " + ", ".join(not_passed) if not_passed else "",
     ))
+    # T-010 self-check: optional, but a summary line that is present must be well formed.
+    self_check_summary = values.get("self_check_summary", [])
+    if self_check_summary:
+        counts = [_self_check_counts(line) for line in self_check_summary]
+        checks.append(Check(
+            "trace_self_check_summary", all(counts),
+            f"{len(self_check_summary)} line(s)" if all(counts) else
+            "want scenarios=N pass=N fail=N spec=N builder=N (pass + fail = scenarios): "
+            + next(line for line, count in zip(self_check_summary, counts) if not count)[:120],
+        ))
     status = values.get("status", [""])[-1]
     checks.append(Check("trace_final_status", status == "ok", f"status={status or 'missing'}"))
 

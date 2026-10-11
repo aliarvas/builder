@@ -645,6 +645,11 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     '"refused_reason": "reason for a product the customer turned down or never agreed to", '
     '"failed_reason": "reason for a product whose promise could not be recorded", '
     '"skip_outcomes": ["call outcomes after which no note is added at all, for example a transfer"], '
+    '"outcome_from_notes": null or {"all_reason": "the note reason that, on every product, gives its own row", '
+    '"all_outcome": "outcome of that row", "all_outcome_reason": "reason of that row or \\"\\"", '
+    '"otherwise_outcome": "outcome used otherwise, with the reason of the first product in account order whose note '
+    'is another reason", "source": "excerpt"} (only when the documents derive the call outcome from the notes when '
+    'no promise was recorded; null otherwise), '
     '"source": "excerpt"} (only when the documents require a note for each product that ended without a promise; '
     "code then writes those notes before the closing tool; null otherwise)},\n"
     ' "outcomes": [{"outcome": "...", "reason": "... or \\"\\"", "when": RULE, "say": RULE (text: the exact words '

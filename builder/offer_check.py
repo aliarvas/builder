@@ -29,6 +29,10 @@ AMOUNT_NONE_VALUE = -1.0
 # F-061/F-062: per-product refusal and note state, owned by code.
 PRODUCT_NOTE_REASONS = "product_note_reasons"
 NOTES_WRITTEN = "notes_written"
+# T-011 (outcome_from_notes only): the reason of each note, by product number, as code sent it
+# and as a returning special path wrote it.
+NOTE_REASONS_SENT = "note_reasons_sent"
+NOTE_REASONS_SPECIAL = "note_reasons_special"
 PERSUASION_USED = "persuasion_used_by_product"
 PERSUASION_ATTEMPT = "persuasion_attempt"
 PRODUCT_REFUSAL_STATE = "product_refusal_state"
@@ -996,6 +1000,92 @@ vars[CONFIG['note_state']] = state
 """
 
 
+# T-011: appended to note_next when the spec derives the outcome from the notes.
+NOTE_SENT_BODY = """if state == 'note':
+    try:
+        sent = json_value(CONFIG['note_reasons_sent'], dict())
+        sent[str(vars.get(CONFIG['note_number']))] = vars.get(CONFIG['note_reason'])
+        vars[CONFIG['note_reasons_sent']] = json.dumps(sent)
+    except Exception:
+        pass
+"""
+
+# T-011: appended to a returning special path's done step that wrote a note: its fixed reason.
+NOTED_REASON_BODY = """try:
+    if str(vars.get(CONFIG['result_var']) or '').lower() == 'true' and CONFIG['number_arg']:
+        raw = vars.get(CONFIG['number_arg'])
+        if raw is None:
+            raw = json_value(CONFIG['args_var'], dict()).get(CONFIG['number_field'])
+        special = json_value(CONFIG['note_reasons_special'], dict())
+        special[str(int(str(raw).strip()))] = CONFIG['note_outcome_reason']
+        vars[CONFIG['note_reasons_special']] = json.dumps(special)
+except Exception:
+    pass
+"""
+
+# T-011: after the note loop, the call's outcome from the notes (closing.product_notes.
+# outcome_from_notes). Only with no promise recorded, outside skip_outcomes, and when every
+# product's note reason is known; a derived pair that is not a table row changes nothing. The
+# notes must also say more than the provisional close (review T-011 #1): some reason that a
+# returning special path or a per-product refusal or record failure wrote differs from the
+# close reason; notes the loop wrote by default only repeat the close and change nothing. A
+# closing special path and a failed special-path tool keep their own pair and line (the
+# documents give them); after a failed record the failure sentence is kept, only the pair follows.
+NOTES_OUTCOME_BODY = """try:
+    rule = CONFIG['notes']['outcome_from_notes']
+    try:
+        recorded_count = int(vars.get('promise_recorded_count') or 0)
+    except Exception:
+        recorded_count = 0
+    recorded = json_value(CONFIG['recorded_numbers'], list())
+    outcome = str(vars.get('close_outcome') or '')
+    state = str(vars.get('close_resolved_state') or '')
+    own_pair = state == 'special_tool_failed' or state.startswith('special:')
+    if recorded_count == 0 and not recorded and not own_pair and outcome not in CONFIG['notes']['skip_outcomes']:
+        products = load_products()
+        sent = json_value(CONFIG['note_reasons_sent'], dict())
+        special = json_value(CONFIG['note_reasons_special'], dict())
+        reasons = [special.get(str(index)) or sent.get(str(index)) for index in range(1, len(products) + 1)]
+        per_product = json_value(CONFIG['state']['note_reasons'], dict())
+        own = [reason for index, reason in enumerate(reasons, start=1)
+               if str(index) in special or str(index) in per_product
+               or reason == CONFIG['notes']['failed_reason']]
+        close_reason = str(vars.get('close_reason') or '')
+        informative = any(reason != close_reason for reason in own)
+        if products and all(reasons) and informative:
+            others = [reason for reason in reasons if reason != rule['all_reason']]
+            if others:
+                pair = (rule['otherwise_outcome'], others[0])
+            else:
+                pair = (rule['all_outcome'], rule['all_outcome_reason'])
+            row = next((row for row in NOTES_TABLE if (row[0], row[1]) == pair), None)
+            if row is not None and pair != (outcome, str(vars.get('close_reason') or '')):
+                vars['close_resolved_state'] = 'notes:' + (pair[1] or pair[0])
+                vars['close_outcome'] = row[0]
+                vars['close_reason'] = row[1]
+                if state not in CONFIG['failure_states']:
+                    vars['closing_sentence'] = row[2] or CONFIG['fallback_sentence']
+except Exception:
+    pass
+"""
+
+
+def notes_outcome_code(spec: PhoneAgentSpec, recorded_numbers: str, fallback_sentence: str) -> str:
+    """T-011: rewrite the call's outcome from the product notes after the note loop."""
+    config = _full_config(spec, [])
+    config.update({
+        "notes": spec.closing.data["product_notes"], "recorded_numbers": recorded_numbers,
+        "note_reasons_sent": NOTE_REASONS_SENT, "note_reasons_special": NOTE_REASONS_SPECIAL,
+        "fallback_sentence": fallback_sentence, "failure_states": ["promise_failed", "account_failed"],
+    })
+    table = [[item.outcome, item.reason, item.say.text] for item in spec.outcomes]
+    return _prelude(spec, config) + f"NOTES_TABLE = {_py_literal(table)}\n" + NOTES_OUTCOME_BODY
+
+
+def _notes_outcome(spec: PhoneAgentSpec) -> bool:
+    return bool((spec.closing.data.get("product_notes") or {}).get("outcome_from_notes"))
+
+
 def product_refusal_code(spec: PhoneAgentSpec) -> str:
     """F-062: a refusal of the product being discussed; counts persuasion attempts when the
     spec gives them, notes the product as refused, and moves to the next product."""
@@ -1021,6 +1111,9 @@ def note_next_code(spec: PhoneAgentSpec, recorded_numbers: str, special_results:
         "note_state": NOTE_STATE, "note_number": NOTE_NUMBER, "note_product_id": NOTE_PRODUCT_ID,
         "note_reason": NOTE_REASON, "note_result": NOTE_RESULT,
     })
+    if _notes_outcome(spec):
+        config["note_reasons_sent"] = NOTE_REASONS_SENT
+        return _prelude(spec, config) + NOTE_NEXT_BODY + NOTE_SENT_BODY
     return _prelude(spec, config) + NOTE_NEXT_BODY
 
 
@@ -1072,8 +1165,10 @@ def check_offer_code(spec: PhoneAgentSpec, reset_variables: list[str]) -> str:
     return _code(spec, CHECK_BODY, reset_variables)
 
 
-def special_noted_code(spec: PhoneAgentSpec, result_variable: str, tool_name: str, has_number: bool) -> str:
-    """After a product-level special path: remember the noted product, report readiness."""
+def special_noted_code(spec: PhoneAgentSpec, result_variable: str, tool_name: str, has_number: bool,
+                       note_reason: str = "") -> str:
+    """After a product-level special path: remember the noted product, report readiness.
+    ``note_reason`` (T-011, outcome_from_notes only): the reason the path's note wrote."""
     config = _full_config(spec, [])
     number_field = spec.confirmation.data["product_number_field"]
     config.update({
@@ -1085,10 +1180,14 @@ def special_noted_code(spec: PhoneAgentSpec, result_variable: str, tool_name: st
     reader = product_reader_code(
         spec.account.data["products_variable"], spec.account.data["products_field"]
     )
+    extra = ""
+    if note_reason and config["is_note_tool"] and _notes_outcome(spec):
+        config.update({"note_outcome_reason": note_reason, "note_reasons_special": NOTE_REASONS_SPECIAL})
+        extra = NOTED_REASON_BODY
     return (
         PRELUDE.replace("__CONFIG__", _py_literal(config))
         .replace("__PRODUCT_READER__", reader)
-        + NOTED_BODY
+        + NOTED_BODY + extra
     )
 
 

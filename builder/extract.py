@@ -45,11 +45,13 @@ from .spoken import agent_directed, spoken_words
 from .spec import (
     CLOSE_STATE_NAMES,
     FRAMEWORK_NONE_VALUE,
+    NOTES_OUTCOME_KEYS,
     OPENING_GREETING_VALUE,
     OPTIONAL_CLOSE_STATES,
     SPECIAL_THEN_CLOSE,
     PhoneAgentSpec,
     SpecError,
+    notes_outcome_pairs,
     parse_spec,
 )
 from .tools_from_openapi import CALL_VARIABLES, contract_field_kind, tool_contract, tools_from_openapi
@@ -721,6 +723,36 @@ def _check_product_notes(notes: Any, rows: list[Any], check: _Checker) -> None:
         fail(where + ".source", "needs a source excerpt copied from the documents")
     else:
         check.excerpt(where + ".source", notes["source"])
+    if notes.get("outcome_from_notes") is not None:
+        _check_notes_outcome(notes["outcome_from_notes"], reasons, rows, check)
+
+
+def _check_notes_outcome(rule: Any, reasons: list[str], rows: list[Any], check: _Checker) -> None:
+    """T-011: the call's outcome from the notes; its own optional block (the note rule stays)."""
+    where = "closing.product_notes.outcome_from_notes"
+
+    def fail(path: str, message: str) -> None:
+        check.optional(path, message, "notes_outcome")
+
+    if not isinstance(rule, dict):
+        fail(where, "must be an object or null")
+        return
+    unknown = set(rule) - {*NOTES_OUTCOME_KEYS, "source"}
+    if unknown:
+        fail(where, f"has unknown keys {sorted(unknown)}")
+    if rule.get("all_reason") not in reasons:
+        fail(where + ".all_reason", f"must be one of the note reasons {reasons}")
+    pairs = {(row.get("outcome"), row.get("reason") or "") for row in rows if isinstance(row, dict)}
+    all_pair = (rule.get("all_outcome"), rule.get("all_outcome_reason") or "")
+    if all_pair not in pairs:
+        fail(where + ".all_outcome", f"{all_pair[0]}/{all_pair[1] or '-'} is not a row of outcomes; use the pair "
+             "the documents give when every product has that note")
+    if rule.get("otherwise_outcome") not in {outcome for outcome, _ in pairs}:
+        fail(where + ".otherwise_outcome", "must be an outcome of the outcomes table")
+    if not isinstance(rule.get("source"), str) or not rule["source"].strip():
+        fail(where + ".source", "needs a source excerpt copied from the documents")
+    else:
+        check.excerpt(where + ".source", rule["source"])
 
 
 GROUP_CHECKS = {
@@ -754,7 +786,7 @@ def _values(entries: list[dict[str, Any]], route: str | None = None) -> list[str
     return [entry["value"] for entry in entries if route is None or entry.get("route") == route]
 
 
-OPTIONAL_BLOCKS = ("product_notes", "persuasion_attempts", "intent_flags")
+OPTIONAL_BLOCKS = ("product_notes", "persuasion_attempts", "intent_flags", "notes_outcome")
 
 
 def drop_optional(groups: dict[str, dict[str, Any]], blocks: set[str]) -> dict[str, dict[str, Any]]:
@@ -763,6 +795,9 @@ def drop_optional(groups: dict[str, dict[str, Any]], blocks: set[str]) -> dict[s
     groups = copy.deepcopy(groups)
     if "product_notes" in blocks and isinstance(groups["outcomes"].get("closing"), dict):
         groups["outcomes"]["closing"]["product_notes"] = None
+    notes = (groups["outcomes"].get("closing") or {}).get("product_notes")
+    if "notes_outcome" in blocks and isinstance(notes, dict):
+        notes["outcome_from_notes"] = None
     if "intent_flags" in blocks:
         for entry in groups["flow"].get("negotiation", {}).get("intents") or []:
             if isinstance(entry, dict):
@@ -933,6 +968,8 @@ def _check_reach(groups: dict[str, Any], check: _Checker) -> None:
 
     reached = {(path.get("outcome"), path.get("reason") or "") for path in items(part("outcomes", "special_paths"))
                if path.get("then") == SPECIAL_THEN_CLOSE or path.get("tool")}
+    notes = part("outcomes", "closing", "product_notes")
+    reached |= notes_outcome_pairs(notes if isinstance(notes, dict) else None)  # T-011
     for entries in (part("opening_identity", "opening", "answers"), part("opening_identity", "third_party", "intents"),
                     part("flow", "negotiation", "intents")):
         reached |= {(entry.get("outcome"), entry.get("reason") or "") for entry in items(entries)

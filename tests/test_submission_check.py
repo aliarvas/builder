@@ -194,6 +194,31 @@ class SubmissionCheckTests(unittest.TestCase):
                 main([str(trace), str(export), "--spec", str(spec)])
             self.assertIn("WARN: self-test not passed: smoke=fail", output.getvalue())
 
+    def test_self_check_summary_format_is_checked_when_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace, export, spec = self.make_artifacts(directory)
+            # No summary line: nothing to check (older traces).
+            self.assertNotIn("trace_self_check_summary", {c.name for c in check_submission(trace, export, spec)})
+            original = trace.read_text(encoding="utf-8")
+            good = ("scenarios=90 pass=88 fail=2 spec=0 builder=2 seconds=1.4 "
+                    "now=2026-10-14T11:00 extra_nows=2026-10-16T11:00")
+            for line, passed in (
+                (good, True),
+                ("scenarios=3 pass=3 fail=0 spec=0 builder=0", True),
+                ("scenarios=90 pass=88 fail=2 builder=2 seconds=1.4", False),          # spec= missing
+                ("pass=88 scenarios=90 fail=2 spec=0 builder=2", False),               # order
+                ("scenarios=90 pass=88 fail=1 spec=0 builder=1", False),               # pass + fail != scenarios
+                ("scenarios=ninety pass=88 fail=2 spec=0 builder=2", False),
+                ("", False),
+            ):
+                with self.subTest(line=line):
+                    trace.write_text(original.replace("status: ok", f"self_check_summary: {line}\nstatus: ok"),
+                                     encoding="utf-8")
+                    checks = {c.name: c for c in check_submission(trace, export, spec)}
+                    self.assertEqual(passed, checks["trace_self_check_summary"].passed, checks["trace_self_check_summary"])
+                    self.assertEqual(set() if passed else {"trace_self_check_summary"},
+                                     self.failures(checks.values()))
+
     def test_verify_inputs_compares_real_file_hashes(self):
         import hashlib
         with tempfile.TemporaryDirectory() as directory:

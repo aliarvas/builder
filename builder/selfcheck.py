@@ -25,12 +25,14 @@ import builtins
 import copy
 import dataclasses
 import datetime
+import functools
 import json
 import time
 from typing import Any, Callable
 
 from .callback import (
-    DAY_TEXT, THIRD_PARTY_CLOSE_EXPLICIT, THIRD_PARTY_CLOSE_KIND, TIME_TEXT, callback_window,
+    CALLBACK_BOOK as CALLBACK_BOOK_STEP, DAY_TEXT, THIRD_PARTY_CLOSE_EXPLICIT, THIRD_PARTY_CLOSE_KIND, TIME_TEXT,
+    callback_window,
 )
 from .offer_check import ACCEPTS_YES, OFFER_ACCEPTS, OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT
 from .selfcheck_calendar import SpecCalendar, first_rule
@@ -39,6 +41,7 @@ from .spec import FRAMEWORK_NONE_VALUE, SPECIAL_THEN_CLOSE, PhoneAgentSpec
 from .tools_from_openapi import CALL_VARIABLES
 
 END_CALL = "end_call"
+END_OF_CALL = "end_of_call"   # the step name the ledger gives the platform's end-of-call tools
 PREVIOUS = "__previous__"
 SPEAKING = ("tts", "llm")
 # A simulator parameter, not policy: the kit's mock verify_identity allows this many wrong
@@ -103,11 +106,21 @@ def code_of(node: dict[str, Any]) -> str:
 
 def _sandbox(problems: list[str], where: str, **names: Any) -> dict[str, Any]:
     """Globals for one code step or hook: only ``names`` and the platform's importable modules."""
-    def guarded(name, *args, **kwargs):
-        if name.split(".")[0] not in ALLOWED_IMPORTS:
+    def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+        # An allowed module's own lazy import from C (``datetime.strptime`` loads ``_strptime``)
+        # also goes through this hook. CPython passes a list as its fromlist; an import
+        # statement passes None or a tuple. Only the step's own imports count (T-012).
+        internal = isinstance(fromlist, list)
+        if name.split(".")[0] not in ALLOWED_IMPORTS and not internal:
             problems.append(f"{where} imports {name} (the platform allows {', '.join(ALLOWED_IMPORTS)})")
-        return builtins.__import__(name, *args, **kwargs)
+        return builtins.__import__(name, globals, locals, fromlist, level)
     return {**names, "__builtins__": {**vars(builtins), "__import__": guarded}}
+
+
+@functools.lru_cache(maxsize=1024)
+def _compiled(code: str) -> Any:
+    """Generated code compiled once: every scenario runs the same steps (T-012, time)."""
+    return compile(code, "<generated>", "exec")
 
 
 def _get_path(data: Any, path: str) -> Any:
@@ -223,7 +236,7 @@ class Simulator:
     def run_code(self, key: str) -> None:
         before = dict(self.vars)
         try:
-            exec(code_of(self.nodes[key]), _sandbox(self.problems, f"code step {key}", vars=self.vars))
+            exec(_compiled(code_of(self.nodes[key])), _sandbox(self.problems, f"code step {key}", vars=self.vars))
         except Exception as exc:  # generated code must never raise
             self.problems.append(f"code step {key} raised {type(exc).__name__}: {exc}")
         for name, field in self.fields.items():
@@ -236,32 +249,21 @@ class Simulator:
 
     def call_tool(self, tool: dict[str, Any], step: str, args: dict[str, Any] | None = None) -> bool:
         """A tool call (an api step's pre-action, or the model's call with ``args``)."""
-        properties = tool["function"]["parameters"]["properties"].get("body", {}).get("properties", {})
-        body: dict[str, Any] = {}
-        for name, prop in properties.items():
-            default = str(prop.get("default", ""))
-            if default.startswith("{{") and default.endswith("}}"):
-                variable = default[2:-2]
-                if variable in self.vars:
-                    body[name] = self.vars[variable]
-                elif variable in CALL_VARIABLES:
-                    body[name] = "sim-" + variable
-            elif "default" in prop:
-                body[name] = prop["default"]
+        body = self._tool_body(tool)
         body.update(args or {})
         config = {"body": body}
         if tool.get("pre_process_code"):
             try:
-                exec(tool["pre_process_code"], _sandbox(self.problems, f"pre-hook of {tool['function']['name']}",
-                                                        vars=self.vars, config=config))
+                exec(_compiled(tool["pre_process_code"]),
+                     _sandbox(self.problems, f"pre-hook of {tool['function']['name']}", vars=self.vars, config=config))
             except Exception as exc:
                 self.problems.append(f"pre-hook of {tool['function']['name']} raised {type(exc).__name__}")
         name = tool["function"]["name"]
         result = self.bank.answer(name, config["body"], step)
         if tool.get("post_process_code"):
             try:
-                exec(tool["post_process_code"], _sandbox(self.problems, f"post-hook of {name}",
-                                                         result=result, vars=self.vars))
+                exec(_compiled(tool["post_process_code"]),
+                     _sandbox(self.problems, f"post-hook of {name}", result=result, vars=self.vars))
             except Exception as exc:
                 self.problems.append(f"post-hook of {name} raised {type(exc).__name__}")
         for item in tool.get("response_mapping") or []:
@@ -302,11 +304,12 @@ class Simulator:
             return self.previous
         return target
 
-    def advance(self) -> str:
-        """Walk the passthrough steps until a conversation step waits or the call ends."""
+    def advance(self, stop_at: str = "") -> str:
+        """Walk the passthrough steps until a conversation step waits or the call ends (or,
+        with ``stop_at``, until the walk enters that step, which is then not run)."""
         for _ in range(MAX_PASSTHROUGH):
             key = self.step
-            if key == END_CALL or key not in self.nodes:
+            if key == END_CALL or key not in self.nodes or key == stop_at:
                 return key
             node = self.nodes[key]
             if node.get("on_enter", {}).get("type") in SPEAKING:
@@ -408,6 +411,74 @@ class Simulator:
         self.step = node_key
         return True
 
+    # -- call-end events (T-012) ---------------------------------------------
+    hung_up = False
+
+    def hang_up(self, at: str = "") -> str:
+        """The customer hangs up at the waiting step, or (``at``) when the walk enters that
+        step (for example while the closing sentence is said). Returns the step."""
+        key = self.advance(stop_at=at)
+        self.hung_up = True
+        return key
+
+    def turn_limit(self) -> bool:
+        """The waiting step reaches its turn limit: the platform takes ``max_turn_transition``."""
+        key = self.advance()
+        target = self.nodes.get(key, {}).get("max_turn_transition")
+        if not target:
+            self.problems.append(f"{key} has no turn-limit transition")
+            return False
+        self.spoken_after_turn = []
+        self.path.append(key)
+        self.step = self._target(target)
+        return True
+
+    def leave_special(self) -> bool:
+        """At a special-path step that can return (a spoken-only path, or the customer
+        declining an ask-first path): take its transition back to the step it came from."""
+        key = self.advance()
+        back = next((t for t in self.nodes.get(key, {}).get("transitions", []) if t["target_node"] == PREVIOUS), None)
+        if back is None:
+            self.problems.append(f"{key} has no way back to the step it came from")
+            return False
+        operand = next((c.get("operand") for c in _leaves(back["condition"]) if c.get("operator") == "equals"), None)
+        variable = next((c.get("variable") for c in _leaves(back["condition"]) if c.get("operator") == "equals"), None)
+        return self.turn({variable: operand} if variable else {})
+
+    def end_of_call(self, tools: list[dict[str, Any]]) -> None:
+        """The call is over: the platform runs every ``end_of_call`` tool once. Its pre-hook
+        decides whether to send (an empty URL sends nothing)."""
+        for tool in tools:
+            if "end_of_call" not in (tool.get("config") or {}).get("alwaysRunsAt", []):
+                continue
+            name = tool["function"]["name"]
+            properties = tool["function"]["parameters"]["properties"]
+            config = {"body": self._tool_body(tool), "url": str(properties.get("url", {}).get("default", ""))}
+            if tool.get("pre_process_code"):
+                try:
+                    exec(_compiled(tool["pre_process_code"]),
+                         _sandbox(self.problems, f"pre-hook of {name}", vars=self.vars, config=config))
+                except Exception as exc:
+                    self.problems.append(f"pre-hook of {name} raised {type(exc).__name__}")
+            if config.get("url"):
+                self.bank.answer(name, config["body"], END_OF_CALL)
+
+    def _tool_body(self, tool: dict[str, Any]) -> dict[str, Any]:
+        """The request body before the model's arguments: defaults and ``{{variable}}`` fields."""
+        properties = tool["function"]["parameters"]["properties"].get("body", {}).get("properties", {})
+        body: dict[str, Any] = {}
+        for name, prop in properties.items():
+            default = str(prop.get("default", ""))
+            if default.startswith("{{") and default.endswith("}}"):
+                variable = default[2:-2]
+                if variable in self.vars:
+                    body[name] = self.vars[variable]
+                elif variable in CALL_VARIABLES:
+                    body[name] = "sim-" + variable
+            elif "default" in prop:
+                body[name] = prop["default"]
+        return body
+
 
 # ---------------------------------------------------------------------------
 # Scenarios (from the spec only)
@@ -426,6 +497,7 @@ class Scenario:
     pair: tuple[str, str] | None = None     # an outcome pair given directly (a special path)
     repeats: dict[str, int] = dataclasses.field(default_factory=dict)  # action label -> turns
     step: str = ""                          # the step the scenario is about
+    callback: tuple[str, ...] | None = None  # T-012: (day, time) booked; () none; None not checked
 
 
 def synthetic_products(spec: PhoneAgentSpec, count: int) -> list[dict[str, Any]]:
@@ -531,6 +603,7 @@ class _Plan:
             return None
         account = self.spec.account.data
         notes = []
+        own = {pid for pid in [*(written or {}), *failed, *refused] if pid not in promised}
         for product in products:
             pid = str(product[account["product_id_field"]])
             if pid in promised:
@@ -545,7 +618,16 @@ class _Plan:
                 notes.append((pid, close_reason))
             else:
                 notes.append((pid, self.notes["refused_reason"]))
-        return sorted(notes)
+        return Notes(sorted(notes), own)
+
+
+class Notes(list):
+    """Expected notes; ``own`` names the products whose note a special path or a per-product
+    refusal or record failure wrote (not the note loop's default reason), T-011."""
+
+    def __init__(self, notes: list[tuple[str, str]], own: set[str]) -> None:
+        super().__init__(notes)
+        self.own = set(own)
 
 
 def _row_reason(spec: PhoneAgentSpec, state: str) -> str:
@@ -627,6 +709,9 @@ def scenarios(spec: PhoneAgentSpec, now: str) -> list[Scenario]:
     # Several products: when the spec has per-product handling.
     if plan.notes or plan.negotiation.get("product_end_values"):
         result.extend(_multi_scenarios(spec, plan, notes_for))
+
+    # T-012: call-end states and the other families.
+    result.extend(_call_end_scenarios(spec, plan, one, notes_for))
     return result
 
 
@@ -640,7 +725,16 @@ def _record_tool_name(spec: PhoneAgentSpec) -> str:
 
 def _promise_tool(workflow: dict[str, Any], spec: PhoneAgentSpec) -> str:
     """The tool of the record loop's api step (F-063)."""
-    node = workflow["nodes"].get(RECORD_PROMISE)
+    return _role_tool(workflow, RECORD)
+
+
+# T-012: scripted answers may name a tool by the api step that calls it.
+ACCOUNT, CALLBACK_BOOK = "@account", "@callback"
+ROLE_STEPS = {RECORD: RECORD_PROMISE, ACCOUNT: "account", CALLBACK_BOOK: CALLBACK_BOOK_STEP}
+
+
+def _role_tool(workflow: dict[str, Any], role: str) -> str:
+    node = workflow["nodes"].get(ROLE_STEPS[role])
     return node["pre_actions"][0]["function"]["name"] if node and node.get("pre_actions") else ""
 
 
@@ -690,6 +784,24 @@ def _third_party_scenarios(spec, plan, one) -> list[Scenario]:
             "kind": "say", "label": "third_party", "spec_path": f"third_party.close_values[{index}]", "vars": {
             third["intent_variable"]: value, THIRD_PARTY_CLOSE_KIND: THIRD_PARTY_CLOSE_EXPLICIT}}],
             "third_party:" + value, one, step="third_party"))
+    slot = _callback_slot(spec, plan)
+    if slot is None:
+        return result
+    day, said, window = slot
+    callback = {"kind": "say", "label": "callback_time", "vars": {DAY_TEXT: day.isoformat(), TIME_TEXT: said}}
+    result.append(Scenario("callback_booked", [who, callback], "callback_scheduled", one, step="callback_check",
+                           callback=(day.isoformat(), said)))
+    if window is not None:
+        outside = window["latest"] + 60 if window["latest"] + 60 < 24 * 60 else max(0, window["earliest"] - 60)
+        late = {"kind": "say", "label": "callback_time", "repeat": True,
+                "vars": {DAY_TEXT: day.isoformat(), TIME_TEXT: f"{outside // 60:02d}:{outside % 60:02d}"}}
+        result.append(Scenario("callback_outside", [who, late], "third_party:" + window["outside_close_value"],
+                               one, step="callback_check"))
+    return result
+
+
+def _callback_slot(spec, plan) -> tuple[datetime.date, str, dict[str, Any] | None] | None:
+    """(day, time said, window) of a callback the spec's window allows; None if none is left today."""
     window = callback_window(spec)
     today = plan.calendar.today
     clock = int(plan.now[11:13] or 0) * 60 + int(plan.now[14:16] or 0) if len(plan.now) >= 16 else 0
@@ -699,17 +811,8 @@ def _third_party_scenarios(spec, plan, one) -> list[Scenario]:
         day = today if window["days_ahead"] == 0 else plan.calendar.add(today, 1, window["day_unit"])
         minutes = window["earliest"] if day > today else max(window["earliest"], clock + 60)
         if minutes > window["latest"]:
-            return result
-    said = f"{minutes // 60:02d}:{minutes % 60:02d}"
-    callback = {"kind": "say", "label": "callback_time", "vars": {DAY_TEXT: day.isoformat(), TIME_TEXT: said}}
-    result.append(Scenario("callback_booked", [who, callback], "callback_scheduled", one, step="callback_check"))
-    if window is not None:
-        outside = window["latest"] + 60 if window["latest"] + 60 < 24 * 60 else max(0, window["earliest"] - 60)
-        late = {"kind": "say", "label": "callback_time", "repeat": True,
-                "vars": {DAY_TEXT: day.isoformat(), TIME_TEXT: f"{outside // 60:02d}:{outside % 60:02d}"}}
-        result.append(Scenario("callback_outside", [who, late], "third_party:" + window["outside_close_value"],
-                               one, step="callback_check"))
-    return result
+            return None
+    return day, f"{minutes // 60:02d}:{minutes % 60:02d}", window
 
 
 def _special_scenarios(spec, plan, path, one, notes_for) -> list[Scenario]:
@@ -774,6 +877,254 @@ def _multi_scenarios(spec, plan, notes_for) -> list[Scenario]:
 
 
 # ---------------------------------------------------------------------------
+# T-012: call-end states, callback answers, a revise at the read-back, special paths
+# ---------------------------------------------------------------------------
+
+# Words that name no day and no clock time (an unclear callback answer).
+UNCLEAR_CALLBACK = "not sure yet"
+# Steps before the account is read: the call has no products there, so no notes.
+BEFORE_ACCOUNT = ("opening", "identity", "third_party")
+
+
+def _call_end_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    return [
+        *_hangup_scenarios(spec, plan, one, notes_for),
+        *_turn_limit_scenarios(spec, plan, one, notes_for),
+        *_account_failed_scenarios(spec, plan, one),
+        *_callback_answer_scenarios(spec, plan, one),
+        *_revise_scenarios(spec, plan, one, notes_for),
+        *_two_special_scenarios(spec, plan, one, notes_for),
+        *_special_elsewhere_scenarios(spec, plan, one, notes_for),
+    ]
+
+
+def _hangup_pair(spec: PhoneAgentSpec, verified: bool) -> tuple[str, str]:
+    """The row a hang-up writes: the unverified hang-up row before identity passed, then the
+    hang-up row, then the default row."""
+    for state in ([] if verified else ["hangup_unverified"]) + ["hangup"]:
+        row = next((item for item in spec.outcomes if state in item.on), None)
+        if row is not None:
+            return row.outcome, row.reason
+    row = next(item for item in spec.outcomes if "default" in item.on)
+    return row.outcome, row.reason
+
+
+def _hangup_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """The customer hangs up; the end-of-call close writes the row. The closing chain (and so
+    the note loop) never runs, so notes are not checked, except after a promise, where the
+    hang-up comes while the closing sentence is said."""
+    hangup = {"kind": "hangup", "label": "hangup"}
+    result = [
+        Scenario("hangup_opening", [hangup], "hangup_unverified", one,
+                 pair=_hangup_pair(spec, False), step="opening"),
+        Scenario("hangup_identity", [plan.answer_who("identity_values"), hangup], "hangup_unverified", one,
+                 pair=_hangup_pair(spec, False), step="identity"),
+        Scenario("hangup_negotiate", [*plan.reach_negotiation(), hangup], "hangup", one,
+                 pair=_hangup_pair(spec, True), step="negotiate"),
+    ]
+    day = plan.good_day(one)
+    if day:
+        result.append(Scenario(
+            "hangup_after_promise", [*plan.reach_negotiation(), plan.offer(1, day), plan.confirm(),
+                                     {**hangup, "at": "closing_say"}],
+            "promise_recorded", one, promises=[plan.promise(one[0], day)],
+            notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="closing_say"))
+    return result
+
+
+def _turn_limit_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    limit = {"kind": "turn_limit", "label": "turn_limit"}
+    return [
+        Scenario("turn_limit_opening", [limit], "turn_limit", one,
+                 notes=[] if plan.notes else None, step="opening"),
+        Scenario("turn_limit_negotiate", [*plan.reach_negotiation(), limit], "turn_limit", one,
+                 notes=notes_for(one, state="turn_limit"), step="negotiate"),
+    ]
+
+
+def _account_failed_scenarios(spec, plan, one) -> list[Scenario]:
+    # The account read fails: no products are known, so the note loop writes nothing.
+    return [Scenario("account_failed", plan.reach_negotiation(), "account_failed", one,
+                     answers={ACCOUNT: [False] * 3}, notes=[] if plan.notes else None, step="account")]
+
+
+def _callback_answer_scenarios(spec, plan, one) -> list[Scenario]:
+    """Callback answers other than a clean day and time: unclear, a day without a time, and
+    the booking tool failing. With a window, unclear or day-only answers end in giving up."""
+    if not plan.opening.get("third_party_values"):
+        return []
+    slot = _callback_slot(spec, plan)
+    if slot is None:
+        return []
+    day, said, window = slot
+    who = plan.answer_who("third_party_values")
+
+    def answer(day_text, time_text, repeat=False):
+        return {"kind": "say", "label": "callback_time", "repeat": repeat,
+                "vars": {DAY_TEXT: day_text, TIME_TEXT: time_text}}
+
+    booked, slot = answer(day.isoformat(), said), (day.isoformat(), said)
+    result = [
+        Scenario("callback_unclear_then_booked", [who, answer("", UNCLEAR_CALLBACK), booked],
+                 "callback_scheduled", one, step="callback_check", callback=slot),
+        # The day named first is kept when the next answer names only the time.
+        Scenario("callback_need_time_then_booked", [who, answer(day.isoformat(), ""), answer("", said)],
+                 "callback_scheduled", one, step="callback_check", callback=slot),
+        Scenario("callback_book_failed", [who, booked], "callback_failed", one,
+                 answers={CALLBACK_BOOK: [False] * 3}, step="callback_book", callback=()),
+    ]
+    if window is not None:
+        give_up = "third_party:" + window["outside_close_value"]
+        result += [
+            Scenario("callback_unclear_give_up", [who, answer("", UNCLEAR_CALLBACK, repeat=True)], give_up, one,
+                     step="callback_check", callback=()),
+            Scenario("callback_need_time_give_up", [who, answer(day.isoformat(), "", repeat=True)], give_up, one,
+                     step="callback_check", callback=()),
+        ]
+    return result
+
+
+def _revise_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """At the read-back the customer changes the terms, then makes a new offer: only the new
+    offer is recorded."""
+    confirmation, product = plan.confirmation, one[0]
+    values, revise = confirmation["intent_values"], confirmation.get("revise_values") or []
+    day = plan.good_day(one)
+    if not day or not revise or revise[0] not in values:
+        return []
+    ask = {"kind": "say", "label": "change_terms",
+           "spec_path": f"confirmation.intent_values[{values.index(revise[0])}]",
+           "vars": {confirmation["intent_variable"]: revise[0]}}
+    other = _another_allowed_day(plan, product, day)
+    floor, full = plan.calendar.floor(product), plan.calendar.full(product)
+    if other:
+        new_offer, promise = plan.offer(1, other), plan.promise(product, other)
+    elif 0 < floor < full:
+        new_offer, promise = plan.offer(1, day, floor), plan.promise(product, day, floor)
+    else:
+        return []
+    return [Scenario("revise_at_readback", [*plan.reach_negotiation(), plan.offer(1, day), ask, new_offer,
+                                            plan.confirm()],
+                     "promise_recorded", one, promises=[promise],
+                     notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="revise_ask")]
+
+
+def _another_allowed_day(plan, product, day: str) -> str | None:
+    probe, deadline = datetime.date.fromisoformat(day), plan.calendar.deadline(product)
+    while probe < deadline:
+        probe += datetime.timedelta(days=1)
+        if plan.calendar.outcome(probe.isoformat(), product)[1] == "allowed":
+            return probe.isoformat()
+    return None
+
+
+def _before(plan, step: str, one) -> list[dict[str, Any]] | None:
+    """Turns that bring a call to wait at ``step`` (None: a step the scenarios do not reach)."""
+    day = plan.good_day(one)
+    if step == "opening":
+        return []
+    if step == "identity":
+        return [plan.answer_who("identity_values")]
+    if step == "third_party":
+        return [plan.answer_who("third_party_values")] if plan.opening.get("third_party_values") else None
+    if step == "negotiate":
+        return plan.reach_negotiation()
+    if step == "confirm_record" and day:
+        return [*plan.reach_negotiation(), plan.offer(1, day)]
+    if step == "offer_say":
+        late = plan.calendar.deadline(one[0]) + datetime.timedelta(days=5)
+        return [*plan.reach_negotiation(), plan.offer(1, late.isoformat())]
+    return None
+
+
+def _enter(path) -> dict[str, Any]:
+    from .workflow import special_result_variable
+    return {"kind": "special", "label": "special", "node": "special_" + path.id,
+            "choice_variable": special_result_variable(path) + "_choice"}
+
+
+def _closing_case(plan, path, step, one, notes_for, name, before) -> Scenario:
+    """A closing path entered at ``step``: its own pair; a note it writes itself counts."""
+    reason = (path.tool_args or {}).get((plan.notes or {}).get("reason_field", ""), "")
+    written = {"p1": reason} if path.tool and plan.notes and path.tool == plan.notes["tool"] else None
+    notes = ([] if plan.notes else None) if step in BEFORE_ACCOUNT else \
+        notes_for(one, pair=(path.outcome, path.reason), written=written)
+    return Scenario(name, [*before, _enter(path)], "special:" + path.id, one,
+                    pair=(path.outcome, path.reason), notes=notes, step=step)
+
+
+def _two_special_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """Two special paths in one call: one that returns (spoken only, or an ask-first path the
+    customer declines), then a closing path at the same step."""
+    for step in ("negotiate", "confirm_record", "identity", "opening"):
+        before = _before(plan, step, one)
+        if before is None:
+            continue
+        here = [path for path in spec.special_paths if step in path.available_in]
+        first = next((path for path in here if path.ask or (path.then != SPECIAL_THEN_CLOSE and not path.tool)), None)
+        second = next((path for path in here if path.then == SPECIAL_THEN_CLOSE and first is not None
+                       and path.id != first.id), None)
+        if first and second:
+            leave = {"kind": "leave_special", "label": "special_back", "node": "special_" + first.id}
+            return [_closing_case(plan, second, step, one, notes_for, f"special_{first.id}_then_{second.id}",
+                                  [*before, leave])]
+    return []
+
+
+# Steps where the scenarios can finish a call after a returning path brought it back.
+def _finish(plan, step: str, one, path) -> tuple[list[dict[str, Any]], str, dict[str, Any]] | None:
+    """(turns, state, Scenario fields) that end the call after a return to ``step``."""
+    if step in ("negotiate", "offer_say"):
+        return [plan.refuse()], "negotiation:" + plan.refusal_value(), {}
+    if path.tool:
+        return None  # a returning path with a tool writes for a product: only after negotiation
+    if step == "confirm_record":
+        day = plan.good_day(one)
+        return [plan.confirm()], "promise_recorded", {"promises": [plan.promise(one[0], day)], "promised": ["p1"]}
+    if step in ("identity", "opening"):
+        turns = [*plan.verify(), plan.refuse()] if step == "identity" else \
+            [*plan.reach_negotiation(), plan.refuse()]
+        return turns, "negotiation:" + plan.refusal_value(), {}
+    if step == "third_party" and plan.third.get("close_values"):
+        value = plan.third["close_values"][0]
+        return [{"kind": "say", "label": "third_party", "spec_path": "third_party.close_values[0]", "vars": {
+            plan.third["intent_variable"]: value, THIRD_PARTY_CLOSE_KIND: THIRD_PARTY_CLOSE_EXPLICIT}}], \
+            "third_party:" + value, {"no_products": True}
+    return None
+
+
+def _special_elsewhere_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """Each special path at a step of its ``available_in`` other than the one
+    ``_special_scenarios`` plays it at."""
+    result = []
+    for path in spec.special_paths:
+        played = next((step for step in ("negotiate", "identity", "opening", "third_party", "confirm_record")
+                       if step in path.available_in), None)
+        for step in path.available_in:
+            before = _before(plan, step, one) if step != played else None
+            if before is None:
+                continue
+            name = f"special_{path.id}_at_{step}"
+            if path.then == SPECIAL_THEN_CLOSE:
+                result.append(_closing_case(plan, path, step, one, notes_for, name, before))
+                break
+            finish = _finish(plan, step, one, path)
+            if finish is None:
+                continue
+            turns, state, extra = finish
+            reason = (path.tool_args or {}).get((plan.notes or {}).get("reason_field", ""), "")
+            written = {"p1": reason} if path.tool and plan.notes and path.tool == plan.notes["tool"] else None
+            promised = extra.get("promised", [])
+            refused = [] if written or promised or state.startswith("third_party:") else ["p1"]
+            notes = ([] if plan.notes else None) if extra.get("no_products") else \
+                notes_for(one, promised=promised, refused=refused, state=state, written=written)
+            result.append(Scenario(name, [*before, _enter(path), *turns], state, one,
+                                   promises=extra.get("promises", []), notes=notes, step=step))
+            break
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Playing and checking
 # ---------------------------------------------------------------------------
 
@@ -831,12 +1182,34 @@ class Report:
 
 def _expected_pair(spec: PhoneAgentSpec, scenario: Scenario) -> tuple[str, str]:
     if scenario.pair is not None:
-        return scenario.pair
+        return scenario.pair  # a closing special path keeps its own pair
     row = next((item for item in spec.outcomes if scenario.expect_state in item.on), None)
     if row is None and scenario.expect_state == "special_tool_failed":
         row = next(item for item in spec.outcomes if "promise_failed" in item.on)
     row = row or next(item for item in spec.outcomes if "default" in item.on)
-    return row.outcome, row.reason
+    return _notes_pair(spec, scenario, (row.outcome, row.reason))
+
+
+def _notes_pair(spec: PhoneAgentSpec, scenario: Scenario, pair: tuple[str, str]) -> tuple[str, str]:
+    """T-011: with ``closing.product_notes.outcome_from_notes``, a call without a promise
+    closes on the pair the expected notes give (in account order), when it is a table row."""
+    notes = spec.closing.data.get("product_notes") or {}
+    rule = notes.get("outcome_from_notes")
+    if (not rule or scenario.promises or not scenario.notes or pair[0] in notes.get("skip_outcomes", [])
+            or scenario.expect_state == "special_tool_failed"):
+        return pair
+    by_product = dict(scenario.notes)
+    ids = [str(product[spec.account.data["product_id_field"]]) for product in scenario.products]
+    if any(pid not in by_product for pid in ids):
+        return pair
+    # The same condition as the generated step: some product's own note says more than the
+    # provisional close (a plain list, as a test may give, counts every note as own).
+    own = getattr(scenario.notes, "own", set(by_product))
+    if not any(by_product[pid] != pair[1] for pid in ids if pid in own):
+        return pair
+    others = [by_product[pid] for pid in ids if by_product[pid] != rule["all_reason"]]
+    derived = (rule["otherwise_outcome"], others[0]) if others else (rule["all_outcome"], rule["all_outcome_reason"])
+    return derived if derived in {(item.outcome, item.reason) for item in spec.outcomes} else pair
 
 
 def _close_tool(workflow: dict[str, Any], spec: PhoneAgentSpec) -> str:
@@ -851,10 +1224,46 @@ def _close_tool(workflow: dict[str, Any], spec: PhoneAgentSpec) -> str:
     return ""
 
 
+def _callback_failures(workflow: dict[str, Any], bank: Bank, scenario: Scenario) -> list[str]:
+    """T-012: the callback the bank booked (its day and time) against the scenario's."""
+    if scenario.callback is None:
+        return []
+    tool = _role_tool(workflow, CALLBACK_BOOK)
+    booked = [call.body for call in bank.calls if call.tool == tool and call.ok]
+    if not scenario.callback:
+        return [f"a callback was booked {booked}, the spec gives none"] if booked else []
+    if len(booked) != 1 or not set(scenario.callback) <= {str(value) for value in booked[0].values()}:
+        return [f"callbacks booked {booked}, the spec gives one at {' '.join(scenario.callback)}"]
+    return []
+
+
+def _play_call_end(sim: Simulator, action: dict[str, Any]) -> bool:
+    """T-012 action kinds: ``hangup`` (optionally ``at`` a step of a passthrough chain),
+    ``turn_limit`` and ``leave_special``. False when the scenario's walk stops here."""
+    if action["kind"] == "hangup":
+        sim.hang_up(action.get("at", ""))
+        return False
+    if action["kind"] == "turn_limit":
+        return sim.turn_limit()
+    if action["kind"] == "leave_special":
+        if not sim.enter_special(_special_entry(sim, action["node"])):
+            return False
+        return sim.leave_special()
+    sim.problems.append(f"unknown scenario action {action['kind']!r}")
+    return False
+
+
+def _special_entry(sim: Simulator, node: str) -> str:
+    """A path that starts per step has its own entry (``special_<id>_at_<step>``)."""
+    entry = f"{node}_at_{sim.advance()}"
+    return entry if entry in sim.globals else node
+
+
 def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now: str) -> tuple[Simulator, list[str]]:
     """Play ``scenario``; return the simulator and the failed checks."""
     record_tool = _promise_tool(workflow, spec)
-    answers = {record_tool if name == RECORD else name: values for name, values in scenario.answers.items()}
+    answers = {_role_tool(workflow, name) if name in ROLE_STEPS else name: values
+               for name, values in scenario.answers.items()}
     bank = Bank(spec, scenario.products, answers, scenario.identity)
     variables = {"now": now, spec.offer.data.get("today_variable") or "now": now}
     for name in CALL_VARIABLES:
@@ -866,7 +1275,7 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
         repeat = MAX_REPEATS if action.get("repeat") else 1
         label = action.get("label", "")
         for _ in range(repeat):
-            waiting = sim.advance()
+            waiting = sim.advance(stop_at=action.get("at", ""))
             if waiting == END_CALL:
                 break
             if action["kind"] == "say":
@@ -895,27 +1304,31 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
                         break
                     if node.get("tools"):
                         # The model calls the path's tool for the product being discussed.
-                        sim.tool_turn({spec.confirmation.data["product_number_field"]: 1})
+                        sim.tool_turn({spec.confirmation.data["product_number_field"]: action.get("number", 1)})
                     else:
                         # The path asks first (F-055 ask): the customer still wants it.
                         proceed = next((t for t in node.get("transitions", []) if t["target_node"] != PREVIOUS), None)
                         operand = next((c.get("operand") for c in _leaves(proceed["condition"])), None) if proceed else None
                         sim.turn({action["choice_variable"]: operand} if proceed else {})
+            elif not _play_call_end(sim, action):
+                break
             counts[label] = counts.get(label, 0) + 1
             # A repeated turn goes on until the call ends or reaches one of its ``until`` steps.
             if action.get("repeat") and (sim.advance() in (END_CALL, *action.get("until", ()))):
                 break
-        if sim.step == END_CALL:
+        if sim.step == END_CALL or sim.hung_up:
             break
-    final = sim.advance()
+    final = END_CALL if sim.hung_up else sim.advance()
+    sim.end_of_call(workflow.get("tools") or [])
     failures.extend(sim.problems)
     if final != END_CALL:
         failures.append(f"the call does not reach {END_CALL}; it waits at {final}")
     for label, expected in scenario.repeats.items():
         if counts.get(label) != expected:
             failures.append(f"{label} turns: {counts.get(label)} (the spec's attempts give {expected})")
-    close_tool = _close_tool(workflow, spec)
-    closes = [index for index, call in enumerate(bank.calls) if call.tool == close_tool]
+    # The end-of-call close (a hang-up) writes the same ledger row as the closing chain's call.
+    close_tools = {_close_tool(workflow, spec), *(call.tool for call in bank.calls if call.step == END_OF_CALL)}
+    closes = [index for index, call in enumerate(bank.calls) if call.tool in close_tools]
     if len(closes) != 1:
         failures.append(f"{len(closes)} close calls (want exactly one)")
     elif closes[0] != len(bank.calls) - 1:
@@ -940,6 +1353,7 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
                        for call in bank.calls if call.tool == notes_rule["tool"] and call.ok)
         if notes != scenario.notes:
             failures.append(f"notes {notes}, the spec gives {scenario.notes}")
+    failures.extend(_callback_failures(workflow, bank, scenario))
     if sim.rejected:
         failures.append(f"rejected typed writes {sim.rejected[:3]}")
     if len(sim.spoken_after_turn) > 1:
@@ -985,13 +1399,24 @@ def _leaves(condition: dict[str, Any]) -> list[dict[str, Any]]:
     return [condition]
 
 
+# T-012: call-end states the scenarios play (``_call_end_scenarios``). A row mapped only by
+# these must be reached by a played call, not just counted.
+PLAYED_CALL_END_STATES = ("hangup", "hangup_unverified", "turn_limit", "account_failed", "callback_failed")
+
+
 def unreached_rows(spec: PhoneAgentSpec, plays: list[Scenario]) -> list[tuple[int, str]]:
     """Non-default outcome rows that no scenario ends with: an ending the call can never write."""
     reached = {_expected_pair(spec, scenario) for scenario in plays}
     rows = []
     for index, item in enumerate(spec.outcomes):
-        if item.on or (item.outcome, item.reason) in reached:
-            continue  # a mapped call-end state reaches it (states the scenarios do not play included)
+        if (item.outcome, item.reason) in reached or "default" in item.on:
+            continue
+        if set(item.on) - set(PLAYED_CALL_END_STATES):
+            continue  # a mapped call-end state the scenarios do not play reaches it
+        if item.on:
+            # T-012: these states are played, so the row must really be reached.
+            rows.append((index, f"{item.outcome}/{item.reason or '-'} (state not played: {', '.join(item.on)})"))
+            continue
         returning = any(path.then != SPECIAL_THEN_CLOSE and path.tool and (path.outcome, path.reason) ==
                         (item.outcome, item.reason) for path in spec.special_paths)
         rows.append((index, f"{item.outcome}/{item.reason or '-'}" + (" (returning path)" if returning else "")))
@@ -1078,6 +1503,11 @@ def run_selfcheck(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str | Non
             results.append(Result(f"reach_outcomes[{index}]", False, BUILDER,
                                   f"{label}: only a returning path names it; the closing does not derive it"))
             continue
+        if "(state not played" in label:
+            # T-012: the self-check could not play the state here (a scenario limit, not the spec's).
+            results.append(Result(f"reach_outcomes[{index}]", False, BUILDER,
+                                  f"{label}: no scenario played this call-end state, so the row is unchecked"))
+            continue
         results.append(Result(
             f"reach_outcomes[{index}]", False, SPEC,
             f"no call reaches the outcome row {label}: no call-end state, routed value or closing special path "
@@ -1085,6 +1515,79 @@ def run_selfcheck(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str | Non
             path=f"outcomes[{index}]", step="closing"))
         played += 1
     return Report(results, time.monotonic() - started, nows, played)
+
+
+# ---------------------------------------------------------------------------
+# Routing walks for single decisions (T-012: the tests' walkers, moved here)
+# ---------------------------------------------------------------------------
+
+def follow(workflow: dict[str, Any], key: str, variables: dict[str, Any], stop: tuple[str, ...] = ("closing",),
+           limit: int = 20) -> str:
+    """Route from ``key`` with the given variables and no customer turn: run code steps (in
+    the platform sandbox), take the first transition that holds, and stop at a ``stop`` step
+    or where no transition holds (the step waits). Raises on a code error, an import the
+    platform does not allow, or a routing loop."""
+    every = {**workflow["nodes"], **workflow.get("global_nodes", {})}
+    problems: list[str] = []
+    for _ in range(limit):
+        if key in stop:
+            return key
+        node = every[key]
+        if node["node_type"] == "code":
+            exec(_compiled(code_of(node)), _sandbox(problems, f"code step {key}", vars=variables))
+            if problems:
+                raise RuntimeError(problems[0])
+        target = next((t["target_node"] for t in node.get("transitions", [])
+                       if not t.get("is_tool_call") and holds(t["condition"], variables)), None)
+        if target is None:
+            return key
+        key = target
+    raise RuntimeError(f"routing loop from {key}")
+
+
+# The sentence of SPECIAL_CLOSE_TOOL_TASK_TEMPLATE that keeps a closing tool turn silent.
+SILENT_TOOL_RULE = "When you call the tool, say nothing before or after it"
+
+
+def _speaks_on_entry(node: dict[str, Any]) -> bool:
+    """A conversation step without ``on_enter`` speaks: the default entry is ``llm``."""
+    if node.get("node_type") == "conversation" and "on_enter" not in node:
+        return True
+    return node.get("on_enter", {}).get("type") in SPEAKING
+
+
+def spoken_per_turn(workflow: dict[str, Any], start: str, within: tuple[str, ...]) -> tuple[int, bool]:
+    """Every route from ``start`` through steps whose names start with one of ``within``:
+    (most speaking steps in one customer turn, whether ``end_call`` is reached).
+
+    A conversation step either speaks and waits for the customer (a new turn starts after
+    it), or, when it has tools, routes on the tool result in the same turn; it is silent then
+    only if its task says so (``SILENT_TOOL_RULE``). Code and api steps are passthrough."""
+    every = {**workflow["nodes"], **workflow.get("global_nodes", {})}
+    worst, reached, seen = 0, False, set()
+    todo = [(start, 0)]
+    while todo:
+        key, count = todo.pop()
+        if (key, count) in seen or key not in every or not key.startswith(within):
+            continue
+        seen.add((key, count))
+        if key == END_CALL:
+            reached = True
+            continue
+        node = every[key]
+        targets = [t["target_node"] for t in node.get("transitions", [])]
+        if node.get("node_type") == "conversation":
+            worst = max(worst, count + _speaks_on_entry(node))
+            todo.extend((target, 0) for target in [*targets, node.get("max_turn_transition")] if target)
+            if node.get("tools"):
+                spoken = count + (0 if SILENT_TOOL_RULE in node.get("task_message", "") else 1)
+                worst = max(worst, spoken)
+                todo.extend((target, spoken) for target in targets)
+            continue
+        spoken = count + _speaks_on_entry(node)
+        worst = max(worst, spoken)
+        todo.extend((target, spoken) for target in [*targets, node.get("passthrough_default_transition")] if target)
+    return worst, reached
 
 
 SelfCheck = Callable[[PhoneAgentSpec], Report]

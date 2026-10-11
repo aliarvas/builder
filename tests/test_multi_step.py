@@ -16,6 +16,7 @@ from builder.offer_check import AMOUNT_NONE_VALUE
 from builder.prompts import (
     CONVERSATION_NO_TOOL_RULE, CONVERSATION_TOOL_RULE_TEMPLATE, render_prompt,
 )
+from builder.selfcheck import follow
 from builder.spec import (
     CLOSE_STATE_NAMES, HANGUP_CLOSE_STATES, OFFER_ADJUST, OFFER_NEXT_WEEKDAY, OFFER_UNITS,
     OPTIONAL_CLOSE_STATES, SpecError, load_spec, parse_spec, required_close_states,
@@ -92,21 +93,9 @@ def engine_holds(condition, variables):
 
 def walk(workflow, key, variables, limit=20):
     """Follow deterministic routing from ``key``: run code steps, take the first matching
-    transition, stop at ``closing`` or where a step waits (no match)."""
-    every = {**workflow["nodes"], **workflow["global_nodes"]}
-    for _ in range(limit):
-        if key == "closing":
-            return key
-        node = every[key]
-        if node["node_type"] == "code":
-            exec(code_of(node), {"vars": variables, "json": json})
-        for transition in node.get("transitions", []):
-            if not transition.get("is_tool_call") and engine_holds(transition["condition"], variables):
-                key = transition["target_node"]
-                break
-        else:
-            return key
-    raise AssertionError("routing loop")
+    transition, stop at ``closing`` or where a step waits (no match). T-012: the builder's
+    self-check walker (platform sandbox: ``json`` is not pre-loaded)."""
+    return follow(workflow, key, variables, limit=limit)
 
 
 class SpecTests(unittest.TestCase):
@@ -626,7 +615,8 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 nodes = workflow["nodes"]
                 successors = graph(workflow)
                 # Remove the close path; then end_call must be unreachable from everywhere else.
-                close_path = {"closing", "closing_say", "close_attempt", "close_record", "note_next", "note_record"}
+                close_path = {"closing", "closing_say", "close_attempt", "close_record", "note_next", "note_record",
+                              "notes_outcome"}
                 reached = {"opening"}
                 pending = ["opening"]
                 while pending:
@@ -638,7 +628,11 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 if "note_next" in nodes:
                     # F-061: the note loop runs between the outcome and the goodbye.
                     self.assertEqual(["note_next"], edges(nodes["closing"]))
-                    self.assertEqual(["note_record", "closing_say"], edges(nodes["note_next"]))
+                    # T-011: with outcome_from_notes the outcome is chosen again after the loop.
+                    after = "notes_outcome" if "notes_outcome" in nodes else "closing_say"
+                    self.assertEqual(["note_record", after], edges(nodes["note_next"]))
+                    if after != "closing_say":
+                        self.assertEqual(["closing_say"], edges(nodes[after]))
                     self.assertEqual(["note_next"], edges(nodes["note_record"]))
                 else:
                     self.assertEqual(["closing_say"], edges(nodes["closing"]))

@@ -7,7 +7,9 @@ import json
 import unittest
 from pathlib import Path
 
-from builder.prompts import SPECIAL_TOOL_FAILED_SAY
+from builder.prompts import SPECIAL_CLOSE_TOOL_TASK_TEMPLATE, SPECIAL_TOOL_FAILED_SAY
+from builder.selfcheck import SILENT_TOOL_RULE
+from builder.selfcheck import spoken_per_turn as selfcheck_spoken_per_turn
 from builder.spec import parse_spec
 from builder.tools_from_openapi import tools_from_openapi
 from builder.workflow import build_spec_workflow, speakable_spec, special_result_variable
@@ -21,19 +23,10 @@ EXTRACTED = tuple(ROOT / "tests/fixtures/extract" / name for name in (
 ))
 # Steps of a special path and of the closing chain; the walk stops anywhere else.
 CHAIN = ("special_", "close_", "closing", "end_call")
-# The sentence of SPECIAL_CLOSE_TOOL_TASK_TEMPLATE that keeps the tool turn silent.
-SILENT_TOOL_RULE = "When you call the tool, say nothing before or after it"
 
 
 def speaks(node):
     return node.get("on_enter", {}).get("type") in ("tts", "llm")
-
-
-def speaks_on_entry(node):
-    """A conversation step without ``on_enter`` speaks: the default entry is ``llm``."""
-    if node.get("node_type") == "conversation" and "on_enter" not in node:
-        return True
-    return speaks(node)
 
 
 def all_workflows():
@@ -45,40 +38,8 @@ def all_workflows():
 
 
 def spoken_per_turn(workflow, start):
-    """Walk from a special-path entry to ``end_call``; return (most speaking steps in one
-    customer turn, whether end_call was reached).
-
-    A conversation step either speaks and waits for the customer (a new turn starts after
-    it), or, when it has tools, routes on the tool result in the same turn; it is silent
-    then only if its task says so (SILENT_TOOL_RULE). Code and api steps are passthrough.
-    """
-    every = {**workflow["nodes"], **workflow["global_nodes"]}
-    worst, reached, seen = 0, False, set()
-    todo = [(start, 0)]
-    while todo:
-        key, count = todo.pop()
-        if (key, count) in seen or key not in every or not key.startswith(CHAIN):
-            continue
-        seen.add((key, count))
-        if key == "end_call":
-            reached = True
-            continue
-        node = every[key]
-        targets = [t["target_node"] for t in node.get("transitions", [])]
-        if node.get("node_type") == "conversation":
-            spoken = count + speaks_on_entry(node)
-            worst = max(worst, spoken)
-            todo.extend((target, 0) for target in [*targets, node.get("max_turn_transition")] if target)
-            if node.get("tools"):
-                silent = SILENT_TOOL_RULE in node.get("task_message", "")
-                spoken = count + (0 if silent else 1)
-                worst = max(worst, spoken)
-                todo.extend((target, spoken) for target in targets)
-            continue
-        spoken = count + speaks_on_entry(node)
-        worst = max(worst, spoken)
-        todo.extend((target, spoken) for target in [*targets, node.get("passthrough_default_transition")] if target)
-    return worst, reached
+    """T-012: the builder's self-check walker (``builder.selfcheck.spoken_per_turn``)."""
+    return selfcheck_spoken_per_turn(workflow, start, CHAIN)
 
 
 def closing_sentence(workflow, variables):
@@ -108,6 +69,7 @@ class ClosingTurnTests(unittest.TestCase):
         shaped = [path for path in spec.special_paths if path.then == "close" and path.tool
                   and workflow["nodes"].get("special_" + path.id, {}).get("node_type") == "conversation"]
         self.assertTrue(shaped)
+        self.assertIn(SILENT_TOOL_RULE, SPECIAL_CLOSE_TOOL_TASK_TEMPLATE.text)  # the walker's silent rule
         for path in shaped:
             task = workflow["nodes"]["special_" + path.id]["task_message"]
             self.assertIn(SILENT_TOOL_RULE, task)

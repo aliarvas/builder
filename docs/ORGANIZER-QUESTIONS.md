@@ -71,3 +71,19 @@ These questions come from our live chat tests and from two unresolved difference
 **Question.** For each final agent, will the exact run command always receive one self-contained brief plus one OpenAPI file, or may a cumulative brief require multiple brief paths before the OpenAPI path?
 
 **Our assumption.** Each final run will receive one self-contained brief and its OpenAPI file; support for multiple briefs is useful for the public kit but is not required by the final invocation contract.
+
+## 8. Practice customers for the builder's own tests TO-CONFIRM
+
+**Context.** The diagram says the builder "reads the brief, creates the phone agent, tests and improves it". The kit's example builder improves by running the public practice cases (`/v1/practice/sessions`) and fixing failures. The bank mock creates sessions only for kit cases, so a builder cannot play its own synthetic customers against the bank.
+
+**Question.** Will each final brief come with its own practice customers (cases the bank mock can create sessions for), so that the builder can run them against its agent and rebuild within the 30-minute run? If not, should self-improvement rely only on offline checks and synthetic test calls?
+
+**Our assumption.** No final practice customers. The builder self-checks offline (spec-generated scenarios on the rendered workflow, T-010/T-012) and repairs the spec; live practice runs are a layer we add only if cases are provided.
+
+## 9. Per-product notes after a customer hang-up TO-CONFIRM
+
+**Context.** On a hang-up only the end-of-call hook runs, so the closing note loop (one note per product without a promise) does not run.
+
+**Question.** When the customer hangs up, does the expected ledger contain only the close outcome, or also the per-product notes the brief asks for at the end of a call?
+
+**Our assumption.** Only the close outcome (no public case has a hang-up).

@@ -346,7 +346,7 @@ def _validate_product_notes(spec: "PhoneAgentSpec") -> None:
         return
     notes = _object(notes, "closing.product_notes")
     unknown = set(notes) - {"tool", "product_field", "reason_field", "reasons", "refused_reason",
-                            "failed_reason", "skip_outcomes", "source"}
+                            "failed_reason", "skip_outcomes", "source", "outcome_from_notes"}
     if unknown:
         raise SpecError(f"closing.product_notes has unknown keys: {sorted(unknown)}")
     for key in ("tool", "product_field", "reason_field", "refused_reason", "failed_reason"):
@@ -362,6 +362,49 @@ def _validate_product_notes(spec: "PhoneAgentSpec") -> None:
     known = {item.outcome for item in spec.outcomes}
     if not set(skip) <= known:
         raise SpecError(f"closing.product_notes.skip_outcomes must be outcomes of the closing table: {sorted(known)}")
+    _validate_notes_outcome(spec, notes, reasons, known)
+
+
+def _validate_notes_outcome(spec: "PhoneAgentSpec", notes: dict[str, Any], reasons: list[str], known: set[str]) -> None:
+    """T-011, optional closing.product_notes.outcome_from_notes: with no promise recorded, the
+    call's outcome follows the notes. {all_reason, all_outcome, all_outcome_reason,
+    otherwise_outcome, source}: every product noted ``all_reason`` -> the row (all_outcome,
+    all_outcome_reason); otherwise ``otherwise_outcome`` with the reason of the first product,
+    in account order, whose note is another reason."""
+    rule = notes.get("outcome_from_notes")
+    if rule is None:
+        notes.pop("outcome_from_notes", None)
+        return
+    where = "closing.product_notes.outcome_from_notes"
+    rule = _object(rule, where)
+    unknown = set(rule) - set(NOTES_OUTCOME_KEYS) - {"source"}
+    if unknown:
+        raise SpecError(f"{where} has unknown keys: {sorted(unknown)}")
+    rule.setdefault("all_outcome_reason", "")
+    for key in NOTES_OUTCOME_KEYS:
+        _string(_required(rule, key, where), f"{where}.{key}", empty=key == "all_outcome_reason")
+    if rule["all_reason"] not in reasons:
+        raise SpecError(f"{where}.all_reason must be one of the note reasons {reasons}")
+    pairs = {(item.outcome, item.reason) for item in spec.outcomes}
+    if (rule["all_outcome"], rule["all_outcome_reason"]) not in pairs:
+        raise SpecError(f"{where}: {rule['all_outcome']}/{rule['all_outcome_reason'] or '-'} is not a row of the closing table")
+    if rule["otherwise_outcome"] not in known:
+        raise SpecError(f"{where}.otherwise_outcome must be an outcome of the closing table: {sorted(known)}")
+
+
+# Keys of closing.product_notes.outcome_from_notes (T-011), "source" aside.
+NOTES_OUTCOME_KEYS = ("all_reason", "all_outcome", "all_outcome_reason", "otherwise_outcome")
+
+
+def notes_outcome_pairs(notes: dict[str, Any] | None) -> set[tuple[str, str]]:
+    """The closing pairs ``outcome_from_notes`` can derive (T-011), for the reach checks."""
+    rule = (notes or {}).get("outcome_from_notes")
+    if not isinstance(rule, dict):
+        return set()
+    reasons = [item for item in notes.get("reasons") or [] if isinstance(item, str)]
+    pairs = {(rule.get("all_outcome"), rule.get("all_outcome_reason") or "")}
+    pairs |= {(rule.get("otherwise_outcome"), reason) for reason in reasons if reason != rule.get("all_reason")}
+    return pairs
 
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
