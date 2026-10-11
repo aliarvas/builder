@@ -47,3 +47,42 @@ It stops a clock reading whenever such a word is present ("at 3 for an hour" is 
 - *Past midnight:* correct (next date, window rejects; no window books the next day).
 - *Without-window behaviour change:* an improvement (no more past-time bookings); one extra turn for a past time; generic message.
 - *No brief value in builder/:* yes.
+
+
+---
+
+## Re-review (Fix: compound durations, bare trailing numbers, edge scenarios)
+
+**Method:** offline. Read "Fix (review T-014)"; re-ran my 25-phrase table at 11:00, 18:30, 23:30 on both specs (with and without a window) and 26 further phrases; `python3 -m unittest`: **540 OK** (26 s). Scratchpad only; no Freya, no model, no env, no edits.
+
+### Decision: **merge edilebilir** (finding 1 closed; one new LOW for a rare phrase)
+
+### Finding 1 — closed
+
+At 11:00, both specs:
+
+| Customer says | Before | Now |
+|---|---|---|
+| "in 2 hours 30 minutes" | 13:00 | **13:30** |
+| "two hours thirty minutes later" | 11:30 | **13:30** |
+| "in one hour fifteen" | 12:00 | **asked again** |
+
+More forms, all correct: "in 1 hour 15 minutes" and "one hour and fifteen minutes later" → 12:15; "2 hours 30 minutes from now" and "in 2 hours, 30 minutes" → 13:30; "in 1 hr 20 mins" → 12:20; "in 2.5 hours 10 minutes" → 13:40; "in 3 hours and a half" → 14:30; "in an hour and a half" → 12:30; "in a quarter of an hour" → 11:15. A bare trailing number ("in 2 hours 30", "in 2 hours and 30", "in 1 hour 5", "in two hours 15"), an unconsumed span ("30 minutes and 2 hours later", "in 15 minutes 2 hours"), an extra unit ("… and 30 seconds") and "in 2 hours or 30 minutes" are all `window_unclear` (asked again), not booked. Single-span forms are unchanged. With the A+B-style window the same times go through the window check (18:30 + 1 h 15 → 19:45 outside; 18:30 + 30 min → 19:00 booked).
+
+### Edge scenarios — closed
+The window's last minute is booked and one minute past is outside (tests: 11:00 + 8 h and 15:30 + 3 h 30 min booked at 19:00; 481 minutes and 3 h 31 min outside). The family computes the edge from the spec window and `now`, has the three new phrases, and a mutation (the old first-span code) fails all three compound scenarios on Brief A and A+B. The render pin was re-pinned and the report shows the pin changes only with the callback code.
+
+### New LOW — words before the span are ignored
+
+When a span is found, other number words in front of it are not checked. Examples at 11:00 (no window):
+- "three quarters of an hour later" → books **12:00** (reads "an hour"); the person meant 11:45. ("in three quarters of an hour" is asked again, correct.)
+- "twice an hour later" → 12:00.
+- "in 2 hours at 5" → books 13:00 and ignores "at 5" (a clock time and a duration together should be unclear).
+
+These are rare spoken forms, but they are the same kind of silent error as finding 1. **Fix (small, general):** after the match, if the normalised text still holds a digit or number word, or the words `quarter(s)`, `twice`, `thrice`, outside the matched span, return -1; and treat a clock candidate together with a duration as unclear. Add "three quarters of an hour later" to the family phrases.
+
+### Notes kept as stated
+Finding 2 (night callback without a window) and finding 4 (any hour/minute word blocks the clock reading) were noted and left; I agree with both.
+
+### Live check (with approval, unchanged)
+A chat callback case with a relative time ("call me in two hours"), then one with a compound form ("in an hour and a half"), checking the booked date and time in the ledger.

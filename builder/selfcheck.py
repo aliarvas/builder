@@ -853,10 +853,8 @@ def _special_scenarios(spec, plan, path, one, notes_for) -> list[Scenario]:
     result = []
     notes_reason = (path.tool_args or {}).get((plan.notes or {}).get("reason_field", ""), "")
     if path.then == SPECIAL_THEN_CLOSE:
-        written = {"p1": notes_reason} if path.tool and plan.notes and path.tool == plan.notes["tool"] else None
-        result.append(Scenario(f"special_{path.id}", [*before, enter], "special:" + path.id, one,
-                               pair=(path.outcome, path.reason), step=entry,
-                               notes=notes_for(one, pair=(path.outcome, path.reason), written=written)))
+        # T-016: the same notes rule as the path at its other steps (no products before the account).
+        result.append(_closing_case(plan, path, entry, one, notes_for, f"special_{path.id}", before))
         if path.tool:
             result.append(Scenario(f"special_{path.id}_tool_failed", [*before, enter], "special_tool_failed", one,
                                    answers={path.tool: [False]}, step=entry))
