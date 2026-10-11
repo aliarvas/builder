@@ -24,6 +24,8 @@ from .prompts import (
     MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
     NO_GOODBYE_LINE,
+    SIDE_QUESTION_ITEM,
+    SIDE_QUESTION_LINE,
     NO_SECURITY_QUESTIONS_LINE,
     OPENING_REASK_TASK_TEMPLATE,
     OPENING_TASK_TEMPLATE,
@@ -207,9 +209,10 @@ BEFORE_IDENTITY_STEPS = ("opening", "opening_reask", "third_party", THIRD_PARTY_
 CALL_END_STEPS = ("end_call", "close_attempt")
 
 
-def _apply_fixed_lines(key: str, node: dict[str, Any]) -> None:
+def _apply_fixed_lines(key: str, node: dict[str, Any], side_questions: list[SpecialPath] = ()) -> None:
     """Fixed lines in conversation prompts (T-015): no security questions before identity
-    (F-070), and no goodbye in any step but the one that says the closing sentence (F-072)."""
+    (F-070), and no goodbye in any step but the one that says the closing sentence (F-072).
+    T-019 (F-074): the side questions whose answer the step may have to give first."""
     if node.get("node_type") != "conversation":
         return
     lines = []
@@ -217,9 +220,56 @@ def _apply_fixed_lines(key: str, node: dict[str, Any]) -> None:
         lines.append(NO_SECURITY_QUESTIONS_LINE.text)
     if not any(transition.get("target_node") in CALL_END_STEPS for transition in node.get("transitions", [])):
         lines.append(NO_GOODBYE_LINE.text)
+    if side_questions:
+        lines.append(SIDE_QUESTION_LINE.text)
+        lines += [SIDE_QUESTION_ITEM.text.replace("{when}", path.when.text.strip()).replace("{say}", path.say.text.strip())
+                  for path in side_questions]
     for field in ("task_message", "loop_prompt"):
         if field in node and lines:
             node[field] = str(node[field]).rstrip() + "\n" + "\n".join(lines)
+
+
+def side_question_paths(spec: PhoneAgentSpec) -> list[SpecialPath]:
+    """T-019 (F-074): spoken-only returning special paths (a fixed answer, no tool, no ask)."""
+    return [path for path in spec.special_paths
+            if path.then != "close" and not path.tool and not path.ask and path.say.text.strip()]
+
+
+def next_speakers(nodes: dict[str, Any], key: str) -> set[str]:
+    """The conversation steps that can speak right after a customer turn in ``key``: its
+    route targets, through code and API steps (which speak nothing)."""
+    found: set[str] = set()
+    seen: set[str] = set()
+    todo = [t.get("target_node") for t in nodes[key].get("transitions", [])]
+    while todo:
+        target = todo.pop()
+        if target in seen or target not in nodes:
+            continue
+        seen.add(target)
+        node = nodes[target]
+        if node.get("node_type") == "conversation":
+            found.add(target)
+            continue
+        todo += [t.get("target_node") for t in node.get("transitions", [])]
+        todo.append(node.get("passthrough_default_transition"))
+    return found
+
+
+def side_question_steps(spec: PhoneAgentSpec, nodes: dict[str, Any]) -> dict[str, list[SpecialPath]]:
+    """T-019 (F-074): one route wins per turn, so a side question asked with a business answer
+    never enters its special path. Each conversation step where such a path may fire, or that
+    speaks right after a turn in one, lists the path's answer."""
+    paths = side_question_paths(spec)
+    if not paths:
+        return {}
+    after = {key: next_speakers(nodes, key) for key, node in nodes.items() if node.get("node_type") == "conversation"}
+    result: dict[str, list[SpecialPath]] = {}
+    for key in after:
+        here = [path for path in paths
+                if key in source_steps(path) or any(key in after[step] for step in source_steps(path) if step in after)]
+        if here:
+            result[key] = here
+    return result
 
 
 def who_answered_description(spec: PhoneAgentSpec) -> str:
@@ -1527,8 +1577,9 @@ def _render_spec_workflow(
         clone["on_enter"] = {"type": "tts", "text": line}
         nodes[clone_key] = clone
 
+    side_questions = side_question_steps(spec, nodes)
     for key, node in [*nodes.items(), *global_nodes.items()]:
-        _apply_fixed_lines(key, node)
+        _apply_fixed_lines(key, node, side_questions.get(key, []) if key in nodes else [])
         _apply_conversation_tool_rules(node)
         if node.get("transitions"):
             node["transitions"] = group_transitions_by_target(node["transitions"])

@@ -233,6 +233,28 @@ Never ask security questions or for personal data in this step; only the program
 Never say goodbye or end the call yourself; the program closes the call.
 ```
 
+## SIDE_QUESTION_LINE
+
+- Purpose: A side question asked in the same turn as a business answer is not lost (F-074).
+- Receiver: phone agent
+- Used at: builder/workflow.py — conversation steps where a spoken-only returning special path may fire, or that speak right after one; followed by one SIDE_QUESTION_ITEM per path
+- Approximate tokens: ~23 (characters ÷ 4)
+
+```text
+If the customer asked one of these and has no answer yet, first say its answer, then go on:
+```
+
+## SIDE_QUESTION_ITEM
+
+- Purpose: One spoken-only returning special path under SIDE_QUESTION_LINE (F-074).
+- Receiver: phone agent
+- Used at: builder/workflow.py — one line per path: its when text and its fixed answer
+- Approximate tokens: ~6 (characters ÷ 4)
+
+```text
+- {when} Say: "{say}"
+```
+
 ## IDENTITY_TASK_TEMPLATE
 
 - Purpose: Asks ordered identity questions and uses the verification tool.

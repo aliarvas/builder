@@ -201,6 +201,18 @@ NO_GOODBYE_LINE = PromptDefinition(
     "phone agent", "builder/workflow.py — every conversation task_message except the step that says the closing sentence",
     "Never say goodbye or end the call yourself; the program closes the call.",
 )
+SIDE_QUESTION_LINE = PromptDefinition(
+    "SIDE_QUESTION_LINE",
+    "A side question asked in the same turn as a business answer is not lost (F-074).",
+    "phone agent", "builder/workflow.py — conversation steps where a spoken-only returning special path may fire, or that speak right after one; followed by one SIDE_QUESTION_ITEM per path",
+    "If the customer asked one of these and has no answer yet, first say its answer, then go on:",
+)
+SIDE_QUESTION_ITEM = PromptDefinition(
+    "SIDE_QUESTION_ITEM",
+    "One spoken-only returning special path under SIDE_QUESTION_LINE (F-074).",
+    "phone agent", "builder/workflow.py — one line per path: its when text and its fixed answer",
+    "- {when} Say: \"{say}\"",
+)
 THIRD_PARTY_CLOSE_KIND_DESCRIPTION = PromptDefinition(
     "THIRD_PARTY_CLOSE_KIND_DESCRIPTION",
     "Provides an independent guard signal for third-party closing intents (F-064).",
@@ -800,6 +812,8 @@ PROMPTS = (
     THIRD_PARTY_CLOSE_KIND_DESCRIPTION,
     NO_SECURITY_QUESTIONS_LINE,
     NO_GOODBYE_LINE,
+    SIDE_QUESTION_LINE,
+    SIDE_QUESTION_ITEM,
     IDENTITY_TASK_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
     OFFER_VERDICT_MESSAGES,

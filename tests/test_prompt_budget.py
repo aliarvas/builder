@@ -6,6 +6,7 @@ import copy
 import json
 import re
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from builder.spec import SpecError, parse_spec
@@ -232,9 +233,14 @@ class BudgetT009dTests(unittest.TestCase):
         workflow, _, placements = render(AB_FRESH)
         estimates = workflow_prompt_estimates(workflow)
         # 1744 before T-009d; still over the limit (the review fix keeps every doubtful rule), so
-        # the build ships with the budget warning.
+        # the build ships with the budget warning. T-019 (F-074) adds the side-question answers on
+        # purpose: the T-009d guard is measured without them, and their own growth is capped.
+        with mock.patch("builder.workflow.side_question_steps", lambda spec, nodes: {}):
+            without, _, _ = render(AB_FRESH)
+        plain = workflow_prompt_estimates(without)
         for key in ("negotiate", "offer_say", "revise_ask"):
-            self.assertLess(estimates[key], 1700, key)
+            self.assertLess(plain[key], 1700, key)
+            self.assertLess(estimates[key] - plain[key], 100, key)
         rule_lines = [line for line in placements if not line.startswith("budget")]
         placed = [line.split(" -> ")[0] for line in rule_lines]
         self.assertEqual(sorted(all_rule_keys(AB_FRESH)), sorted(placed))

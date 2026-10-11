@@ -30,6 +30,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+> **Workflow design review (2026-10-11):** offline review of the Brief A version 17 workflow, items W-01 to W-08 plus architecture notes, in [`uat-findings/workflow.md`](uat-findings/workflow.md). All open, not yet assigned.
+
 ### F-077: A returning special path's note decides the outcome, but the closing ignores it
 
 - **Date:** 2026-10-11
@@ -78,8 +80,8 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** A route takes one branch per turn. The business branch won, and the spoken-only special path was never entered.
 - **Category:** routing / policy
 - **Fix / lesson:** Proposal: the speaking steps after a business route get a generic line built from the spoken-only returning paths ("if the last turn also asked X, say Y first"). Medium risk; not done before the deadline.
-- **Status:** open
-- **Retest:** pending
+- **Status:** fixed offline (T-019): every step that may speak after such a turn lists the spoken-only side answers ("if asked and not yet answered, answer first"); negotiate prompt grows past 1500 tokens on live Brief A
+- **Retest:** pending (asks_back run on version 18)
 
 Run notes from the same live run (no builder fault):
 - PUB-05: the model was slow (about 60 s of silence) and the customer hung up before the hardship turn.
