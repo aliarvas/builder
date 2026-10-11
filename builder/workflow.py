@@ -46,7 +46,7 @@ from .record_loop import (
 )
 from .product_notes import NOTE_RECORD, PRODUCT_REFUSAL, add_product_steps, refusal_values
 from .spec import ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
-from .spoken import agent_directed, spoken_words
+from .spoken import agent_directed, quoted_speech, spoken_words
 from .callback import (
     BOOK_FAILURE_COUNT, THIRD_PARTY_ASK, THIRD_PARTY_CLOSE_CHECK, add_collect_rule, callback_entry_transition,
     callback_extraction_fields, callback_nodes, third_party_ask_node, third_party_close_guard_node,
@@ -846,6 +846,12 @@ def close_table(spec: PhoneAgentSpec) -> list[tuple[str, str, str, str, bool]]:
         if path.then == "close":
             item = by_pair[(path.outcome, path.reason)]
             rows.append(("special:" + path.id, path.outcome, path.reason, item.say.text, item.wins_over_promise))
+    if not any("special_tool_failed" in item.on for item in spec.outcomes):
+        # F-065: a failed special-path tool is a service failure; without a row of its own it
+        # takes the outcome of the promise-failure row, not the default row (often "refused").
+        # Its sentence is left empty: the closing says the builder's failure line and goodbye.
+        failed = next(item for item in spec.outcomes if "promise_failed" in item.on)
+        rows.append(("special_tool_failed", failed.outcome, failed.reason, "", failed.wins_over_promise))
     default = next(item for item in spec.outcomes if "default" in item.on)
     rows.append(("default", default.outcome, default.reason, default.say.text, default.wins_over_promise))
     return rows
@@ -1811,6 +1817,22 @@ class RulePlan:
         return lines
 
 
+def unreachable_outcomes(spec: PhoneAgentSpec) -> list[str]:
+    """F-065: outcome rows no call-end state and no closing special path leads to (trace warnings)."""
+    closed = {(path.outcome, path.reason) for path in spec.special_paths if path.then == "close"}
+    # A returning path names a row only when it has a tool (a per-product note); a question
+    # path that returns has no tool and reaches nothing (F-065 review LOW 1).
+    returning = {(path.outcome, path.reason) for path in spec.special_paths if path.then != "close" and path.tool}
+    return [
+        f"unreachable_outcome outcomes[{index}] {item.outcome}/{item.reason or '-'}: "
+        + ("only a special path that returns names it; the closing does not derive it"
+           if (item.outcome, item.reason) in returning
+           else "no call-end state or closing special path leads to it; the call can never end this way")
+        for index, item in enumerate(spec.outcomes)
+        if not item.on and (item.outcome, item.reason) not in closed
+    ]
+
+
 def speakable_spec(spec: PhoneAgentSpec) -> tuple[PhoneAgentSpec, list[str]]:
     """Make every field spoken word for word safe to say (F-047).
 
@@ -1820,18 +1842,28 @@ def speakable_spec(spec: PhoneAgentSpec) -> tuple[PhoneAgentSpec, list[str]]:
     Every replacement is returned as a ``spoken_fallback`` warning.
     """
     notes: list[str] = []
+    # Spec values (outcomes, reasons, call-end states, routed values) are never spoken as a quote.
+    reserved = {value for item in spec.outcomes for value in (item.outcome, item.reason, *item.on) if value}
+    reserved |= {value for stage in (spec.opening, spec.third_party, spec.negotiation, spec.confirmation)
+                 for value in stage.data.get("intent_values", stage.data.get("who_answered_options", []))
+                 if isinstance(value, str)}
 
-    def clean(text: str, fallback: str, where: str) -> str:
+    def clean(text: str, fallback: str, where: str, then_fallback: bool = False) -> str:
         words = spoken_words(text)
         reason = agent_directed(words)
         if not reason:
             return words
-        notes.append(f"spoken_fallback {where}: {reason}; spoken instead: {fallback!r}")
-        return fallback
+        # F-065: the quoted words of an instruction (Say: "...") are kept; an outcome line
+        # still ends with the goodbye unless the quoted words already say it.
+        quoted = quoted_speech(text, reserved)
+        instead = fallback if not quoted else (
+            quoted + " " + fallback if then_fallback and "goodbye" not in quoted.lower() else quoted)
+        notes.append(f"spoken_fallback {where}: {reason}; spoken instead: {instead!r}")
+        return instead
 
     outcomes = tuple(
         dataclasses.replace(item, say=dataclasses.replace(
-            item.say, text=clean(item.say.text, CLOSING_FALLBACK_SAY.text, f"outcomes[{index}].say")))
+            item.say, text=clean(item.say.text, CLOSING_FALLBACK_SAY.text, f"outcomes[{index}].say", True)))
         for index, item in enumerate(spec.outcomes)
     )
     paths = []
@@ -1900,6 +1932,7 @@ def build_spec_workflow(
     if warnings is not None:
         warnings.extend(found)
         warnings.extend(spoken_notes)
+        warnings.extend(unreachable_outcomes(spec))
     if placements is not None:
         placements.extend(plan.placements())
         for key in sorted(estimates):

@@ -46,6 +46,7 @@ from .spec import (
     FRAMEWORK_NONE_VALUE,
     OPENING_GREETING_VALUE,
     OPTIONAL_CLOSE_STATES,
+    SPECIAL_THEN_CLOSE,
     PhoneAgentSpec,
     SpecError,
     parse_spec,
@@ -291,8 +292,10 @@ class _Checker:
 
     def __init__(
         self, brief: str, contract: dict[str, Any], openapi_strings: set[str], *, spoken_soft: bool = False,
-        optional_soft: bool = False,
+        optional_soft: bool = False, reach_soft: bool = False,
     ) -> None:
+        # In the last round an outcome row nothing can reach is a warning (F-065).
+        self.reach_soft = reach_soft
         # In the last round a spoken-text problem is a warning: the renderer then uses its fallback.
         self.spoken_soft = spoken_soft
         # In the last round a problem in an optional block (OPTIONAL_BLOCKS) drops the block
@@ -912,6 +915,38 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _check_reach(groups: dict[str, Any], check: _Checker) -> None:
+    """F-065: every outcome row but the default one is reached by a call-end state, a routed
+    value or a special path with its pair; else that ending can never be written. A returning
+    special path counts only with a tool (a per-product note, several products: the documents
+    keep the call going there; the render warns). Defensive: it also runs on replies whose own
+    group checks failed (review: known limit)."""
+    def items(value: Any) -> list[dict[str, Any]]:
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def part(group: str, *keys: str) -> Any:
+        value: Any = groups.get(group)
+        for key in keys:
+            value = value.get(key) if isinstance(value, dict) else None
+        return value
+
+    reached = {(path.get("outcome"), path.get("reason") or "") for path in items(part("outcomes", "special_paths"))
+               if path.get("then") == SPECIAL_THEN_CLOSE or path.get("tool")}
+    for entries in (part("opening_identity", "opening", "answers"), part("opening_identity", "third_party", "intents"),
+                    part("flow", "negotiation", "intents")):
+        reached |= {(entry.get("outcome"), entry.get("reason") or "") for entry in items(entries)
+                    if entry.get("route") == "end"}
+    for index, row in enumerate(part("outcomes", "outcomes") or []):
+        if not isinstance(row, dict) or row.get("states") or (row.get("outcome"), row.get("reason") or "") in reached:
+            continue
+        (check.warn if check.reach_soft else check.error)(
+            f"outcomes[{index}]",
+            f"no call-end state, routed value or special path (then close) closes with "
+            f"{row.get('outcome')}/{row.get('reason') or '-'}, so the call can never end this way; add the "
+            "special path or the state the documents give for this ending",
+        )
+
+
 def _cross_group_checks(groups: dict[str, dict[str, Any]], check: _Checker) -> None:
     """Routed closing pairs must be rows of the closing table (owned by other groups)."""
     intents = groups["flow"].get("negotiation", {}).get("intents") or []
@@ -934,6 +969,7 @@ def _cross_group_checks(groups: dict[str, dict[str, Any]], check: _Checker) -> N
                     f"closes with {entry.get('outcome')}/{entry.get('reason') or '-'}, which is not a closing-table "
                     f"row; the rows are: {listed}",
                 )
+    _check_reach(groups, check)
     # A negotiation value must not close a situation that needs a special path's tool:
     # the call would close with that outcome without calling the tool.
     tool_pairs = {
@@ -1268,7 +1304,7 @@ def extract_spec(
     check = _Checker(brief, contract, openapi_strings)
     for round_number in range(MAX_REPAIR_ROUNDS + 1):
         last = round_number == MAX_REPAIR_ROUNDS
-        check = _Checker(brief, contract, openapi_strings, spoken_soft=last, optional_soft=last)
+        check = _Checker(brief, contract, openapi_strings, spoken_soft=last, optional_soft=last, reach_soft=last)
         failing: dict[str, list[str]] = {}
         for name, conversation in conversations.items():
             if conversation.reply is None:
@@ -1280,6 +1316,13 @@ def extract_spec(
             check.warnings.extend(warning for warning in group_check.warnings if "optional block" in warning[1])
             if group_check.errors:
                 failing[name] = [f"{path}: {message}" for path, message in group_check.errors]
+        if failing and all(conversation.reply is not None for conversation in conversations.values()):
+            # The reach check needs every group; run it now too, so an unreachable row is
+            # repaired in the same round as the other group's errors (F-065 review).
+            reach = _Checker(brief, contract, openapi_strings, reach_soft=last)
+            _check_reach({name: conversation.reply for name, conversation in conversations.items()}, reach)
+            for path, message in reach.errors:
+                failing.setdefault(group_of(path) or "outcomes", []).append(f"{path}: {message}")
         if not failing:
             replies = {name: conversation.reply for name, conversation in conversations.items()}
             _cross_group_checks(replies, check)

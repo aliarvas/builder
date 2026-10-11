@@ -373,6 +373,9 @@ OPENING_GREETING_VALUE = "greeting"
 # enum, so a reset with "" silently kept the old value. It routes nowhere.
 FRAMEWORK_NONE_VALUE = "none"
 
+# A special path's ``then`` value that ends the call (the other one returns to the step).
+SPECIAL_THEN_CLOSE = "close"
+
 # Terminal call states the skeleton can produce. Brief-independent; the spec maps each
 # to an outcome-table row through ``outcomes[].on``.
 # Used only when the call ends before the closing chain ran (end-of-call close).

@@ -77,8 +77,9 @@ class ExtractionPipelineTests(unittest.TestCase):
         )
 
     def test_multi_document_round_trip(self):
-        result, _, _ = run(groups_from_spec(FIXTURE_B), BRIEF_AB)
+        result, client, _ = run(groups_from_spec(FIXTURE_B), BRIEF_AB)
         self.assertEqual([], compare_specs(result.spec_data, FIXTURE_B))
+        self.assertFalse(any(purpose.startswith("repair") for purpose in client.purposes()))  # F-065
         # F-061/F-062: the note rule and the per-product refusal survive the extraction.
         self.assertEqual(FIXTURE_B["closing"]["product_notes"], result.spec_data["closing"]["product_notes"])
         self.assertEqual(["no_arrangement"], result.spec_data["negotiation"]["product_end_values"])
@@ -184,7 +185,9 @@ class ExtractionPipelineTests(unittest.TestCase):
         self.assertNotIn("Freya Bank is fictional", repair_message)
         # The repair continues the same conversation: the first reply is in context.
         self.assertEqual("assistant", repairs[0][1][-2]["role"])
-        self.assertIn(("extract_round", "round=0 failing_groups=outcomes errors=1"), logs)
+        # The row left without a state is also reported as unreachable, in the same round (F-065).
+        self.assertIn(("extract_round", "round=0 failing_groups=outcomes errors=2"), logs)
+        self.assertIn("not_verified/failed, so the call can never end this way", repair_message)
 
     def test_contract_error_found_after_merge_is_sent_to_the_owning_group(self):
         broken = copy.deepcopy(RECORDED_A["outcomes"])
@@ -437,6 +440,68 @@ class FrameworkStateAndOfferFieldTests(unittest.TestCase):
         moved = copy.deepcopy(FIXTURE_A)
         next(row for row in moved["outcomes"] if row["reason"] == "service_error")["on"].append("offer_limit")
         self.assertTrue(any("offer_limit" in diff for diff in compare_specs(moved, FIXTURE_A)))
+
+
+class OutcomeReachTests(unittest.TestCase):
+    """F-065: every outcome row but the default one can be reached."""
+
+    def groups_1300(self):
+        # The Brief A spec of the 13:00 live run (REPRO): no special path closes with
+        # no_promise/hardship, so a customer declining support could never end that way.
+        groups = groups_from_spec(json.loads(
+            (ROOT / "tests/fixtures/extract/brief-a-repro-1300.json").read_text(encoding="utf-8")))
+        # The live run had this excerpt; the helper does not carry offer sources.
+        groups["offer"]["sources"]["offer.persuasion_attempts"] = "| `days_late` | Band | Deadline | Persuasion attempts |"
+        return groups
+
+    def test_the_1300_spec_goes_to_repair_and_the_repaired_reply_passes(self):
+        groups = self.groups_1300()
+        repaired = copy.deepcopy(groups["outcomes"])
+        repaired["special_paths"].append({
+            "id": "hardship_declined",
+            "when": {"text": "The customer who mentioned hardship declines the connection to the customer support team.",
+                     "source": "If they decline, close as `no_promise` / `hardship`."},
+            "say": {"text": "Thank you for your time. Goodbye.",
+                    "source": "Thank the customer and say goodbye before `close_call`."},
+            "tool": "", "tool_args": {}, "outcome": "no_promise", "reason": "hardship",
+            "available_in": ["negotiate", "confirm_record"], "then": "close",
+        })
+        result, client, logs = run(groups, BRIEF_A, outcomes=[as_text(groups["outcomes"]), as_text(repaired)])
+        repair = next(messages for purpose, messages in client.calls if purpose == "repair1:outcomes")
+        self.assertIn("closes with no_promise/hardship, so the call can never end this way", repair[-1]["content"])
+        self.assertNotIn("repair2:outcomes", client.purposes())
+        self.assertIn("hardship_declined", [path.id for path in result.spec.special_paths])
+        self.assertFalse(any("never end this way" in warning for warning in result.warnings))
+
+    def test_still_unreachable_in_the_last_round_is_a_warning(self):
+        result, client, logs = run(self.groups_1300(), BRIEF_A)
+        self.assertIn(f"repair{MAX_REPAIR_ROUNDS}:outcomes", client.purposes())
+        self.assertTrue(any(key == "extract_warning" and "outcomes[6]" in value and "never end this way" in value
+                            for key, value in logs))
+        self.assertNotIn("hardship_declined", [path.id for path in result.spec.special_paths])
+
+    def test_a_returning_question_path_does_not_count(self):
+        groups = self.groups_1300()
+        question = next(path for path in groups["outcomes"]["special_paths"]
+                        if path["then"] == "return" and not path["tool"])
+        question["outcome"], question["reason"] = "no_promise", "hardship"
+        _, client, _ = run(groups, BRIEF_A)
+        repair = next(messages for purpose, messages in client.calls if purpose == "repair1:outcomes")
+        self.assertIn("closes with no_promise/hardship, so the call can never end this way", repair[-1]["content"])
+
+    def test_reach_is_checked_while_another_group_fails(self):
+        # Review (known limit): the offer group fails in round 0; the unreachable row is sent
+        # back in the same round, not only after the other group passes.
+        groups = self.groups_1300()
+        del groups["offer"]["sources"]["offer.persuasion_attempts"]
+        _, client, logs = run(groups, BRIEF_A)
+        self.assertIn(("extract_round", "round=0 failing_groups=offer,outcomes errors=2"), logs)
+        repair = next(messages for purpose, messages in client.calls if purpose == "repair1:outcomes")
+        self.assertIn("never end this way", repair[-1]["content"])
+
+    def test_rows_reached_by_a_routed_value_or_a_special_path_pass(self):
+        result, client, _ = run()
+        self.assertFalse(any(purpose.startswith("repair") for purpose in client.purposes()))
 
 
 class ValidationRuleTests(unittest.TestCase):
@@ -720,6 +785,12 @@ class BuildIntegrationTests(unittest.TestCase):
         self.assertIn("coverage: items=", trace)
         self.assertNotIn(self.KEY, "".join(traces.values()))
         self.assertNotIn("not mapped", stdout)
+        # F-065: a copy named by the run's start time, which a repeat run does not overwrite.
+        stamp = re.sub(r"[^0-9T]", "", trace.splitlines()[0].split(": ", 1)[1].split(".")[0].split("+")[0]) + "Z"
+        self.assertEqual(traces["extracted.spec.json"], traces[f"extracted.{stamp}.spec.json"])
+        self.assertIn(f"spec_copy: traces/extracted.{stamp}.spec.json", trace)
+        self.assertTrue(trace.splitlines()[[line.split(":")[0] for line in trace.splitlines()].index("spec")]
+                        .startswith("spec: traces/extracted.spec.json extracted"))
 
     def test_unmapped_items_give_a_one_line_warning_at_the_end(self):
         coverage = all_covered(BRIEF_A)
@@ -745,6 +816,7 @@ class BuildIntegrationTests(unittest.TestCase):
         self.assertIn("bad.spec.failed.json", trace)
         self.assertIn("bad.spec.failed.json", traces)
         self.assertNotIn("bad.spec.json", traces)
+        self.assertEqual(["bad.failed.log", "bad.spec.failed.json"], sorted(traces))  # no run copy either
 
 
 if __name__ == "__main__":

@@ -201,9 +201,22 @@ def _extract(
             f"extract_seconds={time.monotonic() - started:.1f}"
         ))
     spec_path.parent.mkdir(parents=True, exist_ok=True)
-    spec_path.write_text(json.dumps(result.spec_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    text = json.dumps(result.spec_data, indent=2, ensure_ascii=False) + "\n"
+    spec_path.write_text(text, encoding="utf-8")
+    # F-065: a copy per run, so a repeat run on the same slot does not overwrite the spec a
+    # repeatability check (SELF-TEST step 8) compares.
+    copy_path = Path("traces") / f"{slot}.{_run_stamp(trace)}.spec.json"
+    copy_path.write_text(text, encoding="utf-8")
+    trace.add("spec_copy", copy_path)
     trace.add("spec", f"{spec_path} extracted; unmapped_items={len(result.unmapped)} warnings={len(result.warnings)}")
     return result
+
+
+def _run_stamp(trace: TraceWriter) -> str:
+    """The run's start time from the trace (``start_utc``) as a file-name part: 20261011T100009Z."""
+    started = trace.lines[0].partition(": ")[2]
+    digits = re.sub(r"[^0-9T]", "", started.split(".")[0].split("+")[0])
+    return (digits or time.strftime("%Y%m%dT%H%M%S", time.gmtime())) + "Z"
 
 
 def main(argv: list[str] | None = None) -> int:

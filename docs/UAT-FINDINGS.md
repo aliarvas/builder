@@ -51,8 +51,19 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** Our workflow has two silent loops with no conversation step: `record_next → record_promise → confirmation_progress` and `close_attempt ↔ close_record`. Each exits on a variable that its code step writes (`record_state`, `promise_progress_state`, `close_attempts`). If the sandbox cannot run code, those variables never change and the `always` transitions keep calling `create_promise` or `close_call`.
 - **Category:** platform / routing
 - **Fix / lesson:** Both loops also exit on the engine's own call counters (`<node>_success_count`, `<node>_failure_count`), which need no code. The record loop goes to closing once a counter passes the spec's attempts per product times twice the most products in a kit case. The close loop ends the call once a counter passes 1 (at most 3 close calls). A working loop never reaches either cap. Wrong data cannot be recorded when the pre-hook does not run: without it, the promise body has no date or amount, so the bank rejects it and the code counts a failed attempt. Still unknown: what the platform does with a tool whose post-hook cannot run (`[TO-CONFIRM]`).
-- **Status:** fixed (uncommitted)
+- **Status:** fixed offline (F-065): extraction repair check that every non-default outcome row is reached (state, routed end, closing path, or a returning path with a tool), soft in the last round; render warning `unreachable_outcome`; quoted speech kept only when it is a real sentence introduced by a speech verb; unmapped `special_tool_failed` gets the failure row; a timestamped spec copy per run. Reviewed (re-review: merge). Retest: next live Brief A extraction (watch `hardship_declined`).
 - **Retest:** offline: a sandbox-down walk ends both loops (2 close calls; record calls = cap + 1); a working loop where every product fails every attempt still ends through the code. Live: not tested (needs a sandbox outage).
+
+### F-065: An extraction can leave out the declined-hardship path, so the hardship outcome cannot be reached
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-05 (offline, `tasks/REPRO-report.md`)
+- **Symptom:** Of four Brief A extractions, the 13:00 run had no `hardship_declined` special path. The `no_promise/hardship` outcome row has no state and no closing path, so it can never be reached; a customer who declines support is persuaded twice and closed `no_promise/refused`. Ledger and policy would both fail. Other unstable fields: goodbye sentences written as instructions (rep2), `special_tool_failed` unmapped.
+- **Root cause:** No extraction check that every outcome row can be reached.
+- **Category:** extraction / repeatability
+- **Fix / lesson:** Repair-round check: each non-default outcome row needs an `on` state or a `then=close` special path that closes with it. Keep quoted speech when an instruction-style sentence is replaced. Keep a timestamped copy of each extracted spec so repeat runs can be compared.
+- **Status:** open
+- **Retest:** -
 
 ### F-064: A third party's question was read as "no callback" and the call closed at once
 
