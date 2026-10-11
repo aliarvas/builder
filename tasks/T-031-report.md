@@ -132,8 +132,8 @@ I told claude-dev2 that their new `confirm_record_resume` node must exist before
 
 ## UAT proposals (CTO)
 
-- **F-090: "A product named in other words was booked on the product under discussion"** (review HIGH 1). Fixed offline (T-031). Live retest: A+B "I will pay the car on Friday" and "both loans on Friday".
-- **F-095 (next free after claude-dev2's F-091..F-094): "A second goodbye after the read-back dropped the accepted offer and noted it as refused"** (review HIGH 2). Fixed offline (T-031): read-back once, then record. Live retest: accept one product, answer the read-back "ok thanks, bye" twice.
+- **F-095 (written by claude-dev2 in docs/UAT-FINDINGS.md): "A product named in other words was booked on the product under discussion"** (review HIGH 1). Fixed offline (T-031). Live retest: A+B "I will pay the car on Friday" and "both loans on Friday".
+- **F-096 (written by claude-dev2): "A second goodbye after the read-back dropped the accepted offer and noted it as refused"** (review HIGH 2). Fixed offline (T-031): read-back once, then record. Live retest: accept one product, answer the read-back "ok thanks, bye" twice.
 - **Open note: one message refusing two products uses an attempt of each** (review LOW 5). Confirm on a live PUB-12 transcript.
 
 ## Live checks (with approval, chat first)

@@ -641,7 +641,8 @@ class MultiStepWorkflowTests(unittest.TestCase):
                     self.assertEqual(["note_record", after], edges(nodes["note_next"]))
                     if after != "closing_say":
                         self.assertEqual(["closing_say"], edges(nodes[after]))
-                    self.assertEqual(["note_next"], edges(nodes["note_record"]))
+                    # T-035: the engine's call counters end the loop without code.
+                    self.assertEqual([after, "note_next"], edges(nodes["note_record"]))
                 else:
                     self.assertEqual(["closing_say"], edges(nodes["closing"]))
                 self.assertEqual(["end_call", "close_attempt"], edges(nodes["closing_say"]))
@@ -1439,11 +1440,15 @@ class MultiStepWorkflowTests(unittest.TestCase):
         self.assertEqual(1, nodes["account"]["pre_actions"][0]["config"]["maxRetries"])
         self.assertEqual("closing", nodes["account"]["transitions"][0]["target_node"])
         # F-053: a revision goes through a fixed question, then negotiate waits for the answer.
-        self.assertEqual("revise_ask", nodes["confirm_record"]["transitions"][0]["target_node"])
+        # T-038/T-037: a revision that already names the new terms goes straight to the check.
+        self.assertEqual(["check_offer", "revise_ask"],
+                         [t["target_node"] for t in nodes["confirm_record"]["transitions"][:2]])
         self.assertEqual(edges(nodes["negotiate"]), edges(nodes["revise_ask"]))  # a waiting copy of negotiate
         for key, node in nodes.items():
             if node["node_type"] == "conversation":
-                self.assertEqual("close_turn_limit", node["max_turn_transition"], key)
+                # T-037: the identity step leaves to its own bounded close (before identity passed).
+                want = "identity_turn_limit" if key == "identity" else "close_turn_limit"
+                self.assertEqual(want, node["max_turn_transition"], key)
 
     def test_fixture_a_prompts_are_under_budget(self):
         for index in range(len(FIXTURES)):

@@ -1,0 +1,17 @@
+name = "bank-mock"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+# One Durable Object per customer (SQLite-backed: works on the free plan).
+[[durable_objects.bindings]]
+name = "LEDGER"
+class_name = "Ledger"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Ledger"]
+
+# Optional: set a team key for /practice/sessions and /admin/*:  npx wrangler secret put TEAM_KEY
+# Optional: label shown in ledgers:  [vars] TEAM = "our-team"
+[vars]
+TEAM = ""

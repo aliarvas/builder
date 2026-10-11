@@ -138,7 +138,7 @@ OPENING_TASK_TEMPLATE = PromptDefinition(
     "Your first words in this call, whatever the customer said, and only once: {introduction}\n"
     "If you already gave the introduction in this call, do not repeat it: answer briefly and ask the question again.\nThe person to ask for is {address}. Use these words when you address them.\n"
     "Ask: {question}\n"
-    "If they only greet you or check the line (for example \"Hello?\"), that is not an answer: reply briefly and ask the question again.\n"
+    "If they only greet you, check the line or ask a question back (for example \"Hello?\" or \"Who is asking?\"), that is not an answer: reply briefly and ask the question again.\n"
     "If unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
     ("{introduction}", "{address}", "{question}", "{unclear}", "{forbidden}", "{rules}"),
 )
@@ -148,7 +148,7 @@ OPENING_REASK_TASK_TEMPLATE = PromptDefinition(
     "You already gave the introduction earlier in this call. Do not repeat it unless they ask who is calling.\n"
     "The person to ask for is {address}. Use these words when you address them.\n"
     "Ask again, briefly: {question}\n"
-    "If they only greet you or check the line, reply briefly and ask the question again.\n"
+    "If they only greet you, check the line or ask a question back, reply briefly and ask the question again.\n"
     "If unclear: {unclear}\nBefore verification, do not say: {forbidden}\nRules:\n{rules}",
     ("{address}", "{question}", "{unclear}", "{forbidden}", "{rules}"),
 )
@@ -161,10 +161,10 @@ WHO_ANSWERED_DESCRIPTION = PromptDefinition(
     "{other}: only when the person clearly says they are not the customer (for example someone else's name, "
     "\"she is not here\", \"I am his wife\").\n"
     "{close}: only when the person clearly says what that value names.\n"
-    "{stay}: anything else that does not confirm, including a garbled or half-heard answer, an answer in "
-    "another language, or a question back.\n"
-    "{greeting}: the person only greets or checks the line (for example \"Hello?\" or \"Who is this?\") and "
-    "has not answered the question yet.",
+    "{stay}: anything else that does not confirm, including a garbled or half-heard answer or an answer in "
+    "another language.\n"
+    "{greeting}: the person only greets, checks the line or asks a question back (for example \"Hello?\", "
+    "\"Who is this?\" or \"What is this about?\") and has not answered the question yet.",
     ("{confirm}", "{unclear_rule}", "{other}", "{close}", "{stay}", "{greeting}"),
 )
 THIRD_PARTY_TASK_TEMPLATE = PromptDefinition(
@@ -229,6 +229,9 @@ IDENTITY_TASK_TEMPLATE = PromptDefinition(
     "builder/workflow.py — identity",
     "Ask these security questions one at a time, in order. Call the identity tool with each answer:\n{questions}\n"
     "Convert the customer's spoken answer into the tool format yourself. Never ask the customer to say a technical format.\n"
+    "An answer may come in parts over several messages (for example the day and month, then the year): put the parts "
+    "together, ask only for the part still missing, and call the tool once the answer is whole. Never call it with "
+    "a part, and never ask for the whole answer again.\n"
     "After each tool result:\n"
     "- {answer_verified} is true: acknowledge briefly and ask the next question. "
     "After the last question, ask nothing more; say the answers matched, then say: {wait_line} Give no account details yet.\n"
@@ -347,15 +350,38 @@ ACCOUNT_WAIT_LINE = PromptDefinition(
     "Thank you. One moment while I check your account.",
 )
 REVISE_ASK_LINE = PromptDefinition(
-    "REVISE_ASK_LINE", "Fixed line when the customer wants to change the read-back (F-053).",
+    "REVISE_ASK_LINE", "Fixed line when the customer wants to change the read-back (F-053); it asks for no "
+    "amount (T-037, PUB-06: a brief may forbid asking the customer to name one).",
     "phone agent (fixed spoken line)", "builder/workflow.py — revise_ask",
-    "Of course. Which date or amount would you like instead?",
+    "Of course. What would you like to change?",
 )
 READBACK_RESUME_LINE = PromptDefinition(
     "READBACK_RESUME_LINE", "Fixed line when the call returns to the read-back after a side question; the "
     "read-back itself is not said again (T-032).", "phone agent (fixed spoken line)",
     "builder/readback_resume.py — confirm_record_resume",
     "Shall I go ahead with the payments I read out?",
+)
+LANGUAGE_ONLY_LINE = PromptDefinition(
+    "LANGUAGE_ONLY_LINE", "System-prompt line for a call that is not in English (T-041).", "phone agent",
+    "builder/workflow.py — system_prompt, only when agent.language is not English",
+    "Speak only {language}, also when the customer uses another language. Tool values, codes and the "
+    "documents' word lists stay exactly as the documents give them.",
+    ("{language}",),
+)
+CUSTOMER_LANGUAGE_NOTE = PromptDefinition(
+    "CUSTOMER_LANGUAGE_NOTE", "Appended to every extraction description of a call not in English (T-041).",
+    "extraction model", "builder/workflow.py — extraction_schema descriptions",
+    " The customer may speak {language}.",
+    ("{language}",),
+)
+SPOKEN_TABLE_TRANSLATE_SYSTEM = PromptDefinition(
+    "SPOKEN_TABLE_TRANSLATE_SYSTEM", "One build-time call that translates the builder's fixed spoken lines (T-041).",
+    "builder model", "builder/language.py — translate_table",
+    "Translate the values of this JSON object into natural spoken {language} for a bank's phone agent. Keep "
+    "every key. Keep every placeholder exactly as written ({x}, {{x}}, [x]) and keep each line break. In the "
+    "value whose lines are \"key: sentence\", keep each key before \": \" in English and translate only the "
+    "sentence. Return only the JSON object.",
+    ("{language}",),
 )
 PERSUASION_STATE_LINE = PromptDefinition(
     "PERSUASION_STATE_LINE", "Tells the negotiation step which persuasion attempt it is on (F-062) and what one "
@@ -891,7 +917,36 @@ COVERAGE_FOLLOWUP_TEMPLATE = PromptDefinition(
 )
 
 
+CONTRACT_DERIVE_SYSTEM = PromptDefinition(
+    "CONTRACT_DERIVE_SYSTEM", "Sets the builder model's job when the case's service contract is a document, not an "
+    "OpenAPI file: write the OpenAPI file of exactly the tools it describes (T-040).", "builder model",
+    "builder/case_folder.py — derive_openapi",
+    "You convert a bank's service contract into an OpenAPI 3.0.3 JSON document for a program. Use only the "
+    "documents given. Never invent a tool, field, enum value or response field; copy every name exactly as "
+    "written, including case and underscores.",
+)
+CONTRACT_DERIVE_TASK = PromptDefinition(
+    "CONTRACT_DERIVE_TASK", "The shape the derived OpenAPI file must have, the same as the kit's tool file (T-040).",
+    "builder model", "builder/case_folder.py — derive_openapi",
+    "Write one OpenAPI 3.0.3 JSON object for every tool the contract describes. For each tool: a POST path "
+    "\"/<tool name>\" with \"operationId\" set to the tool name and a one-sentence \"summary\" from the contract; "
+    "a JSON requestBody whose schema lists every request field with its type (string, number, integer, boolean, "
+    "array or object), its enum values when the contract lists them, a short description with any format the "
+    "contract gives (for example YYYY-MM-DD), and \"required\" as the contract says; and a 200 response whose "
+    "JSON schema lists every response field the contract names, nested objects and arrays included. Put "
+    "\"servers\": [{\"url\": \"https://mock.invalid\"}] (the program replaces it). Reply with the JSON object only.",
+)
+CONTRACT_DERIVE_REPAIR = PromptDefinition(
+    "CONTRACT_DERIVE_REPAIR", "Sends the problems the program found in the derived OpenAPI file back for one "
+    "repair (T-040).", "builder model", "builder/case_folder.py — derive_openapi",
+    "The program found these problems:\n{problems}\nReply with the whole corrected JSON object only.",
+    ("{problems}",),
+)
+
 PROMPTS = (
+    CONTRACT_DERIVE_SYSTEM,
+    CONTRACT_DERIVE_TASK,
+    CONTRACT_DERIVE_REPAIR,
     PHONE_AGENT_SYSTEM_PROMPT,
     PHONE_AGENT_TASK_MESSAGE_TEMPLATE,
     TOOL_RESULT_FAILURE_MESSAGE,
@@ -926,6 +981,9 @@ PROMPTS = (
     ACCOUNT_WAIT_LINE,
     REVISE_ASK_LINE,
     READBACK_RESUME_LINE,
+    LANGUAGE_ONLY_LINE,
+    CUSTOMER_LANGUAGE_NOTE,
+    SPOKEN_TABLE_TRANSLATE_SYSTEM,
     PERSUASION_STATE_LINE,
     PERSUASION_PRODUCT_LINE,
     PRODUCT_INTENT_DESCRIPTION,

@@ -9,11 +9,14 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 if __package__:
     from . import freya, freya_chat
+    from .case_folder import CaseFolderError, derive_openapi, read_case, unpack
+    from .language import spoken_language
     from .extract import ExtractionError, ExtractionResult, extract_spec
     from .llm import AnthropicClient, LLMResult
     from .run_trace import ANTHROPIC_KEY_PATTERN, FREYA_KEY_PATTERN, SECRET_ENV_NAMES, TraceWriter
@@ -29,6 +32,8 @@ if __package__:
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from builder import freya, freya_chat
+    from builder.case_folder import CaseFolderError, derive_openapi, read_case, unpack
+    from builder.language import spoken_language
     from builder.extract import ExtractionError, ExtractionResult, extract_spec
     from builder.llm import AnthropicClient, LLMResult
     from builder.run_trace import ANTHROPIC_KEY_PATTERN, FREYA_KEY_PATTERN, SECRET_ENV_NAMES, TraceWriter
@@ -53,7 +58,8 @@ class BuilderInputError(ValueError):
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build a Freya workflow from one or more bank briefs and an OpenAPI file."
+        description="Build a Freya workflow from a case folder (or its zip) and the mock URL, or from one or "
+                    "more bank briefs and an OpenAPI file."
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--print", dest="print_only", action="store_true", help="print JSON without Freya calls (spec extraction still calls the model unless --spec)")
@@ -76,30 +82,94 @@ def _parser() -> argparse.ArgumentParser:
         "inputs",
         nargs="+",
         metavar="PATH",
-        help="brief file(s), followed by the OpenAPI JSON file",
+        help="a case folder or .zip followed by the mock URL (http...), or brief file(s) followed by the "
+             "OpenAPI JSON file",
     )
     return parser
 
 
+@dataclass
+class Inputs:
+    """What the build reads, from either CLI form (T-040)."""
+    documents: list[tuple[str, str]]          # (source label, text), in reading order
+    document: dict[str, Any]                  # the OpenAPI contract the tools come from
+    paths: list[Path]                         # files recorded in the trace
+    attachments: list[dict[str, Any]] = field(default_factory=list)  # PDF document blocks
+
+    @property
+    def brief_text(self) -> str:
+        return "\n\n".join(text for _, text in self.documents)
+
+
+def case_form(inputs: list[str]) -> bool:
+    """T-040: the final's form, ``{case_folder} {mock_url}`` (a folder or a .zip, then a URL)."""
+    if len(inputs) != 2 or not re.match(r"https?://", inputs[1]):
+        return False
+    path = Path(inputs[0])
+    return path.is_dir() or (path.is_file() and path.suffix.lower() == ".zip")
+
+
 def _default_slot(brief_paths: list[Path]) -> str:
-    raw = "+".join(path.stem for path in brief_paths)
+    raw = "+".join(path.stem if not path.is_dir() else path.name for path in brief_paths)
     slot = re.sub(r"[^A-Za-z0-9._+-]+", "-", raw).strip("-.")
     return slot or "workflow"
 
 
-def _load_inputs(paths: list[str]) -> tuple[list[Path], Path, str, dict[str, Any]]:
+def _load_inputs(paths: list[str]) -> Inputs:
     if len(paths) < 2:
-        raise BuilderInputError("provide at least one brief file followed by one OpenAPI file")
+        raise BuilderInputError("provide a case folder and the mock URL, or brief file(s) followed by one OpenAPI file")
     brief_paths = [Path(value) for value in paths[:-1]]
     openapi_path = Path(paths[-1])
     try:
-        brief_text = "\n\n".join(path.read_text(encoding="utf-8") for path in brief_paths)
+        documents = [(path.name, path.read_text(encoding="utf-8")) for path in brief_paths]
         document = json.loads(openapi_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise BuilderInputError(str(exc)) from exc
     if not isinstance(document, dict):
         raise OpenAPIError("OpenAPI document must be a JSON object")
-    return brief_paths, openapi_path, brief_text, document
+    return Inputs(documents, document, [*brief_paths, openapi_path])
+
+
+def _load_case(paths: list[str], slot: str, trace: TraceWriter, derive: bool = True) -> Inputs:
+    """T-040: read the case folder (a zip is unpacked under traces/), every document labelled
+    with its file name; the contract is the folder's OpenAPI file or, when the contract is a
+    document, an OpenAPI file derived from it by one model call (written to traces/). Its server
+    is the mock URL either way."""
+    source, mock_url = Path(paths[0]), paths[1]
+    try:
+        folder = unpack(source, Path("traces") / f"{slot}.case")
+        case = read_case(folder, mock_url)
+    except (CaseFolderError, OSError) as exc:
+        raise BuilderInputError(str(exc)) from exc
+    for warning in case.warnings:
+        trace.add("warning", warning)
+    for item in case.documents:
+        trace.add("case_document", f"{item.name} kind={item.kind} role={item.role} chars={len(item.text)}"
+                                   + (" pdf=attached" if item.pdf else ""))
+    document = case.openapi
+    if document is not None:
+        trace.add("contract", f"{case.openapi_source} (OpenAPI in the folder); server set to {mock_url}")
+    elif not derive:
+        raise BuilderInputError("the case folder has no OpenAPI file and deriving one needs a model call")
+    else:
+        client = AnthropicClient(
+            log=lambda purpose, result: trace.add_model_call(
+                result.model, purpose, result.duration_seconds, result.input_tokens, result.output_tokens,
+                result.cache_read_tokens),
+            note=lambda message: trace.add("warning", message))
+        document, problems = derive_openapi(
+            case, mock_url, lambda system, messages: client.complete(system, messages, "derive:openapi").text)
+        for problem in problems:
+            trace.add("warning", f"derived contract: {problem}")
+        if not document:
+            raise BuilderInputError("the service contract could not be turned into an OpenAPI file")
+        trace.add("contract", f"derived from the contract documents; server set to {mock_url}")
+    derived_path = Path("traces") / f"{slot}.openapi.json"
+    derived_path.parent.mkdir(parents=True, exist_ok=True)
+    derived_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    trace.add("contract_file", derived_path)
+    files = [folder / item.name for item in case.documents]
+    return Inputs(case.text_documents(), document, [*files, derived_path], case.attachments())
 
 
 def _ensure_published_version(workflow_id: str) -> int:
@@ -189,8 +259,8 @@ def _self_check_problems(spec: Any, document: dict[str, Any]) -> list[tuple[str,
 
 
 def _extract(
-    brief_paths: list[Path], document: dict[str, Any], slot: str, trace: TraceWriter,
-    deadline: float | None = None,
+    documents: list[tuple[str, str]], document: dict[str, Any], slot: str, trace: TraceWriter,
+    deadline: float | None = None, attachments: list[dict[str, Any]] | None = None,
 ) -> ExtractionResult:
     """Extract the spec from the brief with the builder model and write traces/<slot>.spec.json."""
     calls: list[LLMResult] = []
@@ -202,14 +272,14 @@ def _extract(
             result.input_tokens, result.output_tokens, result.cache_read_tokens,
         )
 
-    documents = [(path.name, path.read_text(encoding="utf-8")) for path in brief_paths]
     spec_path = Path("traces") / f"{slot}.spec.json"
     started = time.monotonic()
     try:
         client = AnthropicClient(log=log_call, note=lambda message: trace.add("warning", message))
         trace.add("model_settings", client.settings())
         result = extract_spec(documents, document, client, log=trace.add,
-                              self_check=lambda spec: _self_check_problems(spec, document), deadline=deadline)
+                              self_check=lambda spec: _self_check_problems(spec, document), deadline=deadline,
+                              attachments=attachments)
     except ExtractionError as exc:
         if exc.candidate is not None:
             failed_path = Path("traces") / f"{slot}.spec.failed.json"
@@ -261,14 +331,20 @@ def _trace_self_check(spec: Any, workflow: dict[str, Any], trace: TraceWriter) -
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     build_started = time.monotonic()
-    provisional_briefs = [Path(value) for value in args.inputs[:-1]]
+    case = case_form(args.inputs)
+    provisional_briefs = [Path(args.inputs[0])] if case else [Path(value) for value in args.inputs[:-1]]
     slot = args.slot or _default_slot(provisional_briefs)
     trace = TraceWriter(_trace_path(slot, args.print_only, args.validate))
     trace.add("slot", slot)
     status = "failed"
     try:
-        brief_paths, openapi_path, brief_text, document = _load_inputs(args.inputs)
-        for path in [*brief_paths, openapi_path]:
+        if case:
+            trace.add("input_form", "case folder + mock URL (T-040)")
+            inputs = _load_case(args.inputs, slot, trace)
+        else:
+            inputs = _load_inputs(args.inputs)
+        document, brief_text = inputs.document, inputs.brief_text
+        for path in inputs.paths:
             trace.add_input(path)
         if args.print_only or args.validate:
             trace.add("self_tests", "not run in --print/--validate mode")
@@ -288,7 +364,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.single_step:
             trace.add("model_calls", "none")
         else:
-            extraction = _extract(brief_paths, document, slot, trace, deadline=build_started + SELF_CHECK_REPAIR_SECONDS)
+            extraction = _extract(inputs.documents, document, slot, trace,
+                                  deadline=build_started + SELF_CHECK_REPAIR_SECONDS, attachments=inputs.attachments)
             spec, unmapped = extraction.spec, extraction.unmapped
         if spec is not None:
             known_entry_variables = CALL_VARIABLES | spec_entry_variables(spec)
@@ -304,7 +381,9 @@ def main(argv: list[str] | None = None) -> int:
             spec_warnings: list[str] = []
             placements: list[str] = []
             try:
-                workflow = build_spec_workflow(spec, tools, spec_warnings, placements)
+                # T-041: the builder's fixed spoken lines in the call's language (no-op for English).
+                with spoken_language(spec, trace):
+                    workflow = build_spec_workflow(spec, tools, spec_warnings, placements)
             finally:  # also on a budget failure: the trace shows where every rule went
                 for warning in spec_warnings:
                     trace.add("warning", warning)

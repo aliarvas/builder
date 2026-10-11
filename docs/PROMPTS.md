@@ -2,6 +2,41 @@
 
 Generated from `builder/prompts.py`. Do not edit by hand; edit the code and regenerate.
 
+## CONTRACT_DERIVE_SYSTEM
+
+- Purpose: Sets the builder model's job when the case's service contract is a document, not an OpenAPI file: write the OpenAPI file of exactly the tools it describes (T-040).
+- Receiver: builder model
+- Used at: builder/case_folder.py — derive_openapi
+- Approximate tokens: ~61 (characters ÷ 4)
+
+```text
+You convert a bank's service contract into an OpenAPI 3.0.3 JSON document for a program. Use only the documents given. Never invent a tool, field, enum value or response field; copy every name exactly as written, including case and underscores.
+```
+
+## CONTRACT_DERIVE_TASK
+
+- Purpose: The shape the derived OpenAPI file must have, the same as the kit's tool file (T-040).
+- Receiver: builder model
+- Used at: builder/case_folder.py — derive_openapi
+- Approximate tokens: ~181 (characters ÷ 4)
+
+```text
+Write one OpenAPI 3.0.3 JSON object for every tool the contract describes. For each tool: a POST path "/<tool name>" with "operationId" set to the tool name and a one-sentence "summary" from the contract; a JSON requestBody whose schema lists every request field with its type (string, number, integer, boolean, array or object), its enum values when the contract lists them, a short description with any format the contract gives (for example YYYY-MM-DD), and "required" as the contract says; and a 200 response whose JSON schema lists every response field the contract names, nested objects and arrays included. Put "servers": [{"url": "https://mock.invalid"}] (the program replaces it). Reply with the JSON object only.
+```
+
+## CONTRACT_DERIVE_REPAIR
+
+- Purpose: Sends the problems the program found in the derived OpenAPI file back for one repair (T-040).
+- Receiver: builder model
+- Used at: builder/case_folder.py — derive_openapi
+- Approximate tokens: ~21 static + `{problems}` characters ÷ 4 at runtime
+
+```text
+The program found these problems:
+{problems}
+Reply with the whole corrected JSON object only.
+```
+
 ## PHONE_AGENT_SYSTEM_PROMPT
 
 - Purpose: Sets the phone agent's global identity, language, brevity, and honesty rules.
@@ -117,14 +152,14 @@ Global rules:
 - Purpose: Opens the call and identifies who answered.
 - Receiver: phone agent
 - Used at: builder/workflow.py — opening
-- Approximate tokens: ~111 static + `{introduction}` characters ÷ 4 + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~121 static + `{introduction}` characters ÷ 4 + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Your first words in this call, whatever the customer said, and only once: {introduction}
 If you already gave the introduction in this call, do not repeat it: answer briefly and ask the question again.
 The person to ask for is {address}. Use these words when you address them.
 Ask: {question}
-If they only greet you or check the line (for example "Hello?"), that is not an answer: reply briefly and ask the question again.
+If they only greet you, check the line or ask a question back (for example "Hello?" or "Who is asking?"), that is not an answer: reply briefly and ask the question again.
 If unclear: {unclear}
 Before verification, do not say: {forbidden}
 Rules:
@@ -136,13 +171,13 @@ Rules:
 - Purpose: Asks the opening question again after an unclear answer, without a second introduction.
 - Receiver: phone agent
 - Used at: builder/workflow.py — opening_reask
-- Approximate tokens: ~83 static + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~88 static + `{address}` characters ÷ 4 + `{question}` characters ÷ 4 + `{unclear}` characters ÷ 4 + `{forbidden}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
 You already gave the introduction earlier in this call. Do not repeat it unless they ask who is calling.
 The person to ask for is {address}. Use these words when you address them.
 Ask again, briefly: {question}
-If they only greet you or check the line, reply briefly and ask the question again.
+If they only greet you, check the line or ask a question back, reply briefly and ask the question again.
 If unclear: {unclear}
 Before verification, do not say: {forbidden}
 Rules:
@@ -154,15 +189,15 @@ Rules:
 - Purpose: Extraction description of the who-answered variable in the opening steps; every value is described (F-071). A line whose value list is empty is left out.
 - Receiver: extraction model
 - Used at: builder/workflow.py — opening and opening_reask extraction_schema
-- Approximate tokens: ~137 static + `{confirm}` characters ÷ 4 + `{unclear_rule}` characters ÷ 4 + `{other}` characters ÷ 4 + `{close}` characters ÷ 4 + `{stay}` characters ÷ 4 + `{greeting}` characters ÷ 4 at runtime
+- Approximate tokens: ~143 static + `{confirm}` characters ÷ 4 + `{unclear_rule}` characters ÷ 4 + `{other}` characters ÷ 4 + `{close}` characters ÷ 4 + `{stay}` characters ÷ 4 + `{greeting}` characters ÷ 4 at runtime
 
 ```text
 Who answered the call.
 {confirm}: the person clearly confirms they are the customer. The documents' rule: {unclear_rule}
 {other}: only when the person clearly says they are not the customer (for example someone else's name, "she is not here", "I am his wife").
 {close}: only when the person clearly says what that value names.
-{stay}: anything else that does not confirm, including a garbled or half-heard answer, an answer in another language, or a question back.
-{greeting}: the person only greets or checks the line (for example "Hello?" or "Who is this?") and has not answered the question yet.
+{stay}: anything else that does not confirm, including a garbled or half-heard answer or an answer in another language.
+{greeting}: the person only greets, checks the line or asks a question back (for example "Hello?", "Who is this?" or "What is this about?") and has not answered the question yet.
 ```
 
 ## THIRD_PARTY_TASK_TEMPLATE
@@ -260,12 +295,13 @@ If the customer asked one of these and has no answer yet, first say its answer, 
 - Purpose: Asks ordered identity questions and uses the verification tool.
 - Receiver: phone agent
 - Used at: builder/workflow.py — identity
-- Approximate tokens: ~182 static + `{questions}` characters ÷ 4 + `{answer_verified}` characters ÷ 4 + `{failed_answer}` characters ÷ 4 + `{wait_line}` characters ÷ 4 + `{attempts_left}` characters ÷ 4 + `{exhausted_say}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~250 static + `{questions}` characters ÷ 4 + `{answer_verified}` characters ÷ 4 + `{failed_answer}` characters ÷ 4 + `{wait_line}` characters ÷ 4 + `{attempts_left}` characters ÷ 4 + `{exhausted_say}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Ask these security questions one at a time, in order. Call the identity tool with each answer:
 {questions}
 Convert the customer's spoken answer into the tool format yourself. Never ask the customer to say a technical format.
+An answer may come in parts over several messages (for example the day and month, then the year): put the parts together, ask only for the part still missing, and call the tool once the answer is whole. Never call it with a part, and never ask for the whole answer again.
 After each tool result:
 - {answer_verified} is true: acknowledge briefly and ask the next question. After the last question, ask nothing more; say the answers matched, then say: {wait_line} Give no account details yet.
 - {answer_verified} is false: say the answer did not match. Do not thank them as if it passed. Ask the same question again; never move to the next question until this one is verified. {failed_answer}
@@ -423,13 +459,13 @@ Thank you. One moment while I check your account.
 
 ## REVISE_ASK_LINE
 
-- Purpose: Fixed line when the customer wants to change the read-back (F-053).
+- Purpose: Fixed line when the customer wants to change the read-back (F-053); it asks for no amount (T-037, PUB-06: a brief may forbid asking the customer to name one).
 - Receiver: phone agent (fixed spoken line)
 - Used at: builder/workflow.py — revise_ask
-- Approximate tokens: ~14 (characters ÷ 4)
+- Approximate tokens: ~11 (characters ÷ 4)
 
 ```text
-Of course. Which date or amount would you like instead?
+Of course. What would you like to change?
 ```
 
 ## READBACK_RESUME_LINE
@@ -441,6 +477,39 @@ Of course. Which date or amount would you like instead?
 
 ```text
 Shall I go ahead with the payments I read out?
+```
+
+## LANGUAGE_ONLY_LINE
+
+- Purpose: System-prompt line for a call that is not in English (T-041).
+- Receiver: phone agent
+- Used at: builder/workflow.py — system_prompt, only when agent.language is not English
+- Approximate tokens: ~37 static + `{language}` characters ÷ 4 at runtime
+
+```text
+Speak only {language}, also when the customer uses another language. Tool values, codes and the documents' word lists stay exactly as the documents give them.
+```
+
+## CUSTOMER_LANGUAGE_NOTE
+
+- Purpose: Appended to every extraction description of a call not in English (T-041).
+- Receiver: extraction model
+- Used at: builder/workflow.py — extraction_schema descriptions
+- Approximate tokens: ~7 static + `{language}` characters ÷ 4 at runtime
+
+```text
+ The customer may speak {language}.
+```
+
+## SPOKEN_TABLE_TRANSLATE_SYSTEM
+
+- Purpose: One build-time call that translates the builder's fixed spoken lines (T-041).
+- Receiver: builder model
+- Used at: builder/language.py — translate_table
+- Approximate tokens: ~84 static + `{language}` characters ÷ 4 at runtime
+
+```text
+Translate the values of this JSON object into natural spoken {language} for a bank's phone agent. Keep every key. Keep every placeholder exactly as written ({x}, {{x}}, [x]) and keep each line break. In the value whose lines are "key: sentence", keep each key before ": " in English and translate only the sentence. Return only the JSON object.
 ```
 
 ## PERSUASION_STATE_LINE

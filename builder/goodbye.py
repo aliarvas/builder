@@ -5,8 +5,8 @@
   it back after an earlier goodbye and waited for a confirmation until the call timed out.
 - A goodbye that no route of the step takes ("Thank you, goodbye" was ``none`` in PUB-12, and
   the step repeated "Thank you for your time" for minutes) goes to ``customer_goodbye`` (code):
-  with accepted offers the read-back once, then (T-031) the record loop for the accepted offers;
-  before identity passed, the state the end-of-call hook would write (a third party: the close
+  with accepted offers the read-back once; a goodbye after it closes and records nothing (T-037,
+  CTO: no promise without an explicit yes to the read-back); before identity passed, the state the end-of-call hook would write (a third party: the close
   of its path without a callback); otherwise a hang-up. A second goodbye always ends the call.
   The closing chain then writes notes and the outcome.
 - T-029: every conversation step reaches it. Normal steps through the global step
@@ -18,8 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .offer_check import OFFERS_ACCEPTED_COUNT
-from .record_loop import RECORD_NEXT
+from .offer_check import NOTE_SKIP_NUMBERS, OFFERS_ACCEPTED, OFFERS_ACCEPTED_COUNT, PRODUCT_NOTE_REASONS
 from .prompts import CONFIRM_READBACK_SAID_LINE, CUSTOMER_ENDS_CALL_INTENT, GOODBYE_CHOICE_DESCRIPTION
 from .spec import HANGUP_CLOSE_STATES, PhoneAgentSpec
 
@@ -48,20 +47,44 @@ def goodbye_states(spec: PhoneAgentSpec) -> tuple[str, str, str]:
     return verified, unverified, third_state
 
 
+def unconfirmed_note_reason(spec: PhoneAgentSpec) -> str:
+    """T-037: the note reason for a product whose offer was agreed but never confirmed (the
+    customer left after the read-back). The spec's neutral reason: a note reason that is not the
+    refused or failed reason and that no outcome row or special path writes. Otherwise the reason
+    the end-of-call hook gives (the hang-up row's reason). Never the refused reason: "" then,
+    and the product gets no note."""
+    notes = spec.closing.data.get("product_notes") or {}
+    reasons = [str(reason) for reason in notes.get("reasons") or []]
+    if not reasons:
+        return ""
+    reason_field = notes.get("reason_field", "")
+    used = {notes.get("refused_reason"), notes.get("failed_reason"), *(item.reason for item in spec.outcomes),
+            *(str((path.tool_args or {}).get(reason_field, "")) for path in spec.special_paths)}
+    neutral = next((reason for reason in reasons if reason not in used), "")
+    if neutral:
+        return neutral
+    after = goodbye_states(spec)[0]
+    row = next((item for item in spec.outcomes if after in item.on), None) or next(
+        (item for item in spec.outcomes if "default" in item.on), None)
+    hook = row.reason if row else ""
+    return hook if hook in reasons and hook not in (notes.get("refused_reason"), notes.get("failed_reason")) else ""
+
+
 def goodbye_code(spec: PhoneAgentSpec) -> str:
     """T-031: with accepted offers, the read-back is said once for each read-back text (a new
-    accepted offer gives a new text, so an early goodbye never uses it up), and a goodbye after
-    it records the accepted offers: the customer agreed to them and did not object to the
-    read-back, so leaving is not a refusal (CTO addendum item 3: the closing chain records the
-    accepted promises). A read-back the customer rejected (a revise value, which the offer check
-    clears when it accepts new terms) is never recorded on a goodbye. Without accepted offers
-    the goodbye closes by stage."""
+    accepted offer gives a new text, so an early goodbye never uses it up). T-037 (CTO): a
+    goodbye after the read-back is not a yes. The call closes by stage and records nothing; the
+    products with an unconfirmed offer get the neutral note reason (``unconfirmed_note_reason``)
+    or no note, never a refusal. A read-back the customer rejected (a revise value, which the offer
+    check clears when it accepts new terms) is never read again on a goodbye."""
     after, before, third_state = goodbye_states(spec)
     confirmation = spec.confirmation.data
     rejected = list(confirmation.get("revise_values") or [])
     who = spec.opening.data.get("who_answered_variable") or ""
     third_values = list(spec.opening.data.get("third_party_values") or [])
-    return f"""try:
+    reason = unconfirmed_note_reason(spec)
+    return f"""import json
+try:
     count = int(vars.get({GOODBYE_COUNT!r}) or 0) + 1
 except Exception:
     count = 1
@@ -77,8 +100,6 @@ if str(vars.get({confirmation.get("intent_variable") or ""!r}) or '') in {reject
 if accepted > 0 and text and text != str(vars.get({GOODBYE_READBACK!r}) or ''):
     vars[{GOODBYE_ROUTE!r}] = 'readback'
     vars[{GOODBYE_READBACK!r}] = text
-elif accepted > 0 and text:
-    vars[{GOODBYE_ROUTE!r}] = 'record'
 else:
     vars[{GOODBYE_ROUTE!r}] = 'close'
     if verified:
@@ -87,6 +108,21 @@ else:
         vars['close_state'] = {third_state!r}
     else:
         vars['close_state'] = {before!r}
+    try:
+        offers = vars.get({OFFERS_ACCEPTED!r})
+        offers = json.loads(offers) if isinstance(offers, str) and offers.strip() else (offers or dict())
+        reasons = vars.get({PRODUCT_NOTE_REASONS!r})
+        reasons = json.loads(reasons) if isinstance(reasons, str) and reasons.strip() else (reasons or dict())
+        skipped = [int(number) for number in json.loads(str(vars.get({NOTE_SKIP_NUMBERS!r}) or '[]'))]
+        for number in offers:
+            if {reason!r}:
+                reasons[str(number)] = {reason!r}
+            elif int(number) not in skipped:
+                skipped.append(int(number))
+        vars[{PRODUCT_NOTE_REASONS!r}] = json.dumps(reasons)
+        vars[{NOTE_SKIP_NUMBERS!r}] = json.dumps(skipped)
+    except Exception:
+        pass
 """
 
 
@@ -116,9 +152,6 @@ def add_goodbye_exit(
     if "confirm_record" in nodes:
         exits.insert(0, {"target_node": "confirm_record", "description": "Offers were accepted: read them back once",
                          "condition": {"variable": GOODBYE_ROUTE, "operator": "equals", "operand": "readback"}})
-    if "confirm_record" in nodes and RECORD_NEXT in nodes:
-        exits.insert(1, {"target_node": RECORD_NEXT, "description": "The read-back was said: record the accepted offers",
-                         "condition": {"variable": GOODBYE_ROUTE, "operator": "equals", "operand": "record"}})
     nodes[CUSTOMER_GOODBYE] = code_node(CUSTOMER_GOODBYE, goodbye_code(spec), exits)
     sources = tuple(key for key, node in nodes.items() if waits_for_customer(node))
     entry = code_node(CUSTOMER_ENDS_CALL, "vars['customer_goodbye_heard'] = 'yes'\n", [

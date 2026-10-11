@@ -19,6 +19,7 @@ import copy
 from typing import Any, Callable
 
 from .offer_check import (
+    ESTIMATED_PRODUCTS,
     NOTE_PRODUCT_ID, NOTE_REASON, NOTE_RESULT, NOTE_STATE, PERSUASION_ATTEMPT, PRODUCT_REFUSAL_STATE,
     OFFER_DISCUSSED_NAME, OFFER_PRODUCT, OFFER_PRODUCT_NAME, OFFER_REFUSED_NAME, multi_product, note_next_code,
     notes_outcome_code, product_refusal_code,
@@ -35,6 +36,12 @@ PRODUCT_REFUSAL = "product_refusal"
 NOTE_NEXT = "note_next"
 NOTE_RECORD = "note_record"
 NOTES_OUTCOME = "notes_outcome"
+# T-035: note calls after which the loop ends on the engine's counters alone: two tries per
+# product (one retry) for twice the products a call is assumed to have.
+NOTE_LOOP_CAP = 2 * 2 * ESTIMATED_PRODUCTS
+# A product never needs two written notes: successful note calls beyond twice the assumed
+# products end the loop sooner (in v20 the repeated notes all succeeded).
+NOTE_SUCCESS_CAP = 2 * ESTIMATED_PRODUCTS
 # Trace warning prefix when the note rule cannot be rendered and is left out.
 NOTES_DROPPED = "closing.product_notes dropped (F-061 not applied)"
 
@@ -192,12 +199,23 @@ def add_product_steps(
                         [_condition(NOTE_STATE, "equals", "note")]),
             {"target_node": after_notes, "description": "Every note is written", "condition": {"operator": "always"}},
         ])
+        # T-035 (live v20): with the code sandbox down, note_state keeps "note" and the loop
+        # wrote ~40 notes. The engine's call counters of the note step end it, as F-067 does on
+        # close_record: two tries per product for twice the products a call is assumed to
+        # have, and fewer successful calls (a product never needs two written notes). A loop
+        # that works ends long before.
+        counters = [_condition(f"{name}_{kind}_count", "greater_than", cap)
+                    for name in (NOTE_RECORD, (tool.get("function") or {}).get("name") or NOTE_RECORD)
+                    for kind, cap in (("success", NOTE_SUCCESS_CAP), ("failure", NOTE_LOOP_CAP))]
         nodes[NOTE_RECORD] = {
             "name": NOTE_RECORD, "node_type": "api_request", "on_enter": {"type": "silent"},
             "passthrough": True, "passthrough_default_transition": NOTE_NEXT,
             "pre_actions": [tool],
             "response_mapping": [{"path": "data.ok", "variable": NOTE_RESULT}],
-            "transitions": [{"target_node": NOTE_NEXT, "description": "Note tool returned", "condition": {"operator": "always"}}],
+            "transitions": [
+                _transition(after_notes, "The note tool ran more often than any call needs (T-035)", counters),
+                {"target_node": NOTE_NEXT, "description": "Note tool returned", "condition": {"operator": "always"}},
+            ],
         }
         closing = nodes["closing"]
         for transition in closing["transitions"]:

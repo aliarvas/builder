@@ -34,6 +34,8 @@ NOTES_WRITTEN = "notes_written"
 # and as a returning special path wrote it.
 NOTE_REASONS_SENT = "note_reasons_sent"
 NOTE_REASONS_SPECIAL = "note_reasons_special"
+# T-037: products the note loop writes no note for (an unconfirmed offer, builder/goodbye.py).
+NOTE_SKIP_NUMBERS = "note_skip_numbers"
 PERSUASION_USED = "persuasion_used_by_product"
 PERSUASION_ATTEMPT = "persuasion_attempt"
 PRODUCT_REFUSAL_STATE = "product_refusal_state"
@@ -245,7 +247,54 @@ def first_day_number(start, wanted):
     return None
 
 
+# T-034 (kit styles "corrects" and "talkative"): a phrase with a self-correction ("the 15th, sorry,
+# I mean the 14th") is read after its last correction word; a phrase with several days and no
+# correction uses the part that says pay, or none (the agent asks again). Generic English words.
+CORRECTION_PATTERN = r'\\b(?:sorry|i mean|i meant|no wait|wait|actually|or rather|rather|make that|correction)\\b'
+PAY_PATTERN = r'\\b(?:pay|paying|payment|pays)\\b'
+ORDINAL_DAY_PATTERN = (r'\\b(\\d{1,2})(?:st|nd|rd|th)\\b|\\b((?:twenty|thirty)[ -](?:' + '|'.join(DAY_UNIT_ORDINALS[:9])
+                       + r')|twentieth|thirtieth|' + '|'.join(DAY_UNIT_ORDINALS) + r')\\b')
+
+
+def said_day_numbers(value):
+    # The distinct days said as ordinals ("14th", "the fourteenth"); cardinals may be times.
+    days = set()
+    for match in re.finditer(ORDINAL_DAY_PATTERN, str(value or '').lower()):
+        if match.group(1):
+            days.add(int(match.group(1)))
+        else:
+            days.add(DAY_WORD_VALUES.get(match.group(2).replace('-', ' '), 0))
+    return days
+
+
+def with_month_of(part, whole):
+    # A corrected or chosen part without a month or weekday takes the month the phrase named.
+    text = normalized_date_text(part)
+    named = re.search(r'\\b(?:' + MONTH_NAME_PATTERN + r'|' + WEEKDAY_NAME_PATTERN + r')\\b', text)
+    month = re.search(r'\\b(?:' + MONTH_NAME_PATTERN + r')\\b', normalized_date_text(whole))
+    return part if named or not month else str(part) + ' of ' + month.group(0)
+
+
 def resolve_offer_day(value):
+    if parse_day(value) is not None:
+        return parse_day(value)
+    text = str(value or '')
+    corrections = list(re.finditer(CORRECTION_PATTERN, text.lower()))
+    if corrections:
+        tail = text[corrections[-1].end():]
+        day = resolve_offer_day_once(with_month_of(tail, text))
+        if day is not None:
+            return day
+    if len(said_day_numbers(text)) > 1:
+        parts = [part for part in re.split(r'[,.;]| but | and ', text.lower())
+                 if re.search(PAY_PATTERN, part) and said_day_numbers(part)]
+        if len(parts) != 1:
+            return None
+        return resolve_offer_day_once(with_month_of(parts[0], text))
+    return resolve_offer_day_once(value)
+
+
+def resolve_offer_day_once(value):
     direct = parse_day(value)
     if direct is not None:
         return direct
@@ -725,7 +774,22 @@ try:
     if not str(raw_day or '').strip() and vars.get(CONFIG['accepts_var']) == CONFIG['accepts_yes']:
         # "Yes, that works": the date the last check proposed.
         raw_day = vars.get('offer_suggested_date') or ''
+    amount_named = parse_amount(vars.get(CONFIG['amount_var'])) is not None or str(
+        vars.get(CONFIG['amount_kind_var']) or '').strip().lower() in ('full', 'minimum', 'other')
+    if not str(raw_day or '').strip() and amount_named and number is not None:
+        # T-037 (PUB-06): a changed amount alone ("no, the minimum") keeps the date of that
+        # product's accepted offer.
+        raw_day = (accepted_offers().get(str(number)) or dict()).get('date') or ''
     day = resolve_offer_day(raw_day)
+    # T-034 (kit style "pieces"): a date said in two turns ("the fourteenth" ... "of October").
+    # An unreadable piece is kept for one turn and read again together with the next piece.
+    piece = str(raw_day or '').strip()
+    kept_piece = str(vars.get('offer_date_piece') or '').strip()
+    if day is None and piece and kept_piece:
+        day = resolve_offer_day(kept_piece + ' ' + piece)
+        if day is not None:
+            raw_day = kept_piece + ' ' + piece
+    vars['offer_date_piece'] = piece if day is None else ''
     amount = parse_amount(vars.get(CONFIG['amount_var']))
     if number is None or not (1 <= number <= len(products)):
         verdict = 'product_unknown'
@@ -953,6 +1017,16 @@ vars[CONFIG['progress']] = progress
 """
 
 
+# T-038 (PUB-11): a refused product drops the offer fields of the same turn ("I cannot pay today"
+# was read as the date "today"); they must not stay set for the next turn's date route.
+REFUSAL_CLEAR = """
+vars[CONFIG['date_var']] = ''
+vars[CONFIG['amount_var']] = CONFIG['amount_none']
+vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
+vars[CONFIG['accepts_var']] = CONFIG['kind_none']
+"""
+
+
 PRODUCT_REFUSAL_BODY = """state = 'persuade'
 message = ''
 try:
@@ -1074,8 +1148,11 @@ try:
         failed = [int(item) for item in json_value(CONFIG['failed_numbers'], list())]
         reasons = json_value(CONFIG['state']['note_reasons'], dict())
         close_reason = str(vars.get('close_reason') or '')
+        # T-037: an offer agreed but never confirmed (the customer left after the read-back),
+        # when the spec has no reason but a refusal for it: no note.
+        skipped = [int(item) for item in json_value('note_skip_numbers', list())]
         for index, product in enumerate(products, start=1):
-            if index in recorded or index in written or index in given_up:
+            if index in recorded or index in written or index in given_up or index in skipped:
                 continue
             # The record call was tried and failed: the failed reason, never a refusal. An offer
             # accepted but never sent (the call closed first) takes the normal order (AB-FRESH risk 3).
@@ -1237,9 +1314,9 @@ def product_refusal_code(spec: PhoneAgentSpec) -> str:
         "refusal_state": PRODUCT_REFUSAL_STATE,
     })
     if not multi_product(spec):
-        return _prelude(spec, config) + PRODUCT_REFUSAL_BODY
+        return _prelude(spec, config) + PRODUCT_REFUSAL_BODY + REFUSAL_CLEAR
     config.update(_multi_config(spec))
-    return _prelude(spec, config) + PRODUCT_PICK_BODY + "\n\n" + MULTI_REFUSAL_BODY
+    return _prelude(spec, config) + PRODUCT_PICK_BODY + "\n\n" + MULTI_REFUSAL_BODY + REFUSAL_CLEAR
 
 
 def _multi_config(spec: PhoneAgentSpec) -> dict[str, Any]:
@@ -1276,7 +1353,119 @@ def note_next_code(spec: PhoneAgentSpec, recorded_numbers: str, special_results:
 
 def _prelude(spec: PhoneAgentSpec, config: dict[str, Any]) -> str:
     reader = product_reader_code(spec.account.data["products_variable"], spec.account.data["products_field"])
-    return PRELUDE.replace("__CONFIG__", _py_literal(config)).replace("__PRODUCT_READER__", reader)
+    text = PRELUDE.replace("__CONFIG__", _py_literal(config)).replace("__PRODUCT_READER__", reader)
+    # T-041: a Turkish call reads and says dates and amounts in Turkish; English code is unchanged.
+    from .language import language_code
+    return text + TURKISH_DATES if language_code(spec.agent.language) == "tr" else text
+
+
+# T-041: Turkish date words for the generated code. The reader maps a Turkish phrase to the English
+# words the English reader knows ("27 Ekim'de" -> "27 october", "haftaya cuma" -> "next week
+# friday"), then reads it; the speaker says "16 Ekim Cuma" and "637,50". Generic Turkish words.
+TURKISH_DATES = r"""
+
+TR_MONTHS = ['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık']
+TR_WEEKDAYS = ['Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi', 'Pazar']
+TR_UNITS = ['bir', 'iki', 'üç', 'dört', 'beş', 'altı', 'yedi', 'sekiz', 'dokuz']
+TR_LETTERS = 'a-zçğıöşü'
+
+
+def tr_fold(value):
+    return str(value or '').replace('İ', 'i').replace('I', 'ı').lower()
+
+
+def tr_number_words(text):
+    # "yirmi yedi" -> "27", "on bir" -> "11", "otuz" -> "30"; ordinal suffixes are dropped.
+    units = '|'.join(TR_UNITS)
+    def unit(word):
+        return TR_UNITS.index(word) + 1
+    text = re.sub(r'\b(yirmi|otuz|on)\s+(' + units + r')[' + TR_LETTERS + r']*\b',
+                  lambda m: str({'on': 10, 'yirmi': 20, 'otuz': 30}[m.group(1)] + unit(m.group(2))), text)
+    text = re.sub(r'\b(yirmi|otuz|on)(?:uncu|ıncı|nci|ncı|u|ı|si|sı|unda|ında)?\b',
+                  lambda m: str({'on': 10, 'yirmi': 20, 'otuz': 30}[m.group(1)]), text)
+    return re.sub(r'\b(' + units + r')(?:inci|ıncı|uncu|üncü|nci|ncı|si|sı|ü|i|ı|u)?\b',
+                  lambda m: str(unit(m.group(1))), text)
+
+
+def turkish_date_text(value):
+    text = tr_fold(value)
+    # 14.10.2026 or 14/10: day, month (and year) in digits.
+    text = re.sub(r'\b(\d{1,2})[./](\d{1,2})(?:[./](\d{4}))?\b', lambda m: m.group(1) + ' ' + MONTHS[int(m.group(2)) - 1].lower() + (' ' + m.group(3) if m.group(3) else '') if 1 <= int(m.group(2)) <= 12 else m.group(0), text)
+    text = re.sub(r'\bdörd', 'dört', text)  # "on dördü": the softened stem
+    text = re.sub(r"(\d+)\s*['’]?\s*(?:ı|i|u|ü|sı|si|su|sü|ında|inde|unda|ünde|nda|nde|da|de|ta|te)\b", r'\1', text)
+    text = re.sub(r"['’][" + TR_LETTERS + r"]+", '', text)
+    has_name = False
+    for index, name in sorted(enumerate(TR_MONTHS), key=lambda item: -len(item[1])):
+        folded = tr_fold(name)
+        if re.search(r'\b' + folded, text):
+            has_name = True
+            text = re.sub(r'\b' + folded + r'[' + TR_LETTERS + r']*', ' ' + MONTHS[index].lower() + ' ', text)
+    for index, name in sorted(enumerate(TR_WEEKDAYS), key=lambda item: -len(item[1])):
+        folded = tr_fold(name)
+        if re.search(r'\b' + folded, text):
+            has_name = True
+            text = re.sub(r'\b' + folded + r'[' + TR_LETTERS + r']*', ' ' + WEEKDAYS[index].lower() + ' ', text)
+    if re.search(r'\b(?:öbür gün|yarından sonra|ertesi gün)\b', text):
+        return 'day after tomorrow'
+    if not has_name and re.search(r'\byarın', text):
+        return 'tomorrow'
+    if not has_name and re.search(r'\bbugün', text):
+        return 'today'
+    text = re.sub(r'\b(?:haftaya|gelecek hafta|önümüzdeki hafta|haftaya ki|sonraki hafta)\b', ' next week ', text)
+    text = re.sub(r'\b(?:gelecek|önümüzdeki)\b', ' next ', text)
+    text = re.sub(r'\bbu\b', ' this ', text)
+    if has_name:
+        text = tr_number_words(text)
+    text = re.sub(r'\bayın\b', ' ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+TR_CORRECTION = r'\b(?:pardon|özür dilerim|yani|aslında|daha doğrusu|yok yok|hayır hayır|şey)\b'
+TR_PAY = r'\böd[' + TR_LETTERS + r']*'
+ENGLISH_RESOLVE_OFFER_DAY = resolve_offer_day
+
+
+def resolve_offer_day(value):
+    if parse_day(value) is not None:
+        return parse_day(value)
+    text = tr_fold(value)
+    corrections = list(re.finditer(TR_CORRECTION, text))
+    if corrections:
+        day = ENGLISH_RESOLVE_OFFER_DAY(turkish_date_text(text[corrections[-1].end():]))
+        if day is not None:
+            return day
+    parts = [part for part in re.split(r'[,.;]| ama | ve ', text) if re.search(TR_PAY, part)]
+    days = set(re.findall(r'\b(\d{1,2})\b', turkish_date_text(text)))
+    if len(days) > 1 and len(parts) == 1:
+        return ENGLISH_RESOLVE_OFFER_DAY(turkish_date_text(parts[0]))
+    return ENGLISH_RESOLVE_OFFER_DAY(turkish_date_text(text))
+
+
+def say_spoken_day(day):
+    # "16 Ekim Cuma"; the year only when it is not this year.
+    if not day:
+        return 'none'
+    text = str(day.day) + ' ' + TR_MONTHS[day.month - 1] + (' ' + str(day.year) if day.year != today().year else '')
+    return text + ' ' + TR_WEEKDAYS[day.weekday()]
+
+
+def say_confirmation_day(day):
+    return (str(day.day) + ' ' + TR_MONTHS[day.month - 1] + ' ' + TR_WEEKDAYS[day.weekday()]) if day else 'none'
+
+
+def say_spoken_amount(amount):
+    # 420 or 637,50: a decimal comma.
+    if amount is None:
+        return 'none'
+    if abs(amount - round(amount)) < 0.005:
+        return str(int(round(amount)))
+    return ('%.2f' % amount).replace('.', ',')
+
+
+def say_spoken_days(days):
+    return ', '.join(say_spoken_day(day) for day in days[:-1]) + (' ve ' if len(days) > 1 else '') + (
+        say_spoken_day(days[-1]) if days else '')
+"""
 
 
 def _full_config(spec: PhoneAgentSpec, reset_variables: list[str]) -> dict[str, Any]:
@@ -1305,11 +1494,7 @@ def _code(spec: PhoneAgentSpec, body: str, reset_variables: list[str]) -> str:
     reader = product_reader_code(
         spec.account.data["products_variable"], spec.account.data["products_field"]
     )
-    return (
-        PRELUDE.replace("__CONFIG__", _py_literal(_full_config(spec, reset_variables)))
-        .replace("__PRODUCT_READER__", reader)
-        + body
-    )
+    return _prelude(spec, _full_config(spec, reset_variables)) + body
 
 
 def offer_setup_code(spec: PhoneAgentSpec) -> str:
@@ -1554,13 +1739,23 @@ def pick_products(products):
         return plausible, False
     # T-031: words that fit several products, or name none of them (a word no kind has), are never
     # booked on the product under discussion without one question.
-    if len(plausible) >= 2 or (not plausible and names_a_product(words)):
+    if len(products) > 1 and (len(plausible) >= 2 or (not plausible and names_a_product(words))):
         asked = json_value('offer_product_asked', list())
         if str(current) not in asked:
             asked.append(str(current))
             vars['offer_product_asked'] = json.dumps(asked)
             return [], True
-    return ([current] if current else []), False
+    if current:
+        return [current], False
+    # T-038 (PUB-07): no product is open (the offer is being revised after the read-back, or the
+    # account has one product that is already accepted): the only product, else the one accepted
+    # product; never "which of your products" for a product the call has just talked about.
+    if len(products) == 1:
+        return [1], False
+    accepted_numbers = [int(key) for key in accepted_offers() if str(key).isdigit()]
+    if len(accepted_numbers) == 1:
+        return accepted_numbers, False
+    return [], False
 """
 
 # T-025: run the check for each product the turn names (the same date for each), keep a

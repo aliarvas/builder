@@ -40,8 +40,9 @@ from .offer_check import (
     OFFERS_ACCEPTED, OFFERS_NOTED,
 )
 from .selfcheck_calendar import SpecCalendar, first_rule
+from .goodbye import goodbye_states, unconfirmed_note_reason
 from .record_loop import RECORD_PROMISE
-from .spec import FRAMEWORK_NONE_VALUE, SPECIAL_THEN_CLOSE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec, special_note_pairs
+from .spec import FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, SPECIAL_THEN_CLOSE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec, special_note_pairs
 from .tools_from_openapi import CALL_VARIABLES
 
 END_CALL = "end_call"
@@ -752,6 +753,8 @@ def scenarios(spec: PhoneAgentSpec, now: str) -> list[Scenario]:
         result.extend(_product_word_scenarios(spec, plan, notes_for))
     # T-027: a goodbye during the offer talk ends the call within two turns.
     result.extend(_goodbye_scenarios(spec, plan, one, notes_for))
+    # T-034: the kit's customer styles (corrects, pieces, talkative, asks_back, in_words).
+    result.extend(_style_scenarios(spec, plan, one, notes_for))
 
     # T-012: call-end states and the other families.
     result.extend(_call_end_scenarios(spec, plan, one, notes_for))
@@ -1537,7 +1540,13 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
             waiting = sim.advance(stop_at=action.get("at", ""))
             if waiting == END_CALL:
                 break
-            if action["kind"] == "say":
+            if action["kind"] == "say" and action.get("stays"):
+                # T-034: a turn that answers nothing (a question back) keeps the step.
+                if sim.turn(dict(action["vars"])):
+                    failures.append(f"the {label} turn at {waiting} moved the call to {sim.step}; a turn "
+                                    "that answers nothing must keep the step")
+                    break
+            elif action["kind"] == "say":
                 moved = sim.turn(dict(action["vars"]))
                 if not moved:
                     failure = f"dead end at {waiting}: the {label} turn has no route"
@@ -1841,6 +1850,13 @@ def run_selfcheck(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str | Non
     for step, problem in claims:
         results.append(Result(f"recorded_claim[{step}]", False, BUILDER, problem, step=step))
         played += 1
+    try:
+        cycles = sandbox_down_gaps(workflow)
+    except Exception as exc:  # a render shape the check does not know
+        cycles = [("-", f"check failed: {type(exc).__name__}: {exc}")]
+    for step, problem in cycles:
+        results.append(Result(f"code_cycle[{step}]", False, BUILDER, problem, step=step))
+        played += 1
     for index, label in unreached_rows(spec, plays):
         if "(returning path)" in label:
             # Several products: reached through the notes, which the closing does not derive yet
@@ -1988,7 +2004,10 @@ def _spoken_date_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
         return []
     product = one[0]
     result = []
-    for name, phrase in spoken_date_forms(datetime.date.fromisoformat(day)).items():
+    from .language import language_code, spoken_date_forms_for
+    forms = {**spoken_date_forms(datetime.date.fromisoformat(day)),
+             **spoken_date_forms_for(language_code(spec.agent.language), datetime.date.fromisoformat(day))}
+    for name, phrase in forms.items():  # T-041: plus the call language's own forms
         result.append(Scenario(
             f"spoken_date_{name}", [*plan.reach_negotiation(), plan.offer(1, phrase), plan.confirm()],
             "promise_recorded", one, promises=[plan.promise(product, day)],
@@ -2104,10 +2123,11 @@ def _goodbye_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
                        notes=notes_for(one, state=after), repeats={"goodbye": 1}, step="negotiate")]
     day = plan.good_day(one)
     if day:
+        # T-037 (CTO): a goodbye at the read-back is not a yes: nothing is recorded.
+        state, notes = _unconfirmed_close(spec, one, notes_for, "p1")
         result.append(Scenario(
-            "goodbye_at_readback", [*plan.reach_negotiation(), plan.offer(1, day), _goodbye()], "promise_recorded",
-            one, promises=[plan.promise(one[0], day)], notes=notes_for(one, promised=["p1"], state="promise_recorded"),
-            repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record"))
+            "goodbye_at_readback", [*plan.reach_negotiation(), plan.offer(1, day), _goodbye()], state,
+            one, promises=[], notes=notes, repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record"))
     if plan.notes or plan.negotiation.get("product_end_values"):
         products = synthetic_products(spec, 3)
         day = plan.good_day(products)
@@ -2214,8 +2234,9 @@ def _product_word_scenarios(spec, plan, notes_for) -> list[Scenario]:
 
 
 def _goodbye_accepted_scenarios(spec, plan, notes_for) -> list[Scenario]:
-    """T-031 (review HIGH 2): one product accepted, the read-back said, and the customer says
-    goodbye instead of yes: the accepted offer is recorded, never noted as refused."""
+    """T-031 (review HIGH 2), T-037 (CTO): one product accepted, the read-back said, and the
+    customer says goodbye instead of yes: nothing is recorded, and the product is never noted as
+    refused."""
     if not (plan.notes or plan.negotiation.get("product_end_values")):
         return []
     products = synthetic_products(spec, 3)
@@ -2224,11 +2245,22 @@ def _goodbye_accepted_scenarios(spec, plan, notes_for) -> list[Scenario]:
         return []
     first = {**plan.offer(1, day), "vars": {OFFER_DATE: day, OFFER_PRODUCT_NAME: "the first one"}}
     pid = str(products[0][spec.account.data["product_id_field"]])
+    state, notes = _unconfirmed_close(spec, products, notes_for, pid)
     return [Scenario(
-        "goodbye_readback_then_goodbye", [*plan.reach_negotiation(), first, _goodbye()], "promise_recorded", products,
-        promises=[plan.promise(products[0], day)],
-        notes=notes_for(products, promised=[pid], state="promise_recorded"),
-        repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record")]
+        "goodbye_readback_then_goodbye", [*plan.reach_negotiation(), first, _goodbye()], state, products,
+        promises=[], notes=notes, repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record")]
+
+
+def _unconfirmed_close(spec, products, notes_for, pid: str):
+    """T-037 (CTO): the customer left after the read-back without a yes. The call closes as the
+    goodbye's hang-up state, records nothing, and the product with the unconfirmed offer gets the
+    neutral note reason or no note (never a refusal)."""
+    state = goodbye_states(spec)[0]
+    reason = unconfirmed_note_reason(spec)
+    id_field = spec.account.data["product_id_field"]
+    if reason:
+        return state, notes_for(products, state=state, written={pid: reason})
+    return state, notes_for([product for product in products if str(product[id_field]) != pid], state=state)
 
 
 def accepted_refusal_notes(sim: Simulator, spec: PhoneAgentSpec, products: list[dict[str, Any]]) -> list[str]:
@@ -2251,6 +2283,33 @@ def accepted_refusal_notes(sim: Simulator, spec: PhoneAgentSpec, products: list[
             and str(call.body.get(rule.get("product_field"))) in ids]
 
 
+# T-035: api calls the whole silent chain may make with the code sandbox down, from the
+# closing or the record loop to end_call (13 notes, 13 promise calls and 2 closes today).
+SANDBOX_DOWN_CALL_LIMIT = 40
+
+
+def sandbox_down_gaps(workflow: dict[str, Any]) -> list[tuple[str, str]]:
+    """(loop or start, problem): each loop of silent steps needs an exit on the engine's call
+    counters, and with every code run failing the chain from the closing and from the record
+    loop must still reach end_call after a bounded number of calls, whether the bank answers
+    ok or not (live v20: ~40 notes, T-035)."""
+    from .code_cycles import code_cycle_gaps, sandbox_down_chain
+
+    problems = list(code_cycle_gaps(workflow))
+    nodes = workflow.get("nodes", {})
+    for start in ("closing", "record_next"):
+        if start not in nodes:
+            continue
+        for result in ("failure", "success"):
+            reached, calls = sandbox_down_chain(workflow, start, result=result)
+            total = sum(calls.values())
+            if reached != END_CALL or total > SANDBOX_DOWN_CALL_LIMIT:
+                problems.append((f"{start}:{result}", f"with the code sandbox down and every call a {result}, the "
+                                                      f"chain from {start} reaches {reached or 'no end'} after {total} "
+                                                      f"api calls {dict(sorted(calls.items()))}"))
+    return problems
+
+
 HONEST_RECORD_PATTERN = re.compile(r"never say[^.\n]*recorded", re.IGNORECASE)
 OFFER_STATE_PLACEHOLDERS = ("{{offers_summary}}", "{{readback_text}}", "{{offer_message}}")
 
@@ -2268,4 +2327,73 @@ def recorded_claim_gaps(workflow: dict[str, Any]) -> list[tuple[str, str]]:
             problems.append((key, "the step sees the checked offers but its prompt never forbids saying that a "
                                   "promise was recorded before the record tool returned ok"))
     return problems
+
+
+# ---------------------------------------------------------------------------
+# T-034: the kit's customer styles (tools/run_cases.py STYLES). The facts stay the same, only the
+# way of saying them changes; each style that reaches code (the date phrase, the opening value)
+# gets a call. Phrases are built from the spec's own days; no brief value.
+# ---------------------------------------------------------------------------
+
+STYLE_CHATTER = "Busy day, the traffic was terrible. Anyway, {date} works"
+STYLE_OTHER_DAY = "my cousin's wedding is on the {other}, but I can pay on {date}"
+STYLE_OTHER_DAY_NO_PAY = "my cousin's wedding is on the {other}, so {date}"
+STYLE_CORRECTION = "{wrong}, sorry, I mean {right}"
+STYLE_YEAR_DIGITS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+
+
+def _style_dates(day: datetime.date, today: datetime.date) -> dict[str, tuple[str, ...]]:
+    """name -> the date phrases of one offer turn each (several: the date said in pieces)."""
+    month = SPOKEN_MONTHS[day.month - 1]
+    other = day.day % 28 + 1   # another day number of the same month
+    wrong = digit_ordinal(other)
+    forms = spoken_date_forms(day)
+    phrases = {
+        "corrects_digit": (STYLE_CORRECTION.format(wrong=f"the {wrong}", right=forms["digit_ordinal"]),),
+        "corrects_month_first": (STYLE_CORRECTION.format(wrong=f"{month} {wrong}", right=forms["month_first"]),),
+        "corrects_words": (STYLE_CORRECTION.format(wrong=f"the {spoken_ordinal(other)}", right=forms["word_ordinal"]),),
+        "pieces_day_then_month": (f"the {spoken_ordinal(day.day)}", f"of {month}"),
+        "pieces_month_then_day": (month, f"the {spoken_ordinal(day.day)}"),
+        "talkative_chatter": (STYLE_CHATTER.format(date=forms["digit_ordinal"]),),
+        "talkative_other_day": (STYLE_OTHER_DAY.format(other=digit_ordinal(other), date=forms["digit_ordinal"]),),
+        "in_words_year_digits": (forms["word_ordinal"] + " " + " ".join(
+            STYLE_YEAR_DIGITS[int(digit)] for digit in str(day.year)),),
+    }
+    if 1 <= (day - today).days <= 6:
+        # A weekday corrected to the day's own weekday (the next one is the day itself).
+        wrong_day = day + datetime.timedelta(days=1 if (day - today).days < 6 else -1)
+        phrases["corrects_weekday"] = (STYLE_CORRECTION.format(wrong=wrong_day.strftime("%A"), right=day.strftime("%A")),)
+    return phrases
+
+
+def _style_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    day = plan.good_day(one)
+    if not day:
+        return []
+    product = one[0]
+    good = datetime.date.fromisoformat(day)
+    today = datetime.date.fromisoformat(plan.now[:10])
+
+    def promised(name, turns, step="check_offer"):
+        return Scenario(f"style_{name}", [*plan.reach_negotiation(), *turns, plan.confirm()], "promise_recorded", one,
+                        promises=[plan.promise(product, day)],
+                        notes=notes_for(one, promised=["p1"], state="promise_recorded"), step=step)
+
+    result = [promised(name, [plan.offer(1, phrase) for phrase in phrases])
+              for name, phrases in _style_dates(good, today).items()]
+    # Several days and no pay word: no day is taken (the wedding day is never booked); the
+    # customer then says the day alone.
+    other = STYLE_OTHER_DAY_NO_PAY.format(other=digit_ordinal(good.day % 28 + 1),
+                                          date=spoken_date_forms(good)["digit_ordinal"])
+    result.append(promised("talkative_other_day_no_pay_word",
+                           [plan.offer(1, other), plan.offer(1, spoken_date_forms(good)["digit_ordinal"])]))
+    # asks_back: a question back before the answer, at each step where the customer answers.
+    ask_back = {"kind": "say", "label": "ask_back", "stays": True, "vars": {}}
+    greeting = {**ask_back, "vars": {plan.opening["who_answered_variable"]: OPENING_GREETING_VALUE}}
+    result.append(Scenario(
+        "style_asks_back", [greeting, greeting, plan.answer_who("identity_values"), ask_back, *plan.verify(),
+                            ask_back, plan.offer(1, day), ask_back, plan.confirm()],
+        "promise_recorded", one, promises=[plan.promise(product, day)],
+        notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="opening"))
+    return result
 

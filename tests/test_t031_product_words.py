@@ -124,10 +124,11 @@ class GoodbyeAfterAcceptTests(unittest.TestCase):
         exec(goodbye.goodbye_code(spec), {"vars": variables})
         return variables[goodbye.GOODBYE_ROUTE]
 
-    def test_read_back_once_per_text_then_record(self):
+    def test_read_back_once_per_text_then_close(self):
+        # T-037 (CTO): the goodbye after the read-back closes and records nothing.
         self.assertEqual("readback", self.run_goodbye(1, "I can record A. Do you confirm?"))
-        self.assertEqual("record", self.run_goodbye(1, "I can record A. Do you confirm?",
-                                                    said="I can record A. Do you confirm?"))
+        self.assertEqual("close", self.run_goodbye(1, "I can record A. Do you confirm?",
+                                                   said="I can record A. Do you confirm?"))
         # A new accepted offer gives a new read-back: it is said again.
         self.assertEqual("readback", self.run_goodbye(2, "I can record A and B. Do you confirm?",
                                                       said="I can record A. Do you confirm?"))
@@ -141,14 +142,16 @@ class GoodbyeAfterAcceptTests(unittest.TestCase):
         self.assertEqual("close", self.run_goodbye(1, ""))
         self.assertEqual("close", self.run_goodbye(0, ""))
 
-    def test_the_record_route_goes_to_the_record_loop(self):
+    def test_there_is_no_record_route(self):
+        # T-037 (CTO): no promise is recorded without an explicit yes to the read-back.
         from tests.test_selfcheck import SPECS, load
         spec = load(SPECS["brief-ab-extracted-v2.json"][0])
         workflow = build_spec_workflow(spec, KIT_TOOLS)
         targets = {transition["condition"].get("operand"): transition["target_node"]
                    for transition in workflow["nodes"][goodbye.CUSTOMER_GOODBYE]["transitions"]}
         self.assertEqual("confirm_record", targets["readback"])
-        self.assertEqual(goodbye.RECORD_NEXT, targets["record"])
+        self.assertNotIn("record", targets)
+        self.assertNotIn("record_next", targets.values())
 
 
 class SelfCheckTests(unittest.TestCase):
@@ -180,13 +183,12 @@ class SelfCheckTests(unittest.TestCase):
         self.assertIn("product_words_unknown_name", failed)
 
     def test_the_v19_goodbye_fails_and_names_the_false_note(self):
+        # v19: the goodbye closed and the note loop wrote the refused reason on the accepted product.
         spec = self.spec()
         code = goodbye.goodbye_code
 
         def v19(spec):
-            return code(spec).replace("vars['customer_goodbye_route'] = 'record'", (
-                "vars['customer_goodbye_route'] = 'close'\n    vars['close_state'] = "
-                + repr(goodbye.goodbye_states(spec)[0])))
+            return code(spec).replace("        for number in offers:", "        for number in []:")
 
         with mock.patch.object(goodbye, "goodbye_code", v19):
             failed = self.failed(spec)

@@ -157,7 +157,8 @@ class FollowUpTests(unittest.TestCase):
         self.assertEqual("2026-11-02", first["offer_suggested_date"])
         negotiate = call.nodes["negotiate"]
         self.assertTrue(any(c.get("variable") == OFFER_ACCEPTS and c.get("operand") == "yes"
-                            for c in negotiate["transitions"][0]["condition"]["conditions"]))
+                            for group in negotiate["transitions"][0]["condition"]["conditions"]
+                            for c in [group, *group.get("conditions", [])]))
         second = call.turn(**{OFFER_ACCEPTS: "yes"})
         self.assertEqual("ok", second["offer_verdict"], second["offer_message"])
         self.assertEqual("2026-11-02", call.accepted()["1"]["date"])

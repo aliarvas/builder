@@ -7,6 +7,33 @@
 
 Only facts here. Design choices live in the owner documents. Detail pages of the kit stay authoritative for the workflow format: `build-the-builder-v2/docs/workflow-format.md`, `tools-and-code.md`, `api.md`.
 
+## Final format (organizer page update, read 2026-10-11 ~19:30 Istanbul; overrides older lines below)
+
+- `[VERIFIED]` **The case.** The final is ONE case: Freya Bank's credit-card statement-debt line, **in Turkish**.
+  - It opens Sunday 17:00 UTC (20:00 Istanbul) as one zip, on the Submit tab and by e-mail.
+  - The closing time is unchanged: Sunday 20:00 UTC (23:00 Istanbul).
+- `[VERIFIED]` **The zip.**
+  - Bank documents in Markdown, Word, PDF and Excel. Read BRIEF.md first; README.md describes each document.
+  - The bank's test customers and 6 sample conversations.
+  - The scoring customers are hidden.
+- `[VERIFIED]` **The mock.** We write and host the bank mock ourselves on Cloudflare Workers, from the service contract and the test customers.
+  - It must be live before the builder runs, and must stay up until the results are out.
+  - The agent may call only our mock. A wrong or unreachable mock fails those calls.
+- `[VERIFIED]` **The command.** The sample command is now `python3 builder/build.py {case_folder} {mock_url}`. Our builder accepts both this form and `{brief_path...} {tool_api_path}` (T-040).
+- `[VERIFIED]` **Submission.** One `submission.json` with these fields:
+  - `team` and `members` (name, email);
+  - `repo` and `commit`;
+  - `run_command`;
+  - `workflow` (one file) and `trace` (one file);
+  - `mock_url`.
+
+  One agent per team.
+- `[VERIFIED]` **Scoring.**
+  - The workflow is uploaded into the organizers' workspace, tested with unseen simulated customers, and inspected.
+  - The criteria and weights are not published.
+  - The trace is not scored, but an entry without one is not ranked.
+- `[VERIFIED]` **Fixes after the opening.** Builder bug fixes are allowed after the final opens; nothing from the final case may be written into the code.
+
 ## Competition
 
 - `[VERIFIED]` "Build the Builder", Freya x Y Combinator. Solo or team of two.

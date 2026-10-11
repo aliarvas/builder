@@ -11,6 +11,8 @@ from typing import Any
 
 from .prompts import (
     ACCOUNT_WAIT_LINE,
+    CUSTOMER_LANGUAGE_NOTE,
+    LANGUAGE_ONLY_LINE,
     REVISE_ASK_LINE,
     SPECIAL_ASK_PHRASED_TEMPLATE,
     SPECIAL_SAY_FIRST_LINE,
@@ -44,7 +46,7 @@ from .prompts import (
 )
 from .offer_check import (
     OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFER_PROGRESS, OFFERS_ACCEPTED, OFFERS_ACCEPTED_COUNT,
-    OFFER_AMOUNT_KIND, OFFER_PROPOSED_KIND, AMOUNT_KINDS, AMOUNT_KIND_NONE, OFFER_ACCEPTS, ACCEPTS_YES, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
+    OFFER_AMOUNT_KIND, OFFER_PRODUCT_NAME, OFFER_PROPOSED_KIND, AMOUNT_KINDS, AMOUNT_KIND_NONE, OFFER_ACCEPTS, ACCEPTS_YES, _py_literal, check_offer_code, offer_setup_code, product_reader_code,
     promise_values_hook, special_noted_code, ESTIMATED_PRODUCTS, RUNTIME_TEXT_CHARACTERS,
 )
 from .record_loop import (
@@ -53,7 +55,7 @@ from .record_loop import (
     record_next_code, record_promise_node, record_values,
 )
 from .product_notes import NOTE_RECORD, PRODUCT_REFUSAL, add_product_steps, refusal_values
-from .goodbye import add_goodbye_exit, speak_readback
+from .goodbye import add_goodbye_exit, goodbye_states, speak_readback
 from .readback_resume import CONFIRM_RESUME, add_readback_resume, resume_returns
 from .spec import (
     ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec,
@@ -383,6 +385,9 @@ def group_transitions_by_target(transitions: list[dict[str, Any]]) -> list[dict[
 
 
 IDENTITY_PASSED_VARIABLE = "identity_answers_passed"
+# T-037: the identity step's turn bound (per question) and the step it leaves to.
+IDENTITY_TURNS_PER_QUESTION = 6
+IDENTITY_TURN_LIMIT = "identity_turn_limit"
 IDENTITY_ASKED_VARIABLE = "identity_answer_field"
 
 
@@ -1348,6 +1353,8 @@ def _render_spec_workflow(
     identity = spec.identity.data
     negotiation = spec.negotiation.data
     confirmation = spec.confirmation.data
+    # T-038: the negotiation values the per-product refusal step takes; the offer routes skip them.
+    not_refusal = [_condition(negotiation["intent_variable"], "not_equals", value) for value in refusal_values(spec)]
 
     # (variable, reset value). Enum variables get the framework value "none": the platform
     # rejects "" for an enum and would keep the old intent (F-052).
@@ -1515,13 +1522,16 @@ def _render_spec_workflow(
                 # F-051: a date is enough. Without an amount the check uses the amount the
                 # agent last proposed, so a customer who only names a date is checked too.
                 "target_node": "check_offer", "description": "The customer named or accepted a date",
+                # T-038 (PUB-11): a message the extraction read as a refusal ("I cannot pay today")
+                # names no offer, whatever date word it holds; the refusal route takes it.
                 "condition": {"logic": "or", "conditions": [
                     {"logic": "and", "conditions": [
                         {"variable": OFFER_DATE, "operator": "is_set"},
                         _condition(OFFER_DATE, "not_equals", ""),
+                        *not_refusal,
                     ]},
                     # F-052: "yes, that works" to the date the agent just proposed.
-                    _condition(OFFER_ACCEPTS, "equals", ACCEPTS_YES),
+                    {"logic": "and", "conditions": [_condition(OFFER_ACCEPTS, "equals", ACCEPTS_YES), *not_refusal]},
                 ]},
             },
             *(
@@ -1658,11 +1668,13 @@ def _render_spec_workflow(
     nodes[THIRD_PARTY_ASK] = third_party_ask_node(nodes["third_party"])
     nodes["negotiate"]["extraction_schema"] = [{
         "name": OFFER_DATE, "type": "string",
-        "description": "Copy the payment date phrase from the customer's last message unchanged. If the customer accepts a date the agent just proposed without naming it (for example \"yes, that works\"), copy the date as the agent said it. Do not resolve relative dates with the system clock. Empty if none.",
+        "description": "Copy the payment date phrase from the customer's last message unchanged. If the customer accepts a date the agent just proposed without naming it (for example \"yes, that works\"), copy the date as the agent said it. Do not resolve relative dates with the system clock. Empty if none, and empty when the date is one the customer says they cannot pay on (for example \"I cannot pay today\").",
         "min_confidence": 0.7,
     }, {
         "name": OFFER_AMOUNT, "type": "float",
-        "description": "The payment amount the customer proposes or accepts in their last message. Empty if none.",
+        # T-037 (PUB-06): "yes, I can do that" to a proposed amount names no amount; the amount is
+        # the one the agent proposed (the same rule as the date above).
+        "description": "The payment amount the customer proposes or accepts in their last message. If the customer accepts an amount the agent just proposed without naming it (for example \"yes, I can do that\"), copy the amount as the agent said it. Empty if none.",
         "min_confidence": 0.7,
     }, {
         "name": OFFER_AMOUNT_KIND, "type": "string",
@@ -1711,6 +1723,22 @@ def _render_spec_workflow(
         if path.then == "close" and path.tool and path.tool == notes_tool
     ], OFFER_SAY, warnings)
 
+    # T-038 (PUB-07): a change at the read-back that already names the new date or amount goes
+    # straight to the check; the revise question is asked only when it names none.
+    revise_fields = (OFFER_DATE, OFFER_AMOUNT, OFFER_AMOUNT_KIND, OFFER_PRODUCT, OFFER_PRODUCT_NAME)
+    nodes["confirm_record"]["extraction_schema"].extend(
+        copy.deepcopy(field) for field in nodes["negotiate"]["extraction_schema"] if field["name"] in revise_fields)
+    named_offer = [[{"variable": OFFER_DATE, "operator": "is_set"}, _condition(OFFER_DATE, "not_equals", "")],
+                   [_condition(OFFER_AMOUNT, "greater_than", 0)],
+                   # T-037 (PUB-06): "no, the minimum": an amount kind alone; the check keeps the date.
+                   *([_condition(OFFER_AMOUNT_KIND, "equals", kind)] for kind in AMOUNT_KINDS)]
+    nodes["confirm_record"]["transitions"].insert(0, {
+        "target_node": "check_offer", "description": "The customer changed the offer and named the new terms",
+        "condition": {"logic": "or", "conditions": [
+            {"logic": "and", "conditions": [_condition(confirmation["intent_variable"], "equals", value), *terms]}
+            for value in confirmation["revise_values"] for terms in named_offer]},
+    })
+
     # F-053 (fix): the check result and the revise question are spoken by fixed lines on two
     # copies of negotiate (same prompt, routes and extraction). Each waits for the customer, and
     # a side question that returns to it (__previous__) hears its line again: the pending
@@ -1720,10 +1748,25 @@ def _render_spec_workflow(
         clone["name"] = clone_key
         clone["on_enter"] = {"type": "tts", "text": line}
         nodes[clone_key] = clone
+    # T-037 (PUB-06): after the read-back, a changed amount alone ("the minimum", an amount in
+    # words the extractor could not read as a number) is checked; the check keeps the date of the
+    # accepted offer. Without this route no own route took the turn and a special-path intent did.
+    nodes[REVISE_ASK]["transitions"].append(_transition("check_offer", "The customer named a new amount", [
+        {"logic": "and", "conditions": [_condition(OFFER_AMOUNT_KIND, "equals", kind), *not_refusal]}
+        for kind in AMOUNT_KINDS]))
 
     # T-027 (PUB-12): the read-back is said by code, and a goodbye in the offer talk has an exit
     # (before the special topic value, which must name the goodbye too).
     speak_readback(nodes)
+    # T-037 (PUB-03/PUB-05 pieces): a customer whose answers never reach the tool (half answers,
+    # questions back) leaves the identity step after a bounded number of turns, closing as the
+    # end-of-call hook would before identity passed; the bank's attempts counter still closes first.
+    nodes["identity"]["max_node_turns"] = IDENTITY_TURNS_PER_QUESTION * max(1, len(spec.identity_questions))
+    nodes["identity"]["max_turn_transition"] = IDENTITY_TURN_LIMIT
+    nodes[IDENTITY_TURN_LIMIT] = _code_node(IDENTITY_TURN_LIMIT, _write_close_state([("True", goodbye_states(spec)[1])]), [
+        {"target_node": "closing", "description": "Identity did not pass within the turn bound",
+         "condition": {"operator": "always"}},
+    ])
     # T-032: a side question at the read-back returns to a copy that does not say it again.
     add_readback_resume(nodes)
     add_goodbye_exit(spec, nodes, global_nodes, global_sources, _code_node)
@@ -2177,6 +2220,21 @@ def speakable_spec(spec: PhoneAgentSpec) -> tuple[PhoneAgentSpec, list[str]]:
     return dataclasses.replace(spec, outcomes=outcomes, special_paths=tuple(paths), agent=agent), notes
 
 
+def apply_call_language(spec: PhoneAgentSpec, workflow: dict[str, Any]) -> None:
+    """T-041: a call not in English: the system prompt says to speak only that language, and every
+    extraction description says the customer may speak it. English renders are unchanged."""
+    from .language import ENGLISH, language_code, language_name
+    code = language_code(spec.agent.language)
+    if code == ENGLISH:
+        return
+    name = language_name(code)
+    workflow["system_prompt"] = render_prompt(LANGUAGE_ONLY_LINE, language=name) + "\n" + workflow["system_prompt"]
+    note = render_prompt(CUSTOMER_LANGUAGE_NOTE, language=name)
+    for node in [*workflow.get("nodes", {}).values(), *workflow.get("global_nodes", {}).values()]:
+        for field in node.get("extraction_schema") or []:
+            field["description"] = str(field.get("description", "")).rstrip() + note
+
+
 def build_spec_workflow(
     spec: PhoneAgentSpec, tools: list[dict[str, Any]], warnings: list[str] | None = None,
     placements: list[str] | None = None, *,
@@ -2196,6 +2254,7 @@ def build_spec_workflow(
     def render() -> tuple[dict[str, Any], list[str], dict[str, int]]:
         found: list[str] = []
         workflow = _render_spec_workflow(spec, tools, found, plan)
+        apply_call_language(spec, workflow)
         return workflow, found, workflow_prompt_estimates(workflow)
 
     workflow, found, estimates = render()

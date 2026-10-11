@@ -30,6 +30,108 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-101: A call in another language would speak the builder's English lines and miss non-English dates
+
+- **Date:** 2026-10-11
+- **Brief / case:** final rules (a Turkish credit-card case), T-041
+- **Run:** offline review of the render
+- **Symptom (risk):** The read-back, offer messages, revise and resume lines, closing fallbacks and spoken dates ("Friday, 16 October") were fixed English text. The date reader knew only English month, weekday and number words, so "27 Ekim'de" or "haftaya cuma" were unreadable.
+- **Root cause:** The builder's own spoken lines and the generated date code assumed English.
+- **Category:** prompt / date-logic
+- **Fix / lesson:**
+  - `agent.language` gives an ISO code.
+  - A non-English call gets "Speak only <language>" and a "the customer may speak <language>" note on each extraction field.
+  - The fixed spoken lines are translated at build time with one model call; each line keeps its placeholders or stays English.
+  - The generated code gets a Turkish date block: it reads Turkish dates and says "16 Ekim Cuma" and "637,50".
+  - English renders are unchanged.
+- **Status:** fixed offline (T-041); the translation call and the spoken lines are not yet tested live
+- **Retest:** pending: a Turkish chat run of the final case
+
+### F-100: An accepted minimum was booked as the full amount, and an amount-only revision went to restructuring
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A v20, PUB-06, style pieces (call `aab20006`)
+- **Symptom:** The customer said "Yes, I can do that" to the proposed minimum, and the read-back said the full amount. The customer corrected it; the fixed line asked "Which date or amount would you like instead?" (the brief forbids asking for an amount). "six hundred thirty seven" was not read as a number; no own route took the turn, and the restructuring intent closed the call as a transfer.
+- **Root cause:** The amount field had no "copy the proposed amount on a plain yes" rule, and the proposed-amount kind was not extracted on that turn. The revise question asked for an amount. An amount kind alone had no route from the read-back or the revise step.
+- **Category:** extraction / routing
+- **Fix / lesson:**
+  - The amount field copies the agent's proposed amount on a plain yes.
+  - The revise line asks only what they want to change.
+  - The read-back and the revise step route an amount kind alone to the check, which keeps the accepted offer's date.
+- **Status:** fixed offline (T-037)
+- **Retest:** pending: PUB-06 with `--style pieces`
+
+### F-099: Identity answers in pieces never reached the tool, and the step looped until the turn limit
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A v20, PUB-03 and PUB-05, style pieces (calls `9da14484`, `734a09de`)
+- **Symptom:** The customer said "12 July", then "1991". The model answered each piece with "I need the full date" and never called `verify_identity`, so `wrong_answers_left` never changed. PUB-03 ended on a goodbye as `declined`. PUB-05 asked 30 times and closed at the turn limit as `no_promise/refused`.
+- **Root cause:** The identity prompt said nothing about answers in parts. The step's only exits were the tool results, and the generic 30-turn limit closed with the negotiation-stage row.
+- **Category:** prompt / routing
+- **Fix / lesson:** The identity prompt says to put the parts together, ask only for the missing part, and call the tool once the answer is whole. The identity step has its own turn bound (6 per question) and closes as the end-of-call hook would before identity passed. The bank's attempts counter still closes first.
+- **Status:** fixed offline (T-037); no self-check play of the model's piecing (it is model behaviour)
+- **Retest:** pending: PUB-03 and PUB-05 with `--style pieces`
+
+### F-098: A question back at the opening counted as an unclear answer
+
+- **Date:** 2026-10-11
+- **Brief / case:** kit style `asks_back` (any brief with an "ask once more, then close" opening rule)
+- **Run:** offline (T-034, extraction description read against the kit's style text)
+- **Symptom (risk):** The asks_back customer asks a short question twice before answering. At the opening, "What is this about?" was described as the unclear value. Two of them use up the unclear limit, and the call closes as unreached before the customer confirms.
+- **Root cause:** The who-answered description (F-071) listed "a question back" under unclear, which counts toward the close.
+- **Category:** extraction
+- **Fix / lesson:** A question back is now the greeting value: not an answer, not counted, the agent replies briefly and asks again. The opening prompts say so too. Self-check `style_asks_back` asks back at the opening (twice), identity, negotiation and read-back, and every such turn must keep the step.
+- **Status:** fixed offline (T-034)
+- **Retest:** pending: a chat run with `--style asks_back`
+
+### F-097: A self-corrected, talkative or two-piece date was read as the wrong day
+
+- **Date:** 2026-10-11
+- **Brief / case:** kit styles `corrects`, `talkative`, `pieces`
+- **Run:** offline (T-034, date phrases played in the self-check simulator)
+- **Symptom:**
+  - "the 15th, sorry, I mean the 14th of October" booked the 15th.
+  - "my cousin's wedding is on the 30th, but I can pay on the 14th of October" booked the 30th.
+  - "the fourteenth" … "of October" in two turns was never read; each piece alone is unreadable.
+- **Root cause:** The date reading took the first day number and month of the phrase. It had no idea of a correction, of several days, or of a piece kept from the turn before. The extractor copies the whole phrase from the customer's last message only.
+- **Category:** date-logic
+- **Fix / lesson:**
+  - After a correction word ("sorry", "I mean", "no wait", "actually", …) the part after the last one is read; it takes the phrase's month if it has none.
+  - With several day ordinals and no correction, only the one part that says pay is read; otherwise no day is taken and the agent asks again (the unrelated day is never booked).
+  - An unreadable date piece is kept for one turn and read again joined with the next piece.
+  - Self-check family `style_*` (from the spec's own days).
+- **Status:** fixed offline (T-034)
+- **Retest:** pending: chat runs with `--style corrects`, `--style talkative`, `--style pieces`
+
+### F-096: A second goodbye after the read-back dropped the accepted offer and noted it as refused
+
+- **Date:** 2026-10-11
+- **Brief / case:** review of T-029/T-030 (`tasks/T-029-030-review.md`, HIGH 2); multi-product briefs, PUB-12 shape
+- **Run:** offline review (generated code run in the simulator); no live run
+- **Symptom:** One product accepted, the read-back said, then the customer said "ok, thanks, bye" twice. The call closed with no promise and a `refused` note on the product the customer had accepted.
+- **Root cause:** The goodbye step sent only the first goodbye of the whole call to the read-back and closed every later goodbye with the hang-up state. The counter was never reset, so an earlier "thanks" could use up the read-back too.
+- **Category:** honesty
+- **Fix / lesson:** The read-back is said once per read-back text (a new accepted offer gives a new text). The next goodbye goes to the record loop and then the normal closing. A rejected read-back is never recorded, and an empty read-back text closes. A self-check on every scenario: no refused note on a product with an accepted offer.
+- **Status:** fixed offline (T-031); changed by T-037 (CTO decision): a goodbye after the read-back is not a yes. The call closes by stage and records nothing; the unconfirmed product gets the spec's neutral note reason, or no note when the only other reason would be the refusal.
+- **Retest:** pending: chat run, accept one product, answer the read-back with a goodbye twice; expect no promise and no refused note.
+
+### F-095: A product named in other words was booked or refused on the wrong product
+
+- **Date:** 2026-10-11
+- **Brief / case:** review HIGH 1 and MEDIUM 5; briefs with several products
+- **Run:** offline review (product matcher probed with the PUB-12 products)
+- **Symptom:** "the car" and "my vehicle" booked a promise on the first product. "both loans" booked all three products. A refusal of "the loans" or "the car" was not counted. A refused name copied into a later turn counted again.
+- **Root cause:** The matcher used whole words only: no plurals, and kind words of 3 letters were skipped. "both" meant every product. Words that named nothing fell back to the product under discussion without asking. The refusal field had no "only this message" rule.
+- **Category:** extraction
+- **Fix / lesson:**
+  - The matcher accepts singular and plural forms and 3-letter kind words.
+  - A kind word that only one product has names that product. A shared word in the plural, or after "both"/"all", names all the products that have it. A shared word in the singular means the agent asks once.
+  - Unknown words mean the agent asks once instead of booking.
+  - The same matcher counts refusals. Refused words already counted are not counted again on the next offer pass, and the field description says "empty unless this message itself refuses".
+  - Two new self-check families, `product_words_*` and the refusal variants, are built from the spec's own kinds.
+- **Status:** fixed offline (T-031)
+- **Retest:** pending: chat runs "I will pay the car on Friday" and "both loans on Friday", with the ledger checked. Open note: one message refusing two products uses an attempt of each (review LOW 5).
+
 ### F-094: A side question at the read-back made the agent say the whole read-back again
 
 - **Date:** 2026-10-11

@@ -1304,11 +1304,13 @@ def group_of(path: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 class _Conversation:
-    def __init__(self, group: Group, context: str) -> None:
+    def __init__(self, group: Group, context: str, attachments: list[dict[str, Any]] | None = None) -> None:
         self.group = group
+        # T-040: PDF documents of the case go first as native document blocks; the cache mark
+        # on the context then covers them too.
         self.messages: list[dict[str, Any]] = [{
             "role": "user",
-            "content": [text_block(context, cache=True), text_block(_task_text(group))],
+            "content": [*(attachments or []), text_block(context, cache=True), text_block(_task_text(group))],
         }]
         self.reply: dict[str, Any] | None = None
         self.parse_error = ""
@@ -1365,6 +1367,7 @@ def extract_spec(
     *,
     self_check: SelfCheckHook | None = None,
     deadline: float | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> ExtractionResult:
     """Extract, validate, repair and coverage-check a spec. Raises ``ExtractionError``.
 
@@ -1378,7 +1381,7 @@ def extract_spec(
     brief = "\n\n".join(text for _, text in documents)
     openapi_strings = set(_strings(openapi))
     context = context_text(documents, contract)
-    conversations = {group.name: _Conversation(group, context) for group in GROUPS}
+    conversations = {group.name: _Conversation(group, context, attachments) for group in GROUPS}
     log("extract", f"groups={len(GROUPS)} parallel=yes items={len(brief_items(documents))}")
     _parallel(lambda conv: conv.ask(client, f"extract:{conv.group.name}"), list(conversations.values()))
 

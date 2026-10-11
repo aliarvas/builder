@@ -223,7 +223,10 @@ class RenderTests(unittest.TestCase):
 # T-029: the goodbye exit at every conversation step (special-topic value at the opening and third party,
 # the goodbye value at the global ask steps, the customer_goodbye step). T-030 does not move it.
 # T-031: the product matcher, the goodbye's record route, the refused-products description; with T-032.
-BRIEF_A_RENDER_SHA256 = "c6e4cfe2c7aeb2a960582696f2215e689ad1c7f2f99cd25d1ad8ddd8a1833a23"
+# T-034: the date reading (a self-correction, several days, a date in two pieces) and a question back at the
+# opening as the greeting value.
+# T-035/T-037/T-038: note-record guard, identity pieces line and turn bound, unconfirmed goodbye, revise routes.
+BRIEF_A_RENDER_SHA256 = "04f40fd770c16f9897194ed04609e689dbf762dd5d8c2c65c52442fde911e1d3"
 
 
 class ExtractionTests(unittest.TestCase):

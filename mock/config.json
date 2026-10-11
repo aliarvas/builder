@@ -1,0 +1,42 @@
+{
+  "_comment": "Everything the final contract may change lives here and in customers.json. core.js has no bank-specific names.",
+  "wrong_limit": 3,
+  "identity": {
+    "fields": {
+      "date_of_birth": {"kind": "date"},
+      "phone_last4": {"kind": "digits", "length": 4}
+    },
+    "swapped_hint": "day_month_swapped"
+  },
+  "tools": {
+    "verify_identity": {"args": {"customer": "customer_id", "field": "field", "answer": "answer"}},
+    "get_account": {"args": {"customer": "customer_id"}, "requires_verified": true},
+    "create_promise": {"args": {"customer": "customer_id", "product": "product_id", "amount": "amount", "date": "date"}, "requires_verified": true, "one_per_product": true},
+    "add_note": {"args": {"customer": "customer_id", "product": "product_id", "reason": "reason", "text": "text"}, "requires_verified": false, "reasons": ["refused", "hardship", "dispute", "paid", "service_error"]},
+    "schedule_callback": {"args": {"customer": "customer_id", "date": "date", "time": "time"}, "requires_verified": false},
+    "transfer_to_agent": {"args": {"customer": "customer_id", "queue": "queue"}, "requires_verified": false, "queues": ["restructuring", "general", "support"]},
+    "close_call": {"args": {"customer": "customer_id", "outcome": "outcome", "reason": "reason"}, "requires_verified": false,
+      "outcomes": ["promise", "paid", "transferred", "no_promise", "not_verified", "not_reached"],
+      "reason_not_required_for": ["promise", "paid"]}
+  },
+  "product_fields": {"id": "product_id"},
+  "response_fields": {"products": "products", "promise_id": "promise_id", "verified": "verified", "wrong_left": "wrong_answers_left", "all_verified": "all_verified", "hint": "hint"},
+  "errors": {
+    "unknown_customer": "unknown customer",
+    "not_verified": "identity not verified",
+    "closed": "the call is already closed",
+    "service": "service unavailable, nothing was recorded",
+    "locked": "too many wrong answers",
+    "bad_date": "unreadable date, use YYYY-MM-DD",
+    "bad_digits": "answer must be four digits",
+    "unknown_field": "unknown field",
+    "unknown_product": "unknown product",
+    "bad_amount": "amount must be a positive number",
+    "duplicate_promise": "a promise already exists for this product",
+    "bad_time": "time must be HH:MM",
+    "bad_value": "value not allowed",
+    "reason_required": "reason is required for this outcome",
+    "missing": "missing field"
+  },
+  "default_now": "2026-10-14T11:00"
+}
