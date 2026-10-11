@@ -164,10 +164,17 @@ class FollowUpTests(unittest.TestCase):
         self.assertEqual("none", call.vars[OFFER_ACCEPTS])
 
     def test_yes_without_a_proposed_date_asks_for_the_date(self):
-        result = Call().turn(**{OFFER_ACCEPTS: "yes"})
+        # T-022 (F-076): the check proposes the latest allowed date itself and keeps it, so the
+        # next plain yes takes it (PUB-04: the date had been proposed by the model, not the code).
+        call = Call()
+        result = call.turn(**{OFFER_ACCEPTS: "yes"})
         self.assertEqual("missing", result["offer_verdict"])
-        self.assertEqual("Could you tell me the exact day you would like to pay?", result["offer_message"])
+        self.assertTrue(result["offer_message"].startswith("Could you tell me the exact day you would like to pay?"))
+        self.assertEqual("2026-11-02", result["offer_suggested_date"])
         self.assertNotIn("amount", result["offer_message"])
+        second = call.turn(**{OFFER_ACCEPTS: "yes"})
+        self.assertEqual("ok", second["offer_verdict"], second["offer_message"])
+        self.assertEqual("2026-11-02", call.accepted()["1"]["date"])
 
     def test_ok_message_names_the_product(self):
         result = Call().turn(offer_date="2026-10-16")

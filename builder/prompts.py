@@ -265,6 +265,9 @@ OFFER_VERDICT_MESSAGES = PromptDefinition(
     "ok: Thank you, that works for the [product].\n"
     "more: Now let us look at the [next]. The amount due is [next_amount]. Could you pay [next_amount]?\n"
     "missing: Could you tell me the exact day you would like to pay?\n"
+    # T-022 (F-076): no readable date; the code proposes the latest allowed date and keeps it.
+    "missing_latest: Could you tell me the exact day you would like to pay? The latest date I can record for the [product] is [date]. Would [date] work for you?\n"
+    "missing_again: Please tell me the day and the month, for example [date].\n"
     "amount_missing: Could you pay [amount]?\n"
     "product_unknown: Which of your products is this payment for?\n"
     "date_too_early: I can only record a date from [date]. Would [date] work for you?\n"
@@ -273,6 +276,13 @@ OFFER_VERDICT_MESSAGES = PromptDefinition(
     "date_ambiguous: Do you mean [date]?\n"
     "amount_too_low: The lowest amount I can record for the [product] is [amount]. Could you pay [amount]?\n"
     "amount_too_high: The amount due on the [product] is [amount]. Could you pay [amount]?",
+)
+OFFER_PRODUCT_NAME_DESCRIPTION = PromptDefinition(
+    "OFFER_PRODUCT_NAME_DESCRIPTION",
+    "Which product an offer is for, in the customer's words; the code matches it against the product names (T-025).",
+    "extraction model", "builder/offer_check.py — negotiate extraction field offer_product_name (specs with several products)",
+    "The product or products the customer's last message names for this payment, copied in the customer's words "
+    "(for example the kind of product, the last digits, or \"both\"). Empty if the message names no product.",
 )
 CONFIRM_TASK_TEMPLATE = PromptDefinition(
     "CONFIRM_TASK_TEMPLATE", "Reads back the checked offers once and asks for one confirmation; the program "
@@ -428,6 +438,24 @@ SPECIAL_ASK_TASK_TEMPLATE = PromptDefinition(
     "builder/workflow.py — global special_<id> with ask",
     "You asked: {ask}\nWait for the answer. Do not call any tool and do not promise anything.",
     ("{ask}",),
+)
+SPECIAL_CHOICE_DESCRIPTION = PromptDefinition(
+    "SPECIAL_CHOICE_DESCRIPTION",
+    "Reads the answer to a special path's question by what the customer wants done, not by yes or no (T-023, PUB-05).",
+    "extraction model", "builder/workflow.py — choice field of a global special_<id> with ask",
+    'The agent asked: "{ask}" proceed: the customer wants the agent to go ahead now and {action}. '
+    "stay: the customer does not want that, or wants to go on with the call. "
+    "Judge by what the customer wants done, not by the word yes or no.",
+    ("{ask}", "{action}"),
+)
+SPECIAL_TOPIC_DESCRIPTION = PromptDefinition(
+    "SPECIAL_TOPIC_DESCRIPTION",
+    "Gives a step's choice field a value for a special situation, so the step's own routes leave the turn to the "
+    "special paths (T-023, PUB-08).",
+    "extraction model", "builder/workflow.py — appended to a step's choice field when special paths can start there",
+    " {value}: the customer's message is about one of these: {situations}. Choose {value} instead of any other "
+    "value, also a refusal, an agreement or unclear.",
+    ("{value}", "{situations}"),
 )
 
 CONVERSATION_NO_TOOL_RULE = PromptDefinition(
@@ -702,6 +730,8 @@ EXTRACT_OUTCOMES_TASK = PromptDefinition(
     '"ask": RULE (optional; leave the key out unless the documents require one question before acting, for example '
     "whether the agent can help first or whether the customer wants to be connected. The agent says it to the customer "
     'and waits for the answer, so it must be one question ending with "?", never an instruction), '
+    '"on_decline": "id of another special path" (optional, only with ask: the closing path the documents give when '
+    'the customer does not want what this path does after the question; leave it out when a no simply goes on with the call), '
     '"tool": "tool name or \\"\\"", "tool_args": {"field": "fixed value"}, "outcome": "...", "reason": "...", '
     '"available_in": ["opening | third_party | identity | negotiate | confirm_record"], "then": "close | return"}]\n'
     "   (situations that interrupt the normal flow, for example: the customer says the payment was already made, "
@@ -817,6 +847,7 @@ PROMPTS = (
     IDENTITY_TASK_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
     OFFER_VERDICT_MESSAGES,
+    OFFER_PRODUCT_NAME_DESCRIPTION,
     CONFIRM_TASK_TEMPLATE,
     ACCOUNT_WAIT_LINE,
     REVISE_ASK_LINE,
@@ -831,6 +862,8 @@ PROMPTS = (
     SPECIAL_TOOL_FAILED_SAY,
     PROMISE_NOT_ALL_RECORDED_SAY,
     SPECIAL_ASK_PHRASED_TEMPLATE,
+    SPECIAL_CHOICE_DESCRIPTION,
+    SPECIAL_TOPIC_DESCRIPTION,
     CALLBACK_COLLECT_RULE,
     CALLBACK_DAY_DESCRIPTION,
     CALLBACK_TIME_DESCRIPTION,

@@ -20,12 +20,15 @@ from typing import Any, Callable
 
 from .offer_check import (
     NOTE_PRODUCT_ID, NOTE_REASON, NOTE_RESULT, NOTE_STATE, PERSUASION_ATTEMPT, PRODUCT_REFUSAL_STATE,
-    note_next_code, notes_outcome_code, product_refusal_code,
+    OFFER_PRODUCT, OFFER_PRODUCT_NAME, multi_product, note_next_code, notes_outcome_code, product_refusal_code,
 )
-from .prompts import CLOSING_FALLBACK_SAY, PERSUASION_STATE_LINE, PRODUCT_END_COUNTED_DESCRIPTION, PRODUCT_INTENT_DESCRIPTION
+from .prompts import (
+    CLOSING_FALLBACK_SAY, OFFER_PRODUCT_NAME_DESCRIPTION, PERSUASION_STATE_LINE, PRODUCT_END_COUNTED_DESCRIPTION,
+    PRODUCT_INTENT_DESCRIPTION,
+)
 from .record_loop import FAILED_NUMBERS, RECORDED_NUMBERS
 from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec, SpecError, special_note_pairs
-from .tools_from_openapi import CALL_VARIABLES
+from .tools_from_openapi import CALL_VARIABLES, write_tool_config
 
 PRODUCT_REFUSAL = "product_refusal"
 NOTE_NEXT = "note_next"
@@ -81,7 +84,7 @@ def note_tool(spec: PhoneAgentSpec, by_name: dict[str, dict[str, Any]]) -> dict[
     if not body["required"]:
         body.pop("required")
     tool.pop("response_mapping", None)
-    tool.setdefault("config", {})["maxRetries"] = 0
+    write_tool_config(tool)
     return tool
 
 
@@ -99,6 +102,17 @@ def notes_outcome_gaps(spec: PhoneAgentSpec) -> list[str]:
             and (rule["otherwise_outcome"], reason) not in rows]
 
 
+def add_product_name_field(spec: PhoneAgentSpec, nodes: dict[str, Any]) -> None:
+    """T-025 Fix 1: the product the customer names, in their words, next to the list number
+    (which the extractor never fills); only for specs with several products."""
+    if not multi_product(spec):
+        return
+    schema = nodes["negotiate"].setdefault("extraction_schema", [])
+    at = next((index + 1 for index, field in enumerate(schema) if field["name"] == OFFER_PRODUCT), len(schema))
+    schema.insert(at, {"name": OFFER_PRODUCT_NAME, "type": "string",
+                       "description": OFFER_PRODUCT_NAME_DESCRIPTION.text, "min_confidence": 0.7})
+
+
 def add_product_steps(
     spec: PhoneAgentSpec,
     nodes: dict[str, Any],
@@ -111,6 +125,8 @@ def add_product_steps(
     """Add the refusal step and the note loop when the spec asks for them (before the
     negotiate copies are made, so they share the refusal route)."""
     negotiation = spec.negotiation.data
+    # T-025: with several products, the product the customer names (in words).
+    add_product_name_field(spec, nodes)
     values = refusal_values(spec)
     if values:
         intent = negotiation["intent_variable"]

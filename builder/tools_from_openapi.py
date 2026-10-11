@@ -31,6 +31,19 @@ DESCRIPTION_CONSTRAINT_KEYS = frozenset(
 )
 
 
+# T-022 (F-075): a write tool waits longer for the bank. A request that times out may still
+# reach the bank later, after the call moved on (a callback booked after the close). The
+# engine never retries a write: a retried write can record the same thing twice.
+WRITE_TIMEOUT_MS = 30000
+
+
+def write_tool_config(tool: dict[str, Any]) -> dict[str, Any]:
+    """The config of a tool that writes: no tool-level retry, the longer timeout."""
+    config = tool.setdefault("config", {})
+    config["maxRetries"] = 0
+    config["timeoutMs"] = WRITE_TIMEOUT_MS
+    return tool
+
 def _post_process_code() -> str:
     code = """try:
     if isinstance(result, dict):

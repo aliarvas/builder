@@ -30,6 +30,79 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-082: With several products the offer never finds its product, and the call loops without a promise
+
+- **Date:** 2026-10-11
+- **Brief / case:** A+B, PUB-11, PUB-12 and PUB-13 live on the first A+B agent (0/3); `tasks/T-024-report.md`
+- **Symptom:** The agent never called `create_promise`. It asked "Which product is this for?" again and again until the 7-minute limit. It said a wrong date (PUB-13), and it said "I have recorded your promises" with no tool call (PUB-11, honesty).
+- **Root cause:** `check_offer` needed an integer product number that the customer never says and the extractor never filled (0 of 19 live records). On `product_unknown` it also wiped the offer, and a product-only answer had no route. The simulator always filled the number itself.
+- **Category:** extraction / routing / honesty
+- **Fix / lesson:** T-025:
+  - the product is read from the customer's words, falling back to the product under discussion;
+  - "both" or "all" applies the same date to every product;
+  - the pending offer is kept;
+  - a loop guard ends a cycle with no progress;
+  - the self-check plays turns where the model left the field empty, and a live PUB-11 record is replayed.
+- **Status:** fixed offline (T-025)
+- **Retest:** pending (A+B live run)
+
+### F-081: "Would you like support?" read the wrong way: a customer who said no was transferred
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-05, asks_back style, version 18 (`tasks/T-021-report.md`)
+- **Symptom:** "I do not want to be transferred" was read as "go ahead", and the call was transferred. A correct "no" would only have gone back to negotiation, not to the hardship close.
+- **Root cause:** The ask-first choice was worded for a customer's own request ("still insists"), not for an offer the agent makes. There was no link from the offer's "no" to the declined path.
+- **Category:** extraction / routing
+- **Fix / lesson:** T-023:
+  - the choice is worded by what the customer wants done;
+  - an optional spec link `on_decline` routes a "no" to the declined closing path;
+  - a self-check scenario covers it.
+- **Status:** fixed offline (T-023)
+- **Retest:** pending
+
+### F-080: A special topic said in a step with its own routes is taken as a refusal
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-08 (already paid), asks_back style, version 18
+- **Symptom:** "I paid it in the app this morning" was labelled a refusal. The refusal route won, and the call closed `no_promise/refused`.
+- **Root cause:**
+  - The platform tries a step's own routes before the special-path intents and stops at the first match.
+  - The step's choice field had no value for "something else".
+  - The simulator entered special paths directly.
+- **Category:** routing / platform order
+- **Fix / lesson:** T-023:
+  - a `special_topic` value, described from the paths' situations, that no step route takes;
+  - the simulator follows the platform order;
+  - a competing-label family and a static check.
+- **Status:** fixed offline (T-023)
+- **Retest:** pending
+
+### F-079: A slow bank answer to a write tool closes the call before the write lands
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-02, asks_back style, version 18 (`tasks/T-020-report.md`)
+- **Symptom:** `schedule_callback` timed out after 10 s, so the call closed. The booking reached the bank after the close and was refused.
+- **Root cause:** Every tool was rendered with a 10 s timeout.
+- **Category:** platform / tool-call
+- **Fix / lesson:** Write tools wait 30 s. They are still not retried.
+- **Status:** fixed offline (T-022)
+- **Retest:** pending
+
+### F-078: Dates said in words are not read, and the date question loops
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-04, asks_back style, version 18
+- **Symptom:** "Twenty-third of October" returned `missing` five times with the same question, and the call hit the 7-minute limit. The date the agent itself proposed was not stored, so "yes" could not use it.
+- **Root cause:** The date reader needed a digit day. `missing` had no limit, and a model-proposed date was not kept.
+- **Category:** date-logic
+- **Fix / lesson:** T-022:
+  - word and ordinal days are read;
+  - a clearer question comes after the second `missing`, and the third counts as a rejected offer;
+  - the code's proposed date is stored;
+  - a spoken-date self-check family is added.
+- **Status:** fixed offline (T-022)
+- **Retest:** pending
+
 > **Workflow design review (2026-10-11):** offline review of the Brief A version 17 workflow, items W-01 to W-08 plus architecture notes, in [`uat-findings/workflow.md`](uat-findings/workflow.md). All open, not yet assigned.
 
 ### F-077: A returning special path's note decides the outcome, but the closing ignores it

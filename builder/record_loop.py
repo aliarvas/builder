@@ -21,6 +21,7 @@ from typing import Any
 
 from .offer_check import OFFERS_ACCEPTED
 from .spec import PhoneAgentSpec
+from .tools_from_openapi import write_tool_config
 
 RECORD_NEXT = "record_next"
 RECORD_PROMISE = "record_promise"
@@ -95,7 +96,7 @@ def record_promise_node(spec: PhoneAgentSpec, promise_tool: dict[str, Any], afte
     if not body["required"]:
         body.pop("required")
     tool.pop("response_mapping", None)
-    tool.setdefault("config", {})["maxRetries"] = 0
+    write_tool_config(tool)
     # Review fix 1: the product number comes from the variable itself, not only from the
     # engine's template substitution into an integer field; the body value is the fallback.
     tool["pre_process_code"] = record_number_hook(number_field) + tool.get("pre_process_code", "")

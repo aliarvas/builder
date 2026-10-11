@@ -8,6 +8,7 @@ no double braces.
 from __future__ import annotations
 
 import json
+import textwrap
 from typing import Any
 
 from .prompts import OFFER_VERDICT_MESSAGES
@@ -177,6 +178,51 @@ def normalized_date_text(value):
     return re.sub(r'\\s+', ' ', text).strip()
 
 
+# T-022 (F-076): English day numbers in words, 1 to 31, as cardinals or ordinals.
+DAY_UNIT_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+                  'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
+DAY_UNIT_ORDINALS = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth',
+                     'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth',
+                     'eighteenth', 'nineteenth']
+
+
+def day_word_values():
+    values = dict()
+    for index in range(len(DAY_UNIT_WORDS)):
+        values[DAY_UNIT_WORDS[index]] = index + 1
+        values[DAY_UNIT_ORDINALS[index]] = index + 1
+    for tens, base, ordinal in (('twenty', 20, 'twentieth'), ('thirty', 30, 'thirtieth')):
+        values[tens] = base
+        values[ordinal] = base
+        for index in range(9):
+            if base + index + 1 <= 31:
+                values[tens + ' ' + DAY_UNIT_WORDS[index]] = base + index + 1
+                values[tens + ' ' + DAY_UNIT_ORDINALS[index]] = base + index + 1
+    return values
+
+
+DAY_WORD_VALUES = day_word_values()
+DAY_WORD_PATTERN = '|'.join(sorted(DAY_WORD_VALUES, key=len, reverse=True))
+# Not a day: a tens word before a unit word past 31 ("thirty second"), or a unit after one.
+DAY_WORD_GUARD = r'(?<!twenty )(?<!thirty )(?<!forty )'
+DAY_UNIT_PATTERN = '|'.join(DAY_UNIT_WORDS[:9] + DAY_UNIT_ORDINALS[:9])
+MONTH_NAME_PATTERN = '|'.join(sorted([name.lower() for name in MONTHS] + [name[:3].lower() for name in MONTHS],
+                                     key=len, reverse=True))
+
+
+def spoken_day_numbers(text):
+    # Day numbers said in words next to a month name become digits: "the twenty third of
+    # october" -> "the 23 of october", "november the sixth" -> "november the 6". Words
+    # without a month name in the phrase are left alone (they may be an amount or a time).
+    text = str(text or '')
+    if not re.search(r'\\b(?:' + MONTH_NAME_PATTERN + r')\\b', text):
+        return text
+    text = re.sub(DAY_WORD_GUARD + r'\\b(' + DAY_WORD_PATTERN + r')(?= (?:of )?(?:' + MONTH_NAME_PATTERN + r')\\b)',
+                  lambda match: str(DAY_WORD_VALUES[match.group(1)]), text)
+    return re.sub(r'\\b(' + MONTH_NAME_PATTERN + r') (the )?(' + DAY_WORD_PATTERN + r')\\b(?! (?:' + DAY_UNIT_PATTERN + r')\\b)',
+                  lambda match: match.group(1) + ' ' + (match.group(2) or '') + str(DAY_WORD_VALUES[match.group(3)]), text)
+
+
 def first_day_number(start, wanted):
     for month_offset in range(13):
         year = start.year + (start.month - 1 + month_offset) // 12
@@ -194,7 +240,7 @@ def resolve_offer_day(value):
     direct = parse_day(value)
     if direct is not None:
         return direct
-    text = normalized_date_text(value)
+    text = spoken_day_numbers(normalized_date_text(value))
     if not text:
         return None
     start = today()
@@ -620,6 +666,7 @@ vars['offer_message'] = 'No offer has been checked yet.'
 vars['offer_verdict'] = 'none'
 vars['offer_rejections'] = 0
 vars['offer_last_signature'] = ''
+vars['offer_missing_streak'] = 0
 vars['offer_rejections_by_product'] = json.dumps(dict())
 vars['offer_last_signatures_by_product'] = json.dumps(dict())
 vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
@@ -631,6 +678,8 @@ vars[CONFIG['state']['persuasion_attempt']] = 0
 
 
 CHECK_BODY = """verdict = 'missing'
+message_key = None
+missing_count = 0
 suggest_day = None
 suggest_amount = None
 number = None
@@ -708,10 +757,29 @@ try:
             vars['offers_summary'] = summary(accepted)
             # Ready when every returned product has an accepted offer or a note.
             progress = 'ready' if len(handled_numbers(accepted)) >= len(products) else 'more'
+    # T-022 (F-076): no readable date. The code proposes the latest allowed date and keeps it,
+    # so a plain yes takes it; from the second time in a row it asks for the day and the month
+    # with that date as the example; from the third time it counts as a rejected offer.
+    if verdict == 'missing' and day is None and number is not None and 1 <= number <= len(products):
+        try:
+            missing_count = int(vars.get('offer_missing_streak') or 0) + 1
+        except Exception:
+            missing_count = 1
+        earliest_seen, latest_seen = limits(products[number - 1])[:2]
+        if missing_count >= 2 and (latest_seen or earliest_seen) is not None:
+            message_key = 'missing_again'
+            suggest_day = latest_seen or earliest_seen
+        elif latest_seen is not None:
+            message_key = 'missing_latest'
+            suggest_day = latest_seen
+    vars['offer_missing_streak'] = missing_count
     # F-060 fix: the signature uses the parsed offer (day, amount after the proposed-amount rule),
     # so a reset value ('', None, the sentinel) or another spelling of the same day is the same offer.
     signature = str(number) + '|' + (day.isoformat() if day else '') + '|' + ('%.2f' % amount if amount is not None else '')
-    if verdict not in ('ok', 'missing', 'amount_missing', 'product_unknown', 'date_ambiguous'):
+    if missing_count >= 3:
+        # Each further unreadable answer is a new rejected offer.
+        signature += '|missing' + str(missing_count)
+    if verdict not in ('ok', 'missing', 'amount_missing', 'product_unknown', 'date_ambiguous') or missing_count >= 3:
         rejection_key = str(number)
         rejection_counts = vars.get('offer_rejections_by_product')
         last_signatures = vars.get('offer_last_signatures_by_product')
@@ -751,8 +819,9 @@ try:
     vars['offer_last_signature'] = signature
 except Exception:
     verdict = 'missing'
+    message_key = None
     progress = 'rejected'
-message = CONFIG['messages'].get(verdict, CONFIG['messages'].get('missing', ''))
+message = CONFIG['messages'].get(message_key or verdict, CONFIG['messages'].get('missing', ''))
 # F-053: the message is spoken to the customer word for word, so every value is spoken form.
 message = message.replace('[date]', say_spoken_day(suggest_day)).replace('[amount]', say_spoken_amount(suggest_amount))
 products_now = load_products()
@@ -1202,8 +1271,155 @@ def offer_setup_code(spec: PhoneAgentSpec) -> str:
 
 
 def check_offer_code(spec: PhoneAgentSpec, reset_variables: list[str]) -> str:
-    """Check the extracted offer against the spec rules; never raises."""
-    return _code(spec, CHECK_BODY, reset_variables)
+    """Check the extracted offer against the spec rules; never raises. With several products
+    (T-025) the check runs once per product the turn names, behind a product picker."""
+    if not multi_product(spec):
+        return _code(spec, CHECK_BODY, reset_variables)
+    config = _full_config(spec, reset_variables)
+    config.update({
+        "product_name_var": OFFER_PRODUCT_NAME, "no_progress_limit": NO_PROGRESS_LIMIT,
+    })
+    reader = product_reader_code(spec.account.data["products_variable"], spec.account.data["products_field"])
+    return (PRELUDE.replace("__CONFIG__", _py_literal(config)).replace("__PRODUCT_READER__", reader)
+            + PRODUCT_PICK_BODY + "\n\ndef check_once():\n" + textwrap.indent(CHECK_BODY, "    ")
+            + "    return verdict\n\n\n" + MULTI_CHECK_BODY)
+
+
+# T-025: the spec handles products one by one (per-product refusals or notes): an offer must
+# say which product it is for, and the extractor cannot fill a list number.
+def multi_product(spec: PhoneAgentSpec) -> bool:
+    return bool(spec.closing.data.get("product_notes") or spec.negotiation.data.get("product_end_values"))
+
+
+OFFER_PRODUCT_NAME = "offer_product_name"
+# Check passes in a row that handle no product before the safe exit (T-025 Fix 4).
+NO_PROGRESS_LIMIT = 5
+
+# T-025 Fix 1: the product a turn is about, from the words the customer used. The builder's
+# customer-facing names (kind in words, the label such as the last four digits) are matched;
+# nothing named means the product under discussion (the first one not yet handled, the one
+# the agent proposes). One question only when the words fit two or more open products.
+PRODUCT_PICK_BODY = """
+
+def plain_words(value):
+    return ' ' + re.sub(r'[^a-z0-9]+', ' ', str(value or '').lower()).strip() + ' '
+
+
+def named_product_numbers(text, products):
+    # (named, plausible): the products the words name, and the ones they may mean.
+    words = plain_words(text)
+    if not words.strip():
+        return [], []
+    if re.search(r' (?:both|all|each|every one|all of them|everything) ', words):
+        return list(range(1, len(products) + 1)), []
+    named, by_kind, plausible = [], dict(), []
+    kinds = dict()
+    for index, product in enumerate(products, start=1):
+        kind = plain_words(product.get(CONFIG['kind_field']) if CONFIG['kind_field'] else '').strip()
+        kinds[kind] = kinds.get(kind, 0) + 1
+    for index, product in enumerate(products, start=1):
+        kind = plain_words(product.get(CONFIG['kind_field']) if CONFIG['kind_field'] else '').strip()
+        label = plain_words(product.get(CONFIG['label_field']) if CONFIG['label_field'] else '').strip()
+        ordinal = ORDINALS[index - 1] if index <= len(ORDINALS) else ''
+        if label and ' ' + label + ' ' in words:
+            named.append(index)
+        elif ordinal and re.search(' ' + ordinal + ' (?:one|product) ', words):
+            named.append(index)
+        elif kind and ' ' + kind + ' ' in words:
+            if kinds[kind] == 1:
+                named.append(index)
+            else:
+                plausible.append(index)
+        elif kind and any(len(part) > 3 and ' ' + part + ' ' in words for part in kind.split(' ')):
+            plausible.append(index)
+    return named, plausible
+
+
+def pick_products(products):
+    # (numbers to check, ask): T-025 Fix 1.
+    handled = handled_numbers(accepted_offers())
+    open_numbers = [index for index in range(1, len(products) + 1) if index not in handled]
+    current = open_numbers[0] if open_numbers else None
+    try:
+        explicit = int(str(vars.get(CONFIG['product_var'])).strip())
+    except Exception:
+        explicit = None
+    if explicit is not None and 1 <= explicit <= len(products):
+        return [explicit], False
+    named, plausible = named_product_numbers(vars.get(CONFIG['product_name_var']), products)
+    if named:
+        return [index for index in named if index not in handled] or named, False
+    plausible = [index for index in plausible if index not in handled]
+    if len(plausible) == 1:
+        return plausible, False
+    if len(plausible) >= 2:
+        asked = json_value('offer_product_asked', list())
+        if str(current) not in asked:
+            asked.append(str(current))
+            vars['offer_product_asked'] = json.dumps(asked)
+            return [], True
+    return ([current] if current else []), False
+"""
+
+# T-025: run the check for each product the turn names (the same date for each), keep a
+# pending offer the check could not place (Fix 2), stop a loop without progress (Fix 4) and
+# reset the product fields with the other offer fields (Fix 5).
+MULTI_CHECK_BODY = """products_all = load_products()
+before_handled = len(handled_numbers(accepted_offers()))
+pending = dict(
+    date=vars.get(CONFIG['date_var']), amount=vars.get(CONFIG['amount_var']),
+    kind=vars.get(CONFIG['amount_kind_var']), accepts=vars.get(CONFIG['accepts_var']),
+    suggested=vars.get('offer_suggested_date') or '',
+)
+try:
+    numbers, ask = pick_products(products_all)
+except Exception:
+    numbers, ask = [], False
+several = len(numbers) > 1
+verdict = 'missing'
+for position, number in enumerate(numbers or [0]):
+    vars[CONFIG['date_var']] = pending['date']
+    vars[CONFIG['amount_var']] = pending['amount']
+    vars[CONFIG['amount_kind_var']] = pending['kind']
+    vars[CONFIG['accepts_var']] = pending['accepts']
+    if position > 0:
+        vars['offer_suggested_date'] = pending['suggested']
+    if several:
+        # One amount cannot be meant for several products: each takes its own full or minimum.
+        vars[CONFIG['amount_var']] = CONFIG['amount_none']
+        if str(pending['kind'] or '') not in ('full', 'minimum'):
+            vars[CONFIG['amount_kind_var']] = CONFIG['kind_none']
+    vars[CONFIG['product_var']] = 0 if ask else number
+    verdict = check_once()
+    if verdict != 'ok':
+        break
+try:
+    # Fix 2: a date or amount the check could not place stays for the next turn.
+    if verdict == 'product_unknown':
+        day_text = str(pending['date'] or '')
+        if not day_text.strip() and pending['accepts'] == CONFIG['accepts_yes']:
+            day_text = pending['suggested']
+        vars[CONFIG['date_var']] = day_text
+        vars[CONFIG['amount_var']] = pending['amount'] if pending['amount'] is not None else CONFIG['amount_none']
+        vars[CONFIG['amount_kind_var']] = pending['kind'] or CONFIG['kind_none']
+    elif verdict == 'missing':
+        vars[CONFIG['amount_var']] = pending['amount'] if pending['amount'] is not None else CONFIG['amount_none']
+        vars[CONFIG['amount_kind_var']] = pending['kind'] or CONFIG['kind_none']
+    # Fix 4: passes in a row that handle no product; at the limit, a safe exit.
+    if len(handled_numbers(accepted_offers())) > before_handled:
+        vars['offer_no_progress'] = 0
+    else:
+        vars['offer_no_progress'] = int(vars.get('offer_no_progress') or 0) + 1
+    if int(vars.get('offer_no_progress') or 0) >= CONFIG['no_progress_limit'] and \
+            vars.get(CONFIG['progress']) not in ('ready', 'limit'):
+        vars[CONFIG['progress']] = 'ready' if accepted_offers() else 'limit'
+        vars['offer_message'] = ''
+except Exception:
+    pass
+# Fix 5: the product fields are reset with the other offer fields.
+vars[CONFIG['product_var']] = 0
+vars[CONFIG['product_name_var']] = ''
+"""
 
 
 def special_noted_code(spec: PhoneAgentSpec, result_variable: str, tool_name: str, has_number: bool,

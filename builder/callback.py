@@ -29,7 +29,7 @@ from .prompts import (
     render_prompt,
 )
 from .spec import FRAMEWORK_NONE_VALUE, OFFER_UNITS, PhoneAgentSpec, SpecError
-from .tools_from_openapi import CALL_VARIABLES
+from .tools_from_openapi import CALL_VARIABLES, write_tool_config
 
 CALLBACK_TOOL = "schedule_callback"
 CALLBACK_CHECK = "callback_check"
@@ -165,7 +165,7 @@ def _book_tool(tool: dict[str, Any], date_field: str, time_field: str) -> dict[s
     else:
         body.pop("required", None)
     # Write tool: the engine does not retry; the closing rules read the result.
-    result.setdefault("config", {})["maxRetries"] = 0
+    write_tool_config(result)
     return result
 
 
@@ -199,6 +199,8 @@ VAGUE = re.compile(r'\b(?:few|several|couple|some|many|or so|ish)\b|\d (?:hours?
 def day_words(text):
     # The first day named in text, resolved against now; None when no day is named.
     lowered = re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9 -]+', ' ', str(text or '').lower()))
+    # T-022 (F-076): a day number in words next to a month name ("the twenty third of october").
+    lowered = spoken_day_numbers(re.sub(r'(?<=[a-z])-(?=[a-z])', ' ', lowered))
     for match in re.finditer(DAY_PATTERN, lowered):
         part = match.group(1)
         if part in ('tonight', 'later today') or part.startswith('this ') and part.split(' ')[1] in ('morning', 'afternoon', 'evening'):

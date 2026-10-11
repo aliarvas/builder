@@ -69,6 +69,9 @@ class SpecialPath:
     available_in: tuple[str, ...]
     then: str
     ask: Rule | None = None
+    # T-023 (PUB-05): the closing path the call takes when the customer says no to ``ask``
+    # (optional; without it a no goes back to the step the path came from).
+    on_decline: str = ""
 
 
 @dataclass(frozen=True)
@@ -221,6 +224,7 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
             _string_list(obj, "available_in", path),
             _string(_required(obj, "then", path), f"{path}.then"),
             _rule(obj["ask"], f"{path}.ask") if "ask" in obj else None,
+            _string(obj["on_decline"], f"{path}.on_decline", empty=True) if obj.get("on_decline") else "",
         )
         allowed_steps = {"opening", "third_party", "identity", "negotiate", "confirm_record"}
         unknown_steps = set(special.available_in) - allowed_steps
@@ -235,6 +239,13 @@ def parse_spec(value: Any) -> PhoneAgentSpec:
                 f"{path} references unknown outcome/reason: {special.outcome!r}/{special.reason!r}"
             )
         special_paths.append(special)
+    by_id = {special.id: special for special in special_paths}
+    for index, special in enumerate(special_paths):
+        target = by_id.get(special.on_decline) if special.on_decline else None
+        if special.on_decline and (special.ask is None or target is None or target is special
+                                   or target.then != "close" or target.ask is not None):
+            raise SpecError(f"special_paths[{index}].on_decline must name another closing special path "
+                            "without ask, and the path itself must have ask")
 
     global_rules = _rules(_required(root, "global_rules", "$"), "global_rules")
     # Validate renderer-required routing/configuration fields here for early, clear errors.

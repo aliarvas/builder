@@ -13,6 +13,8 @@ from .prompts import (
     ACCOUNT_WAIT_LINE,
     REVISE_ASK_LINE,
     SPECIAL_ASK_PHRASED_TEMPLATE,
+    SPECIAL_CHOICE_DESCRIPTION,
+    SPECIAL_TOPIC_DESCRIPTION,
     SPECIAL_SAY_FALLBACK,
     SPECIAL_TOOL_FAILED_SAY,
     PROMISE_NOT_ALL_RECORDED_SAY,
@@ -60,7 +62,7 @@ from .callback import (
     callback_extraction_fields, callback_nodes, third_party_ask_node, third_party_close_guard_node,
     third_party_extraction_fields,
 )
-from .tools_from_openapi import CALL_VARIABLES
+from .tools_from_openapi import CALL_VARIABLES, write_tool_config
 
 
 IDENTITY_CHECK = "identity_check"
@@ -460,6 +462,11 @@ def _model_fields(tool: dict[str, Any]) -> list[str]:
 
 
 SPECIAL_RESULT_PREFIX = "special_result_"
+# The answer to a special path's question (T-023): go ahead with the path, or not.
+SPECIAL_PROCEED, SPECIAL_STAY = "proceed", "stay"
+# A step's choice value for a special situation (T-023, PUB-08). No step route matches it, so
+# the platform goes on to the special paths' intents.
+SPECIAL_TOPIC_VALUE = "special_topic"
 
 # Steps that stand for one spec step name. ``opening_reask`` asks the opening question
 # again, so whatever is available in ``opening`` is available there too.
@@ -496,7 +503,7 @@ def _special_nodes(
             raise SpecError(f"special path {path.id!r} references unavailable tool {path.tool!r}")
         tool = _with_product_number(spec, _tool_with_baked_args(by_name[path.tool], path.tool_args, path.id))
         # Write tools are not retried by the engine; the result decides the route.
-        tool.setdefault("config", {})["maxRetries"] = 0
+        write_tool_config(tool)
     result_variable = special_result_variable(path)
 
     def ok_transitions() -> list[dict[str, Any]]:
@@ -560,19 +567,84 @@ def _special_nodes(
         # F-047: an ask written as an instruction is phrased by the agent, never read aloud.
         phrased = bool(agent_directed(path.ask.text))
         ask_prompt = SPECIAL_ASK_PHRASED_TEMPLATE if phrased else SPECIAL_ASK_TASK_TEMPLATE
+        stay_target, stay_text = "__previous__", "The customer does not want this"
+        decline = _decline_path(spec, path, by_name)
+        if decline is not None:
+            # T-023 (PUB-05): a no closes the call on the path the spec gives for it.
+            decline_key = key + "_declined"
+            made, more = _special_nodes(spec, decline, decline_key, by_name, tag_close)
+            declined = made[decline_key][0]
+            declined.pop("condition", None)
+            extra[decline_key] = declined
+            extra.update(more)
+            stay_target, stay_text = decline_key, "The customer does not want this: " + decline.when.text
         node = _conversation(key, render_prompt(ask_prompt, ask=path.ask.text), [], [
-            _transition(go_key, "The customer still wants this", [_condition(choice, "equals", "proceed")]),
-            _transition("__previous__", "The customer accepts help instead", [_condition(choice, "equals", "stay")]),
+            _transition(go_key, "The customer wants this", [_condition(choice, "equals", SPECIAL_PROCEED)]),
+            _transition(stay_target, stay_text, [_condition(choice, "equals", SPECIAL_STAY)]),
         ])
         node["on_enter"] = {"type": "llm"} if phrased else {"type": "tts", "text": path.ask.text}
         node["extraction_schema"] = [{
-            "name": choice, "type": "string", "enum_values": ["proceed", "stay"],
-            "description": "proceed: the customer still insists on this request; stay: they accept help or drop it",
+            "name": choice, "type": "string", "enum_values": [SPECIAL_PROCEED, SPECIAL_STAY],
+            "description": render_prompt(SPECIAL_CHOICE_DESCRIPTION, ask=path.ask.text, action=_path_action(path)),
             "min_confidence": 0.8,
         }]
     node["description"] = path.when.text
     node["condition"] = {"operator": "matches_intent", "description": path.when.text}
     return {key: (node, source_steps(path))}, extra
+
+
+def _path_action(path: SpecialPath) -> str:
+    """What going ahead with a special path does, in words (T-023): its tool and fixed values,
+    or its line. The question's yes may mean either way ("Can I help you first?"), the action not."""
+    if path.tool:
+        values = ", ".join(f"{name} {value}" for name, value in (path.tool_args or {}).items())
+        return f"call {path.tool}" + (f" ({values})" if values else "")
+    return f'say "{path.say.text}"' + (" and end the call" if path.then == "close" else "")
+
+
+def _decline_path(spec: PhoneAgentSpec, path: SpecialPath, by_name: dict[str, dict[str, Any]]) -> SpecialPath | None:
+    """The spec's closing path for a no to ``path.ask`` (``on_decline``), when it can be rendered
+    as a plain step: no question, and no tool value the conversation must fill."""
+    target = next((other for other in spec.special_paths if path.on_decline and other.id == path.on_decline), None)
+    if target is None or target.ask is not None or target.then != "close":
+        return None
+    if target.tool and (target.tool not in by_name or _model_fields(by_name[target.tool])):
+        return None
+    return target
+
+
+def _add_special_topic(spec: PhoneAgentSpec, nodes: dict[str, Any], global_nodes: dict[str, Any],
+                       global_sources: dict[str, tuple[str, ...]]) -> None:
+    """T-023 (PUB-08): the platform tries a step's own routes before the special paths' intents
+    and stops at the first match, so a forced choice ("I already paid" read as a refusal) hid
+    the path. Each step's choice field gets one value that routes nowhere; its description
+    names the situations of the paths that can start at that step."""
+    choices = choice_variables(spec)
+    for key, node in nodes.items():
+        situations = list(dict.fromkeys(
+            global_nodes[name]["description"] for name, sources in global_sources.items() if key in sources))
+        if not situations or node.get("node_type") != "conversation":
+            continue
+        for field in node.get("extraction_schema") or []:
+            if field.get("name") in choices and SPECIAL_TOPIC_VALUE not in field.get("enum_values", []):
+                values = list(field["enum_values"])
+                at = values.index(FRAMEWORK_NONE_VALUE) if FRAMEWORK_NONE_VALUE in values else len(values)
+                field["enum_values"] = values[:at] + [SPECIAL_TOPIC_VALUE] + values[at:]
+                field["description"] = field["description"].rstrip()
+                if not field["description"].endswith("."):
+                    field["description"] += "."
+                field["description"] += render_prompt(
+                    SPECIAL_TOPIC_DESCRIPTION, value=SPECIAL_TOPIC_VALUE,
+                    situations="; ".join(text.rstrip(".") for text in situations))
+
+
+def choice_variables(spec: PhoneAgentSpec) -> set[str]:
+    """The fields that carry a step's routing choice (who answered, the negotiation and
+    read-back intents, the third party's intent)."""
+    return {name for name in (spec.opening.data.get("who_answered_variable"),
+                              spec.negotiation.data.get("intent_variable"),
+                              spec.confirmation.data.get("intent_variable"),
+                              spec.third_party.data.get("intent_variable")) if name}
 
 
 def _done_transitions(source_variable: str, sources: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -1148,7 +1220,7 @@ def _hangup_close_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, 
     if not real_url or "{{" in real_url:
         raise SpecError("close_call has no fixed URL for the end-of-call close")
     url_property["default"] = ""
-    result["config"] = {**result.get("config", {}), "alwaysRunsAt": ["end_of_call"], "maxRetries": 0}
+    result["config"] = {**write_tool_config(result)["config"], "alwaysRunsAt": ["end_of_call"]}
     result["pre_process_code"] = _hangup_hook_code(spec, real_url)
     result.pop("response_mapping", None)
     return result
@@ -1161,7 +1233,7 @@ def _close_tool(spec: PhoneAgentSpec, tool: dict[str, Any]) -> dict[str, Any]:
         closing["reason_field"]: "{{close_reason}}",
     }, "closing")
     # Write tool: no tool-level retries; the flow retries once (close_attempt).
-    result.setdefault("config", {})["maxRetries"] = 0
+    write_tool_config(result)
     return result
 
 
@@ -1577,6 +1649,7 @@ def _render_spec_workflow(
         clone["on_enter"] = {"type": "tts", "text": line}
         nodes[clone_key] = clone
 
+    _add_special_topic(spec, nodes, global_nodes, global_sources)
     side_questions = side_question_steps(spec, nodes)
     for key, node in [*nodes.items(), *global_nodes.items()]:
         _apply_fixed_lines(key, node, side_questions.get(key, []) if key in nodes else [])

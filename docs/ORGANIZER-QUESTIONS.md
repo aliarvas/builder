@@ -6,7 +6,7 @@ These questions come from our live chat tests and from two unresolved difference
 
 **Context.** The starter kit says to omit `agent_config`, so our workflow cannot set `sttConfig.language` or `ttsConfig.language`. Our calls and prompts were in English, but a slow transition through API and code steps caused a platform-generated wait message in Turkish.
 
-**Observed.** On 10 October, Brief A PUB-01 version 10, customer `c_de6c4d55-76e`, the transcript inserted “Bir saniye lütfen.” between identity verification and the English account discussion; it appeared again in a version 13 slow turn on 11 October.
+**Observed.** On 10 October, Brief A PUB-01 version 10, customer `c_de6c4d55-76e`, the transcript inserted “Bir saniye lütfen.” between identity verification and the English account discussion; it appeared again in a version 13 slow turn on 11 October, and in a scored simulation on version 18 (PUB-04, call `67fa26bd-70d9-4ab9-97f1-d23efb7e5e40`, style asks_back) between two English turns. Since "calls are in English", a judge may count this as a policy failure we cannot prevent from the workflow.
 
 **Question.** When `agent_config` is omitted, how is the language of platform-generated filler selected, and will hidden-brief runs use an English default or another supported workflow-level language setting?
 

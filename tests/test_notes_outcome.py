@@ -199,7 +199,9 @@ class RenderTests(unittest.TestCase):
         # T-011 added nothing to Brief A (no block): its render was pinned at 74eb27a. Re-pinned at
         # T-015, which changes Brief A on purpose (fixed lines, opening descriptions, customer return)
         # together with T-014's callback code; re-pinned again for the T-014 review fix (compound
-        # durations in the callback code only). A change here must be a deliberate one.
+        # durations in the callback code only); re-pinned at T-023 (special_topic in the choice fields,
+        # the ask-first choice wording) on a tree that also holds T-022's work in progress, which moves
+        # it too. A change here must be a deliberate one.
         import hashlib
         data = json.loads((ROOT / "tests/fixtures/spec-brief-a.json").read_text(encoding="utf-8"))
         workflow = build_spec_workflow(parse_spec(data), kit_tools(0))
@@ -216,7 +218,7 @@ class RenderTests(unittest.TestCase):
                     parse_spec(data)
 
 
-BRIEF_A_RENDER_SHA256 = "63bfaf8e55441086efade9cbc70d326768d6626c4ca704abb75f05d477033f70"
+BRIEF_A_RENDER_SHA256 = "db9effa1ad59d21b8c38495dbba69ab8906b9ff266ceac9e6c2b54b77f4e18c0"
 
 
 class ExtractionTests(unittest.TestCase):

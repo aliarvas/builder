@@ -909,6 +909,13 @@ def merge_groups(groups: dict[str, dict[str, Any]]) -> dict[str, Any]:
         if not isinstance(ask, dict) or not str(ask.get("text") or "").strip():
             path.pop("ask", None)  # an empty ask object means no question
         special_paths.append(path)
+    # T-023: on_decline is optional; one that names no other closing path without ask is dropped,
+    # so a no goes back to the step the path came from (the behaviour without it).
+    closing_ids = {path.get("id") for path in special_paths if path.get("then") == SPECIAL_THEN_CLOSE and "ask" not in path}
+    for path in special_paths:
+        if "on_decline" in path and ("ask" not in path or path["on_decline"] == path.get("id")
+                                     or path["on_decline"] not in closing_ids):
+            path.pop("on_decline")
 
     provenance: dict[str, Any] = {}
     overrides: list[dict[str, Any]] = []
@@ -1158,6 +1165,18 @@ def check_spec_data(spec: dict[str, Any], check: _Checker) -> None:
             if ask_text and not ask_text.endswith("?"):
                 check.error(where + ".ask", "is spoken to the customer as one question and the agent waits for the "
                             "answer; write a question ending with '?', or leave ask out (instructions go in when/say)")
+        decline = path.get("on_decline")
+        if decline not in (None, ""):
+            others = {other.get("id"): other for other in get("special_paths") or [] if isinstance(other, dict)}
+            target = others.get(decline)
+            if "ask" not in path or decline == path.get("id") or target is None \
+                    or target.get("then") != SPECIAL_THEN_CLOSE or "ask" in target:
+                message = ("must be the id of another special path with then close and no ask, on a path that "
+                           "has ask; leave it out when a no goes on with the call")
+                if check.optional_soft:  # last round: merge_groups drops it, a no goes back to the step
+                    check.warn(where + ".on_decline", message + "; dropped")
+                else:
+                    check.error(where + ".on_decline", message)
         steps = path.get("available_in")
         if not isinstance(steps, list) or not steps or any(step not in SPECIAL_STEPS for step in steps):
             check.error(where + ".available_in", f"must list steps from {list(SPECIAL_STEPS)}")

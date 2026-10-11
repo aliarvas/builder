@@ -1,0 +1,362 @@
+{
+ "source": "traces/live-runs/user-fc8bdd72-cc0d-49cc-a4a3-aa6f6686cbcc.json (PUB-11, A+B workflow 8887e79f version 1): each customer turn with the step it was spoken at and the fields the live extractor wrote (variable_extracted events); failed extractions are absent",
+ "now": "2026-10-14T11:00",
+ "products": [
+  {
+   "product_id": "p1",
+   "type": "credit_card",
+   "card_last4": "2288",
+   "past_due": 220,
+   "days_late": 9,
+   "minimum_payment": 66
+  },
+  {
+   "product_id": "p2",
+   "type": "personal_loan",
+   "past_due": 640,
+   "days_late": 9,
+   "instalment_amount": 213
+  },
+  {
+   "product_id": "p3",
+   "type": "car_loan",
+   "past_due": 75,
+   "days_late": 3,
+   "instalment_amount": 25
+  }
+ ],
+ "expected": {
+  "promises": [
+   [
+    "p1",
+    220.0,
+    "2026-10-16"
+   ],
+   [
+    "p2",
+    640.0,
+    "2026-10-16"
+   ],
+   [
+    "p3",
+    75.0,
+    "2026-10-16"
+   ]
+  ]
+ },
+ "turns": [
+  {
+   "node": "opening",
+   "text": "Yes, this is Sofia Almeida.",
+   "extracted": {
+    "caller_role": "confirmed"
+   }
+  },
+  {
+   "node": "identity",
+   "text": "Third of June nineteen eighty seven.",
+   "extracted": {}
+  },
+  {
+   "node": "identity",
+   "text": "Two two eight eight.",
+   "extracted": {}
+  },
+  {
+   "node": "negotiate",
+   "text": "I cannot pay today.",
+   "extracted": {
+    "negotiation_reply": "flat_refusal"
+   }
+  },
+  {
+   "node": "negotiate",
+   "text": "Yes, I can pay that this Friday.",
+   "extracted": {
+    "offer_amount": 220.0,
+    "offer_date": "this Friday, 16 October",
+    "offer_amount_kind": "full",
+    "offer_accepts_proposal": "yes",
+    "negotiation_reply": "agreed_date_and_amount"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "That is for the credit card.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Okay.",
+   "extracted": {
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Yes, I will pay that this Friday.",
+   "extracted": {
+    "offer_date": "this Friday, 16 October",
+    "offer_amount_kind": "full",
+    "offer_accepts_proposal": "yes",
+    "negotiation_reply": "agreed_date_and_amount"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "That is for the personal loan.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Yes, I will pay that this Friday as well.",
+   "extracted": {
+    "offer_amount": 75.0,
+    "offer_date": "this Friday, 16 October",
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "yes",
+    "negotiation_reply": "agreed_date_and_amount"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "That is for the car loan.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Yes, I confirm.",
+   "extracted": {
+    "offer_date": "Friday, 16 October",
+    "offer_accepts_proposal": "yes",
+    "negotiation_reply": "agreed_date_and_amount"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "It is for the credit card, the personal loan",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "The credit card, the personal loan, and the car loan.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Yes, I confirm.",
+   "extracted": {
+    "offer_date": "Friday, 16 October",
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "yes",
+    "negotiation_reply": "agreed_date_and_amount"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "The credit card, the personal loan, and the car",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "No, that is all.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {}
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  },
+  {
+   "node": "offer_say",
+   "text": "Thank you, goodbye.",
+   "extracted": {
+    "offer_amount_kind": "none",
+    "offer_accepts_proposal": "none",
+    "negotiation_reply": "none"
+   }
+  }
+ ]
+}

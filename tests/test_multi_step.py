@@ -199,7 +199,7 @@ class OfferCheckTests(unittest.TestCase):
             (LOAN, "2026-10-23", 150, "ok", "", ""),                       # late band: 7th business day
             (LOAN, "2026-10-26", 150, "date_too_late", "2026-10-23", ""),
             (LOAN, "2026-10-20", 100, "amount_too_low", "", 150.0),
-            (CARD, "next week", 95, "missing", "", ""),
+            (CARD, "next week", 95, "missing", "2026-11-02", ""),  # T-022: the latest date proposed
             (CARD, "2026-10-16", "", "ok", "", ""),  # F-051: only a date takes the proposed (full) amount
         ]
         for product, date, amount, verdict, day, money in cases:
@@ -219,8 +219,10 @@ class OfferCheckTests(unittest.TestCase):
 
     def test_brief_b_products_and_progress(self):
         now = "2026-10-14T11:00"
+        # T-025: no product number is the product under discussion (the first open one).
         unknown = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95)
-        self.assertVerdict(unknown, "product_unknown")
+        self.assertVerdict(unknown, "ok")
+        self.assertIn('"1"', unknown["offers_accepted"])
         first = self.run_offer(1, [CARD, LOAN], now, "2026-10-16", 95, number=1)
         self.assertVerdict(first, "ok")
         self.assertEqual("more", first["offer_progress"])
@@ -291,7 +293,7 @@ class OfferCheckTests(unittest.TestCase):
         self.assertEqual("Do you mean Wednesday, 1 January 2031?", ambiguous["offer_message"])
         self.assertEqual({}, json.loads(ambiguous["offers_accepted"]))
         self.assertVerdict(
-            self.run_offer(0, [CARD], "2026-10-14T11:00", "next week", 95), "missing"
+            self.run_offer(0, [CARD], "2026-10-14T11:00", "next week", 95), "missing", "2026-11-02"
         )
 
         this_week = self.run_offer(0, [CARD], "2026-10-14T11:00", "this Monday", 95)

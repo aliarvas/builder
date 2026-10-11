@@ -35,7 +35,7 @@ from .callback import (
     CALLBACK_BOOK as CALLBACK_BOOK_STEP, DAY_TEXT, THIRD_PARTY_CLOSE_EXPLICIT, THIRD_PARTY_CLOSE_KIND, TIME_TEXT,
     callback_window,
 )
-from .offer_check import ACCEPTS_YES, OFFER_ACCEPTS, OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT
+from .offer_check import ACCEPTS_YES, OFFER_ACCEPTS, OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT, OFFERS_ACCEPTED, OFFERS_NOTED
 from .selfcheck_calendar import SpecCalendar, first_rule
 from .record_loop import RECORD_PROMISE
 from .spec import FRAMEWORK_NONE_VALUE, SPECIAL_THEN_CLOSE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec, special_note_pairs
@@ -209,6 +209,7 @@ class Simulator:
         self.previous = ""
         self.merged: set[str] = set()
         self.spec_failures: list[tuple[str, str]] = []   # (spec path, problem): for repair
+        self.offer_passes: list[tuple[Any, Any]] = []      # T-025: handled products after each offer check
         self.step = workflow["initial_node"]
         bank.identity_tool = self._identity_tool()
         bank.account_tool = self._account_tool()
@@ -240,6 +241,8 @@ class Simulator:
             exec(_compiled(code_of(self.nodes[key])), _sandbox(self.problems, f"code step {key}", vars=self.vars))
         except Exception as exc:  # generated code must never raise
             self.problems.append(f"code step {key} raised {type(exc).__name__}: {exc}")
+        if key == "check_offer":
+            self.offer_passes.append((self.vars.get(OFFERS_ACCEPTED), self.vars.get(OFFERS_NOTED)))
         for name, field in self.fields.items():
             if name in self.vars and self.vars[name] != before.get(name) and not fits(self.vars[name], field):
                 self.rejected.append((key, name, self.vars[name]))
@@ -411,6 +414,22 @@ class Simulator:
         self.previous = key
         self.step = node_key
         return True
+
+    def intent_turn(self, extracted: dict[str, Any], node_key: str) -> str:
+        """A turn that both sets the step's fields and matches a special path's intent. The
+        platform tries the step's own routes first and the intents only when none holds
+        (T-023, seen live in PUB-08). Returns "step", "special", or "" (nothing moved)."""
+        key = self.advance()
+        if key == END_CALL or key not in self.nodes:
+            return ""
+        self.spoken_after_turn = []
+        self.extract(key, extracted)
+        target = self.route(key)
+        if target is not None:
+            self.path.append(key)
+            self.step = self._target(target)
+            return "step"
+        return "special" if self.enter_special(node_key) else ""
 
     # -- call-end events (T-012) ---------------------------------------------
     hung_up = False
@@ -680,6 +699,7 @@ def scenarios(spec: PhoneAgentSpec, now: str) -> list[Scenario]:
             "promise_recorded", one, identity=[False], promises=[plan.promise(one[0], day)],
             notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="negotiate"))
         result.extend(_offer_scenarios(spec, plan, one, notes_for))
+        result.extend(_spoken_date_scenarios(spec, plan, one, notes_for))
         # The record call fails every time.
         attempts = plan.confirmation["max_attempts_per_product"]
         record_tool = _record_tool_name(spec)
@@ -712,6 +732,7 @@ def scenarios(spec: PhoneAgentSpec, now: str) -> list[Scenario]:
     # Several products: when the spec has per-product handling.
     if plan.notes or plan.negotiation.get("product_end_values"):
         result.extend(_multi_scenarios(spec, plan, notes_for))
+        result.extend(_without_product_field(_multi_scenarios(spec, plan, notes_for)))
 
     # T-012: call-end states and the other families.
     result.extend(_call_end_scenarios(spec, plan, one, notes_for))
@@ -914,6 +935,8 @@ def _call_end_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
         *_revise_scenarios(spec, plan, one, notes_for),
         *_two_special_scenarios(spec, plan, one, notes_for),
         *_special_elsewhere_scenarios(spec, plan, one, notes_for),
+        *_competing_label_scenarios(spec, plan, one, notes_for),
+        *_decline_scenarios(spec, plan, one, notes_for),
     ]
 
 
@@ -1143,7 +1166,9 @@ def _two_special_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
         if before is None:
             continue
         here = [path for path in spec.special_paths if step in path.available_in]
-        first = next((path for path in here if path.ask or (path.then != SPECIAL_THEN_CLOSE and not path.tool)), None)
+        # An ask-first path with on_decline closes on a no (T-023): it does not return.
+        first = next((path for path in here if (path.ask and not path.on_decline)
+                      or (path.then != SPECIAL_THEN_CLOSE and not path.tool)), None)
         second = next((path for path in here if path.then == SPECIAL_THEN_CLOSE and first is not None
                        and path.id != first.id), None)
         if first and second:
@@ -1173,6 +1198,72 @@ def _finish(plan, step: str, one, path) -> tuple[list[dict[str, Any]], str, dict
             plan.third["intent_variable"]: value, THIRD_PARTY_CLOSE_KIND: THIRD_PARTY_CLOSE_EXPLICIT}}], \
             "third_party:" + value, {"no_products": True}
     return None
+
+
+def _competing_label(plan, step: str) -> tuple[str, str] | None:
+    """(choice field, value) a forced extraction would give a special situation at ``step``:
+    the closest refusal (T-023, PUB-08: "I already paid" read as a refusal)."""
+    if step == "negotiate":
+        return plan.negotiation["intent_variable"], plan.refusal_value()
+    if step == "confirm_record":
+        values = plan.confirmation.get("revise_values") or [
+            value for value in plan.confirmation["intent_values"] if value not in (plan.confirmation.get("confirm_values") or [])]
+        return (plan.confirmation["intent_variable"], values[0]) if values else None
+    if step == "opening" and plan.opening.get("close_values"):
+        return plan.opening["who_answered_variable"], plan.opening["close_values"][0]
+    return None
+
+
+def _competing_label_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """T-023 (PUB-08): a closing special path whose turn also gets a step choice. The
+    platform tries the step's own routes first, so the path starts only when the choice field
+    offers a value that routes nowhere and names the path; the turn then carries that value,
+    else the closest refusal (and the step's refusal route wins: caught)."""
+    result = []
+    for path in spec.special_paths:
+        if path.then != SPECIAL_THEN_CLOSE:
+            # A returning path at negotiate (a note for one product, then on with the call): the
+            # same turn, then the customer refuses (as in _special_scenarios).
+            competing = _competing_label(plan, "negotiate")
+            if "negotiate" not in path.available_in or competing is None:
+                continue
+            written = ({"p1": (path.tool_args or {}).get(plan.notes["reason_field"], "")}
+                       if path.tool and plan.notes and path.tool == plan.notes["tool"] else None)
+            state = "negotiation:" + plan.refusal_value()
+            turn = {**_enter(path), "kind": "say_special", "label": "special_topic",
+                    "vars": {competing[0]: competing[1]}, "topic": True}
+            result.append(Scenario(
+                f"special_{path.id}_over_choice_at_negotiate", [*plan.reach_negotiation(), turn, plan.refuse()],
+                state, one, step="negotiate",
+                notes=notes_for(one, refused=[] if written else ["p1"], state=state, written=written)))
+            continue
+        for step in ("negotiate", "confirm_record", "opening"):
+            competing = _competing_label(plan, step) if step in path.available_in else None
+            before = _before(plan, step, one) if competing else None
+            if before is None:
+                continue
+            scenario = _closing_case(plan, path, step, one, notes_for, f"special_{path.id}_over_choice_at_{step}", before)
+            scenario.actions[-1] = {**_enter(path), "kind": "say_special", "label": "special_topic",
+                                    "vars": {competing[0]: competing[1]}, "topic": True}
+            result.append(scenario)
+    return result
+
+
+def _decline_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """T-023 (PUB-05): the customer says no to an ask-first path that names its closing path
+    for a no (``on_decline``): the call closes on that path, not back at the step."""
+    by_id = {path.id: path for path in spec.special_paths}
+    result = []
+    for path in spec.special_paths:
+        target = by_id.get(path.on_decline) if path.ask is not None and path.on_decline else None
+        step = next((step for step in ("negotiate", "confirm_record", "identity", "opening")
+                     if target is not None and step in path.available_in and _before(plan, step, one) is not None), None)
+        if step is None:
+            continue
+        scenario = _closing_case(plan, target, step, one, notes_for, f"special_{path.id}_declined", _before(plan, step, one))
+        scenario.actions[-1] = {**_enter(path), "decline": True}
+        result.append(scenario)
+    return result
 
 
 def _special_elsewhere_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
@@ -1355,6 +1446,46 @@ def _play_call_end(sim: Simulator, action: dict[str, Any]) -> bool:
     return False
 
 
+def _topic_choice(sim: Simulator, step: str, entry: str, said: dict[str, Any]) -> dict[str, Any]:
+    """The extraction follows the field's description: when the step's choice field offers the
+    special-topic value and names this path's situation, the turn carries that value."""
+    from .workflow import SPECIAL_TOPIC_VALUE
+
+    when = str(sim.globals.get(entry, {}).get("description", "")).rstrip(".")
+    for field in sim.nodes.get(step, {}).get("extraction_schema") or []:
+        if field.get("name") in said and SPECIAL_TOPIC_VALUE in (field.get("enum_values") or []) \
+                and when and when in field.get("description", ""):
+            return {**said, field["name"]: SPECIAL_TOPIC_VALUE}
+    return said
+
+
+def _inside_special(sim: Simulator, spec: PhoneAgentSpec, action: dict[str, Any]) -> None:
+    """The customer's turns inside a special path: the model fills its tool for the product
+    being discussed, or the customer answers its question (go ahead, or ``decline``)."""
+    from .workflow import SPECIAL_PROCEED, SPECIAL_STAY
+
+    for _ in range(3):
+        inside = sim.advance()
+        node = sim.nodes.get(inside, {})
+        if not inside.startswith(action["node"]) or node.get("node_type") != "conversation":
+            return
+        if node.get("tools"):
+            sim.tool_turn({spec.confirmation.data["product_number_field"]: action.get("number", 1)})
+            continue
+        if not any(field.get("name") == action.get("choice_variable") for field in node.get("extraction_schema") or []):
+            sim.turn({})  # a spoken-only path: its line, then back
+            continue
+        # The path asks first (F-055 ask). T-023: the answer is read by its operand, since a no
+        # may close the call (on_decline) instead of going back.
+        wanted = SPECIAL_STAY if action.get("decline") else SPECIAL_PROCEED
+        operands = {c.get("operand") for t in node.get("transitions", []) for c in _leaves(t["condition"])}
+        if wanted not in operands:
+            sim.problems.append(f"{inside} has no route for the answer {wanted!r}")
+            return
+        if not sim.turn({action["choice_variable"]: wanted}):
+            return
+
+
 def _special_entry(sim: Simulator, node: str) -> str:
     """A path that starts per step has its own entry (``special_<id>_at_<step>``)."""
     entry = f"{node}_at_{sim.advance()}"
@@ -1399,19 +1530,22 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
                 entry = f"{action['node']}_at_{waiting}"
                 if not sim.enter_special(entry if entry in sim.globals else action["node"]):
                     break
-                for _ in range(3):
-                    inside = sim.advance()
-                    node = sim.nodes.get(inside, {})
-                    if not inside.startswith(action["node"]) or node.get("node_type") != "conversation":
-                        break
-                    if node.get("tools"):
-                        # The model calls the path's tool for the product being discussed.
-                        sim.tool_turn({spec.confirmation.data["product_number_field"]: action.get("number", 1)})
-                    else:
-                        # The path asks first (F-055 ask): the customer still wants it.
-                        proceed = next((t for t in node.get("transitions", []) if t["target_node"] != PREVIOUS), None)
-                        operand = next((c.get("operand") for c in _leaves(proceed["condition"])), None) if proceed else None
-                        sim.turn({action["choice_variable"]: operand} if proceed else {})
+                _inside_special(sim, spec, action)
+            elif action["kind"] == "say_special":
+                # T-023: the turn sets the step's choice field and matches the path's intent.
+                entry = f"{action['node']}_at_{waiting}"
+                entry = entry if entry in sim.globals else action["node"]
+                said = dict(action["vars"])
+                if action.get("topic"):
+                    said = _topic_choice(sim, waiting, entry, said)
+                moved = sim.intent_turn(said, entry)
+                if moved == "step":
+                    failures.append(f"at {waiting} the step's own route takes the turn {action['vars']}, so "
+                                    f"{action['node']} never starts (the platform tries intents last)")
+                    break
+                if not moved:
+                    break
+                _inside_special(sim, spec, action)
             elif not _play_call_end(sim, action):
                 break
             counts[label] = counts.get(label, 0) + 1
@@ -1423,6 +1557,7 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
     final = END_CALL if sim.hung_up else sim.advance()
     sim.end_of_call(workflow.get("tools") or [])
     failures.extend(sim.problems)
+    failures.extend(_offer_loop_failures(sim))
     if final != END_CALL:
         failures.append(f"the call does not reach {END_CALL}; it waits at {final}")
     for label, expected in scenario.repeats.items():
@@ -1578,6 +1713,43 @@ def _play_all(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str,
     return results, plays
 
 
+def shadowed_intent_steps(spec: PhoneAgentSpec, workflow: dict[str, Any]) -> list[tuple[str, str]]:
+    """(step, problem) for each conversation step where special paths start by intent but its
+    choice field has no value that matches none of the step's routes and names their
+    situations (T-023, PUB-08). The platform tries the step's routes first, so a forced
+    choice hides the paths."""
+    from .workflow import SPECIAL_TOPIC_VALUE, choice_variables
+
+    choices = choice_variables(spec)
+    globals_ = workflow.get("global_nodes", {})
+    problems = []
+    for key, node in workflow.get("nodes", {}).items():
+        starts = [name for name, other in globals_.items()
+                  if (other.get("condition") or {}).get("operator") == "matches_intent"
+                  and key not in (other.get("excluded_nodes") or [])]
+        routed = {leaf.get("variable") for transition in node.get("transitions", [])
+                  for leaf in _leaves(transition.get("condition") or {})}
+        fields = [field for field in node.get("extraction_schema") or []
+                  if field.get("name") in choices and field["name"] in routed]
+        if node.get("node_type") != "conversation" or not starts or not fields:
+            continue
+        whens = [str(globals_[name].get("description", "")).rstrip(".") for name in starts]
+        for field in fields:
+            value = SPECIAL_TOPIC_VALUE if SPECIAL_TOPIC_VALUE in (field.get("enum_values") or []) else None
+            taken = value is not None and any(
+                not t.get("is_tool_call") and holds(t["condition"], {field["name"]: value})
+                for t in node.get("transitions", []))
+            missing = [when for when in whens if when not in field.get("description", "")]
+            if value is None or taken or missing:
+                problems.append((key, (
+                    f"special paths start here by intent ({', '.join(sorted(starts)[:4])}), but the choice "
+                    f"{field['name']} has no value that routes nowhere and names them"
+                    + (f" (a step route takes {value!r})" if taken else "")
+                    + (f" (not named: {missing[0]!r})" if missing and value else "")
+                    + "; a forced choice hides the paths, since the platform tries the step's routes first")))
+    return problems
+
+
 def run_selfcheck(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str | None = None) -> Report:
     """Play every scenario of ``spec`` on ``workflow``. Never raises.
 
@@ -1598,6 +1770,13 @@ def run_selfcheck(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str | Non
         played += len(more)
         plays += more_plays
         results += [item for item in more if not item.passed]
+    try:
+        shadowed = shadowed_intent_steps(spec, workflow)
+    except Exception as exc:  # a render shape the check does not know
+        shadowed = [("-", f"check failed: {type(exc).__name__}: {exc}")]
+    for step, problem in shadowed:
+        results.append(Result(f"intent_shadow[{step}]", False, BUILDER, problem, step=step))
+        played += 1
     for index, label in unreached_rows(spec, plays):
         if "(returning path)" in label:
             # Several products: reached through the notes, which the closing does not derive yet
@@ -1693,3 +1872,99 @@ def spoken_per_turn(workflow: dict[str, Any], start: str, within: tuple[str, ...
 
 
 SelfCheck = Callable[[PhoneAgentSpec], Report]
+
+
+# ---------------------------------------------------------------------------
+# T-022 (F-076): dates said in words, and a turn without a readable date
+# ---------------------------------------------------------------------------
+
+SPOKEN_UNITS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+                "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth",
+                "eighteenth", "nineteenth"]
+SPOKEN_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+                 "November", "December"]
+# A date answer the offer check cannot read: no day, no weekday, no month.
+UNREADABLE_DATE = "when my salary comes in"
+
+
+def spoken_ordinal(number: int) -> str:
+    """1 -> "first", 23 -> "twenty-third", 30 -> "thirtieth"."""
+    if number < 20:
+        return SPOKEN_UNITS[number - 1]
+    tens = {2: "twenty", 3: "thirty"}[number // 10]
+    if number % 10 == 0:
+        return tens[:-1] + "ieth"
+    return tens + "-" + SPOKEN_UNITS[number % 10 - 1]
+
+
+def digit_ordinal(number: int) -> str:
+    suffix = "th" if 10 <= number % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def spoken_date_forms(day: datetime.date) -> dict[str, str]:
+    """The ways a customer says ``day`` that the offer check must read (PUB-04, asks_back)."""
+    month = SPOKEN_MONTHS[day.month - 1]
+    return {
+        "word_ordinal": f"the {spoken_ordinal(day.day)} of {month}",
+        "word_ordinal_capital": f"{spoken_ordinal(day.day).capitalize()} of {month}",
+        "digit_ordinal": f"{digit_ordinal(day.day)} of {month}",
+        "month_first": f"{month} {digit_ordinal(day.day)}",
+        "month_the_word": f"{month} the {spoken_ordinal(day.day).replace('-', ' ')}",
+    }
+
+
+def _spoken_date_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """T-022: a good day said in words is promised on that day; an answer without a readable
+    date gets the latest allowed date proposed, and a plain yes takes it."""
+    day = plan.good_day(one)
+    if not day:
+        return []
+    product = one[0]
+    result = []
+    for name, phrase in spoken_date_forms(datetime.date.fromisoformat(day)).items():
+        result.append(Scenario(
+            f"spoken_date_{name}", [*plan.reach_negotiation(), plan.offer(1, phrase), plan.confirm()],
+            "promise_recorded", one, promises=[plan.promise(product, day)],
+            notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="check_offer"))
+    latest, _ = plan.calendar.outcome(plan.calendar.deadline(product).isoformat(), product)
+    result.append(Scenario(
+        "spoken_date_unreadable_then_yes",
+        [*plan.reach_negotiation(), plan.offer(1, UNREADABLE_DATE), plan.accept(1), plan.confirm()],
+        "promise_recorded", one, promises=[plan.promise(product, latest.isoformat())],
+        notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="check_offer"))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# T-025: fields only a model fills stay empty; offer checks that go nowhere
+# ---------------------------------------------------------------------------
+
+# Offer checks in a row that handle no product: more is a loop (check_offer <-> offer_say).
+NO_PROGRESS_PASSES = 3
+
+
+def _without_product_field(scenarios: list[Scenario]) -> list[Scenario]:
+    """The same calls with the product list number left empty, as the live extractor leaves
+    it (T-024: it never filled it): the ledger must not change."""
+    result = []
+    for scenario in scenarios:
+        actions = [{**action, "vars": {name: value for name, value in action["vars"].items() if name != OFFER_PRODUCT}}
+                   if action.get("kind") == "say" and OFFER_PRODUCT in action.get("vars", {}) else action
+                   for action in scenario.actions]
+        if actions != scenario.actions:
+            result.append(dataclasses.replace(scenario, id=scenario.id + "_no_product_field", actions=actions))
+    return result
+
+
+def _offer_loop_failures(sim: Simulator) -> list[str]:
+    """A run of offer checks that changes neither the accepted offers nor the noted products."""
+    run = longest = 0
+    previous = None
+    for snapshot in sim.offer_passes:
+        run = run + 1 if snapshot == previous else 1
+        longest = max(longest, run)
+        previous = snapshot
+    if longest > NO_PROGRESS_PASSES:
+        return [f"loop: {longest} offer checks in a row handle no product (check_offer <-> offer_say)"]
+    return []

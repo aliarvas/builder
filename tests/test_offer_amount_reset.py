@@ -103,7 +103,10 @@ class PeriodAnswerTests(unittest.TestCase):
                 result = Call().turn(offer_date=phrase, offer_product_number=1)
                 self.assertEqual("missing", result["offer_verdict"])
                 message = result["offer_message"]
-                self.assertEqual("Could you tell me the exact day you would like to pay?", message)
+                # T-022 (F-076): the code also proposes the latest allowed date and keeps it.
+                self.assertTrue(message.startswith("Could you tell me the exact day you would like to pay?"), message)
+                self.assertIn("The latest date I can record for the credit card ending 0377 is Monday, 2 November.", message)
+                self.assertEqual("2026-11-02", result["offer_suggested_date"])
                 self.assertNotIn("did not catch", message)
                 self.assertEqual("", agent_directed(message))
 

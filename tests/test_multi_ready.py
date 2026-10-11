@@ -213,13 +213,18 @@ class MultiProductCaseTests(unittest.TestCase):
                 session.record_all()
                 self.assertLedger(session, case)
 
-    def test_pub11_one_turn_for_all_three_still_needs_two_more_turns(self):
-        # Risk record: an extraction cannot carry "all products"; a product number left empty
-        # with several products is product_unknown, and the bank line asks which product.
+    def test_pub11_one_turn_for_all_three(self):
+        # T-025 (was a risk record): an empty product number is the product under discussion,
+        # and "all three" names every product, so one turn checks all three.
         session = Session(AB_SPECS["tagged"], CASES["PUB-11"])
         session.say(offer_date="this Friday")
-        self.assertEqual("product_unknown", session.vars["offer_verdict"])
+        self.assertEqual("ok", session.vars["offer_verdict"])
+        self.assertEqual(1, session.vars["offers_accepted_count"])
         self.assertEqual("offer_say", session.step)
+        whole = Session(AB_SPECS["tagged"], CASES["PUB-11"])
+        whole.say(offer_date="this Friday", offer_product_name="all three")
+        self.assertEqual(3, whole.vars["offers_accepted_count"])
+        self.assertEqual("confirm_record", whole.step)
 
     def test_pub13_one_date_after_the_loan_deadline(self):
         # "Wants to pay both on 30 October. Accepts when told the loan has an earlier latest date."
