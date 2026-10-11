@@ -179,9 +179,16 @@ class RenderTests(unittest.TestCase):
         spec = parse_spec(copy.deepcopy(FIXTURE_B))
         data = copy.deepcopy(FIXTURE_B)
         del data["closing"]["product_notes"]["outcome_from_notes"]
+        # T-017: without the block, the returning paths' notes still choose the row; the T-011
+        # body and its sent-reason state are not rendered. With no such path, nothing at all.
         plain = build_spec_workflow(parse_spec(data), kit_tools(0))
-        self.assertNotIn(NOTES_OUTCOME, plain["nodes"])
-        text = json.dumps(plain)
+        self.assertIn("special_pairs", json.dumps(plain["nodes"][NOTES_OUTCOME]))
+        self.assertNotIn("note_reasons_sent", json.dumps(plain))
+        data["special_paths"] = [path for path in data["special_paths"] if path["then"] == "close"]
+        data["outcomes"] = [row for row in data["outcomes"] if row["on"] or row["outcome"] == "transferred"]
+        bare = build_spec_workflow(parse_spec(data), kit_tools(0))
+        self.assertNotIn(NOTES_OUTCOME, bare["nodes"])
+        text = json.dumps(bare)
         for marker in ("note_reasons_sent", "note_reasons_special", "NOTES_TABLE"):
             self.assertNotIn(marker, text)
         derived = build_spec_workflow(spec, kit_tools(0))

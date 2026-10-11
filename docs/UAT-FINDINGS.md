@@ -30,6 +30,62 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-077: A returning special path's note decides the outcome, but the closing ignores it
+
+- **Date:** 2026-10-11
+- **Brief / case:** organizer rehearsal (`organizer-sim/hidden-01-clean`, `hidden-02-raw`), offline
+- **Run:** `traces/rehearsal-clean.print.log`, `traces/rehearsal-raw.print.log`
+- **Symptom:**
+  - "Already paid", "dispute" and "hardship declined" are returning paths that write a note.
+  - The brief derives the outcome from those notes ("all facilities paid → resolved elsewhere").
+  - The spec had no `outcome_from_notes` block, so the call closed with the default refusal row (self-check `reach_outcomes` builder failures).
+- **Root cause:** The closing derives the outcome from the notes only through the optional block (T-011), which the extraction did not fill for this rule shape.
+- **Category:** routing
+- **Fix / lesson:** T-017: without a block, when every product's own note comes from returning paths that name the same pair, close with that pair.
+- **Status:** fixed offline (T-017)
+- **Retest:** rehearsal spec self-check 0 failures (was 3); live check open
+
+### F-076: Raw bank material overflowed the extraction output limit and stopped the build
+
+- **Date:** 2026-10-11
+- **Brief / case:** organizer rehearsal `hidden-02-raw` (mail, policy, CSV, calendar, memo)
+- **Run:** `traces/rehearsal-raw.failed.log`
+- **Symptom:** `extract:outcomes` hit 16000 output tokens. The build stopped with no agent.
+- **Root cause:** Evidence quotes from raw documents make long replies; the limit was set for clean briefs.
+- **Category:** extraction / timeout
+- **Fix / lesson:** Output limit 48000, request timeout 600 s (89d773d). Re-run: build ok in 2 min 50 s, 7 model calls, 48k output tokens in total.
+- **Status:** fixed (89d773d)
+- **Retest:** rehearsal raw build passed
+
+### F-075: The account-failed close speaks the promise-failure sentence
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-08 live run on version 17 (`tasks/T-018-report.md`)
+- **Run:** call `fdee69c8-1322-4676-9614-2e0d44b9b56b`
+- **Symptom:** When the bank mock crashed, the account read failed and the agent said "I could not record your promise", although no promise was discussed.
+- **Root cause:** The spec maps `account_failed` to the service-error row, whose sentence was written for a failed promise.
+- **Category:** honesty
+- **Fix / lesson:** A neutral line for a derived state whose row sentence belongs to another state.
+- **Status:** open
+- **Retest:** pending
+
+### F-074: One turn with a business answer and a side question loses the side question
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-04 live run on version 17
+- **Run:** call `5967a86c-856f-4494-aa26-80d58592951c`
+- **Symptom:** "I can pay on 6 November. Are you a robot?" The date was handled; the robot question was never answered, so the judge failed the case.
+- **Root cause:** A route takes one branch per turn. The business branch won, and the spoken-only special path was never entered.
+- **Category:** routing / policy
+- **Fix / lesson:** Proposal: the speaking steps after a business route get a generic line built from the spoken-only returning paths ("if the last turn also asked X, say Y first"). Medium risk; not done before the deadline.
+- **Status:** open
+- **Retest:** pending
+
+Run notes from the same live run (no builder fault):
+- PUB-05: the model was slow (about 60 s of silence) and the customer hung up before the hardship turn.
+- PUB-08: the bank mock worker crashed (Cloudflare "Worker threw exception").
+- PUB-10: the judge counted the required "this call is recorded" disclosure as a premature "recorded".
+
 All five entries F-069..F-073 come from the same run:
 - **Date:** 2026-10-11
 - **Brief / case:** Brief A, voice test from the UI without case variables (placeholders)

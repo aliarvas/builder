@@ -38,7 +38,7 @@ from .callback import (
 from .offer_check import ACCEPTS_YES, OFFER_ACCEPTS, OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT
 from .selfcheck_calendar import SpecCalendar, first_rule
 from .record_loop import RECORD_PROMISE
-from .spec import FRAMEWORK_NONE_VALUE, SPECIAL_THEN_CLOSE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec
+from .spec import FRAMEWORK_NONE_VALUE, SPECIAL_THEN_CLOSE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec, special_note_pairs
 from .tools_from_openapi import CALL_VARIABLES
 
 END_CALL = "end_call"
@@ -619,16 +619,17 @@ class _Plan:
                 notes.append((pid, close_reason))
             else:
                 notes.append((pid, self.notes["refused_reason"]))
-        return Notes(sorted(notes), own)
+        return Notes(sorted(notes), own, {pid for pid in written or {} if pid not in promised})
 
 
 class Notes(list):
     """Expected notes; ``own`` names the products whose note a special path or a per-product
     refusal or record failure wrote (not the note loop's default reason), T-011."""
 
-    def __init__(self, notes: list[tuple[str, str]], own: set[str]) -> None:
+    def __init__(self, notes: list[tuple[str, str]], own: set[str], special: set[str] = frozenset()) -> None:
         super().__init__(notes)
         self.own = set(own)
+        self.special = set(special)   # T-017: the products a returning special path noted
 
 
 def _row_reason(spec: PhoneAgentSpec, state: str) -> str:
@@ -1276,7 +1277,9 @@ def _notes_pair(spec: PhoneAgentSpec, scenario: Scenario, pair: tuple[str, str])
     closes on the pair the expected notes give (in account order), when it is a table row."""
     notes = spec.closing.data.get("product_notes") or {}
     rule = notes.get("outcome_from_notes")
-    if (not rule or scenario.promises or not scenario.notes or pair[0] in notes.get("skip_outcomes", [])
+    if not rule:
+        return _special_notes_pair(spec, scenario, pair)
+    if (scenario.promises or not scenario.notes or pair[0] in notes.get("skip_outcomes", [])
             or scenario.expect_state == "special_tool_failed"):
         return pair
     by_product = dict(scenario.notes)
@@ -1291,6 +1294,24 @@ def _notes_pair(spec: PhoneAgentSpec, scenario: Scenario, pair: tuple[str, str])
     others = [by_product[pid] for pid in ids if by_product[pid] != rule["all_reason"]]
     derived = (rule["otherwise_outcome"], others[0]) if others else (rule["all_outcome"], rule["all_outcome_reason"])
     return derived if derived in {(item.outcome, item.reason) for item in spec.outcomes} else pair
+
+
+def _special_notes_pair(spec: PhoneAgentSpec, scenario: Scenario, pair: tuple[str, str]) -> tuple[str, str]:
+    """T-017: without that block, a call without a promise whose every product a returning
+    special path noted, all naming the same row, closes on that row (as the generated step)."""
+    pairs = special_note_pairs(spec)
+    notes = spec.closing.data.get("product_notes") or {}
+    if (not pairs or scenario.promises or not scenario.notes or pair[0] in notes.get("skip_outcomes", [])
+            or scenario.expect_state == "special_tool_failed"):
+        return pair
+    by_product = dict(scenario.notes)
+    ids = [str(product[spec.account.data["product_id_field"]]) for product in scenario.products]
+    # A plain list, as a test may give, counts every note as written by a special path.
+    special = getattr(scenario.notes, "special", set(by_product))
+    derived = {pairs.get(by_product.get(pid, "")) if pid in special else None for pid in ids}
+    if len(derived) != 1 or None in derived:
+        return pair
+    return derived.pop()
 
 
 def _close_tool(workflow: dict[str, Any], spec: PhoneAgentSpec) -> str:

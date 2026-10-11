@@ -24,7 +24,7 @@ from .offer_check import (
 )
 from .prompts import CLOSING_FALLBACK_SAY, PERSUASION_STATE_LINE, PRODUCT_END_COUNTED_DESCRIPTION, PRODUCT_INTENT_DESCRIPTION
 from .record_loop import FAILED_NUMBERS, RECORDED_NUMBERS
-from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec, SpecError
+from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec, SpecError, special_note_pairs
 from .tools_from_openapi import CALL_VARIABLES
 
 PRODUCT_REFUSAL = "product_refusal"
@@ -153,7 +153,8 @@ def add_product_steps(
         # after the loop (closing only sets the provisional one the loop needs).
         after_notes = "closing_say"
         rule = spec.closing.data["product_notes"].get("outcome_from_notes")
-        if rule:
+        # T-017: without the block, the returning special paths' note rows (when there are any).
+        if rule or special_note_pairs(spec):
             after_notes = NOTES_OUTCOME
             if warnings is not None:
                 warnings.extend(notes_outcome_gaps(spec))

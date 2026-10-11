@@ -55,8 +55,14 @@ class UnreachableOutcomeTests(unittest.TestCase):
 
     def test_rows_named_only_by_a_returning_path_get_their_own_warning(self):
         # Brief B: paid and dispute are per-product notes (then return). The recorded extraction
-        # has no outcome_from_notes block, so the closing does not derive them (AB-FRESH risk 5).
+        # has no outcome_from_notes block; since T-017 the closing derives them from the paths'
+        # notes. A path whose note names no reason is not derived (AB-FRESH risk 5).
         data = json.loads((ROOT / "tests/fixtures/extract/brief-ab-extracted-v2.json").read_text(encoding="utf-8"))
+        self.assertEqual([], unreachable_outcomes(parse_spec(copy.deepcopy(data))))
+        spec = data.get("spec", data)
+        for path in spec["special_paths"]:
+            if path["then"] != "close":
+                path["tool_args"] = {}
         found = unreachable_outcomes(parse_spec(data))
         self.assertEqual(2, len(found), found)
         self.assertTrue(all("only a special path that returns names it" in line for line in found))
@@ -66,7 +72,8 @@ class UnreachableOutcomeTests(unittest.TestCase):
         data = json.loads((ROOT / "tests/fixtures/spec-brief-b.json").read_text(encoding="utf-8"))
         self.assertEqual([], unreachable_outcomes(parse_spec(data)))
         del data["closing"]["product_notes"]["outcome_from_notes"]
-        self.assertEqual(2, len(unreachable_outcomes(parse_spec(data))))
+        # T-017: without the block the returning paths' notes still lead to their rows.
+        self.assertEqual([], unreachable_outcomes(parse_spec(data)))
 
 
 class QuotedSpeechTests(unittest.TestCase):

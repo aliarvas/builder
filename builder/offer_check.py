@@ -11,7 +11,7 @@ import json
 from typing import Any
 
 from .prompts import OFFER_VERDICT_MESSAGES
-from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec
+from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec, special_note_pairs
 
 # Workflow variables owned by the offer steps (framework names, not brief data).
 OFFER_DATE = "offer_date"
@@ -1070,20 +1070,61 @@ except Exception:
 """
 
 
+# T-017: without outcome_from_notes, a call without a promise where returning special paths
+# wrote every product's note, all naming the same row, closes on that row. Anything else
+# (a product without such a note, two different rows) keeps the outcome the call state gives.
+SPECIAL_NOTES_OUTCOME_BODY = """try:
+    try:
+        recorded_count = int(vars.get('promise_recorded_count') or 0)
+    except Exception:
+        recorded_count = 0
+    recorded = json_value(CONFIG['recorded_numbers'], list())
+    outcome = str(vars.get('close_outcome') or '')
+    state = str(vars.get('close_resolved_state') or '')
+    own_pair = state == 'special_tool_failed' or state.startswith('special:')
+    if recorded_count == 0 and not recorded and not own_pair and outcome not in CONFIG['notes']['skip_outcomes']:
+        products = load_products()
+        special = json_value(CONFIG['note_reasons_special'], dict())
+        pairs = [CONFIG['special_pairs'].get(str(special.get(str(index)) or '')) for index in range(1, len(products) + 1)]
+        if products and all(pairs) and len(set(tuple(pair) for pair in pairs)) == 1:
+            pair = tuple(pairs[0])
+            row = next((row for row in NOTES_TABLE if (row[0], row[1]) == pair), None)
+            if row is not None and pair != (outcome, str(vars.get('close_reason') or '')):
+                vars['close_resolved_state'] = 'notes:' + (pair[1] or pair[0])
+                vars['close_outcome'] = row[0]
+                vars['close_reason'] = row[1]
+                if state not in CONFIG['failure_states']:
+                    vars['closing_sentence'] = row[2] or CONFIG['fallback_sentence']
+except Exception:
+    pass
+"""
+
+
 def notes_outcome_code(spec: PhoneAgentSpec, recorded_numbers: str, fallback_sentence: str) -> str:
-    """T-011: rewrite the call's outcome from the product notes after the note loop."""
+    """T-011: rewrite the call's outcome from the product notes after the note loop (T-017:
+    from the returning special paths' notes when the spec has no outcome_from_notes)."""
     config = _full_config(spec, [])
     config.update({
         "notes": spec.closing.data["product_notes"], "recorded_numbers": recorded_numbers,
-        "note_reasons_sent": NOTE_REASONS_SENT, "note_reasons_special": NOTE_REASONS_SPECIAL,
+        **({"note_reasons_sent": NOTE_REASONS_SENT} if _notes_rule(spec) else {}),
+        "note_reasons_special": NOTE_REASONS_SPECIAL,
         "fallback_sentence": fallback_sentence, "failure_states": ["promise_failed", "account_failed"],
     })
     table = [[item.outcome, item.reason, item.say.text] for item in spec.outcomes]
+    if not _notes_rule(spec):
+        config["special_pairs"] = {reason: list(pair) for reason, pair in special_note_pairs(spec).items()}
+        return _prelude(spec, config) + f"NOTES_TABLE = {_py_literal(table)}\n" + SPECIAL_NOTES_OUTCOME_BODY
     return _prelude(spec, config) + f"NOTES_TABLE = {_py_literal(table)}\n" + NOTES_OUTCOME_BODY
 
 
-def _notes_outcome(spec: PhoneAgentSpec) -> bool:
+def _notes_rule(spec: PhoneAgentSpec) -> bool:
     return bool((spec.closing.data.get("product_notes") or {}).get("outcome_from_notes"))
+
+
+def _notes_outcome(spec: PhoneAgentSpec) -> bool:
+    """The closing chooses the outcome again from the notes: the spec's rule (T-011) or the
+    returning special paths' rows (T-017)."""
+    return _notes_rule(spec) or bool(special_note_pairs(spec))
 
 
 def product_refusal_code(spec: PhoneAgentSpec) -> str:
@@ -1111,7 +1152,7 @@ def note_next_code(spec: PhoneAgentSpec, recorded_numbers: str, special_results:
         "note_state": NOTE_STATE, "note_number": NOTE_NUMBER, "note_product_id": NOTE_PRODUCT_ID,
         "note_reason": NOTE_REASON, "note_result": NOTE_RESULT,
     })
-    if _notes_outcome(spec):
+    if _notes_rule(spec):
         config["note_reasons_sent"] = NOTE_REASONS_SENT
         return _prelude(spec, config) + NOTE_NEXT_BODY + NOTE_SENT_BODY
     return _prelude(spec, config) + NOTE_NEXT_BODY

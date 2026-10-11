@@ -50,7 +50,7 @@ from .record_loop import (
 from .product_notes import NOTE_RECORD, PRODUCT_REFUSAL, add_product_steps, refusal_values
 from .spec import (
     ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec,
-    Rule, SpecError, SpecialPath, notes_outcome_pairs,
+    Rule, SpecError, SpecialPath, notes_outcome_pairs, special_note_pairs,
 )
 from .spoken import agent_directed, quoted_speech, spoken_words
 from .callback import (
@@ -1903,6 +1903,8 @@ def unreachable_outcomes(spec: PhoneAgentSpec) -> list[str]:
     returning = {(path.outcome, path.reason) for path in spec.special_paths if path.then != "close" and path.tool}
     # T-011: the pairs the closing derives from the notes are reached.
     closed |= notes_outcome_pairs(spec.closing.data.get("product_notes"))
+    # T-017: without that block, the rows the returning paths' notes lead to.
+    closed |= set(special_note_pairs(spec).values())
     return [
         f"unreachable_outcome outcomes[{index}] {item.outcome}/{item.reason or '-'}: "
         + ("only a special path that returns names it; the closing does not derive it"

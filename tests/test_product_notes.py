@@ -10,7 +10,7 @@ import warnings
 from pathlib import Path
 
 from builder.product_notes import NOTES_DROPPED
-from builder.spec import SpecError, parse_spec
+from builder.spec import SpecError, parse_spec, special_note_pairs
 from builder.workflow import build_spec_workflow, special_result_variable
 from tests.test_multi_ready import AB_SPECS, CASES, Session, load
 from tests.test_offer_date_only import TOOLS, code_of
@@ -98,8 +98,9 @@ class StructureTests(unittest.TestCase):
                     self.assertEqual("{{note_reason}}", body[note["reason_field"]]["default"])
                     self.assertTrue(all(prop.get("default", "").startswith("{{") for prop in body.values()))
                     self.assertNotIn("text", body)  # no model fills it here
-                    # T-011: the outcome from the notes runs after the loop when the spec has it.
-                    derived = bool(note.get("outcome_from_notes"))
+                    # T-011: the outcome from the notes runs after the loop when the spec has it;
+                    # T-017: or when returning special paths' notes name rows.
+                    derived = bool(note.get("outcome_from_notes")) or bool(special_note_pairs(parse_spec(copy.deepcopy(data))))
                     self.assertEqual(derived, "notes_outcome" in nodes)
                     self.assertEqual(["note_record", "notes_outcome" if derived else "closing_say"],
                                      edges(nodes["note_next"]))

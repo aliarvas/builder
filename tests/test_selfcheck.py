@@ -39,13 +39,12 @@ SPECS = {
 }
 A_PLUS_B = ("spec-brief-b.json", "brief-ab-extracted.json", "brief-ab-extracted-tagged.json", "brief-ab-extracted-v2.json")
 # Known gaps (listed in tasks/T-010-report.md):
-# - In the recorded A+B extractions the "paid" and "dispute" rows are named only by a returning
-#   per-product path; they have no outcome_from_notes block (T-011; spec-brief-b has one).
+# - The oldest A+B extraction has no product_notes, so its "paid" and "dispute" rows are named
+#   only by a returning path (the later recordings reach them since T-017).
 # - The REPRO 13:00 extraction has no path for a declined hardship offer (F-065).
 KNOWN = {
     **{name: {f"reach_outcomes[{index}]" for index in indexes} for name, indexes in (
-        ("brief-ab-extracted.json", (1, 7)),
-        ("brief-ab-extracted-tagged.json", (1, 7)), ("brief-ab-extracted-v2.json", (1, 7)))},
+        ("brief-ab-extracted.json", (1, 7)),)},
     "brief-a-repro-1300.json": {"reach_outcomes[6]"},
 }
 

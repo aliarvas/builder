@@ -407,6 +407,29 @@ def notes_outcome_pairs(notes: dict[str, Any] | None) -> set[tuple[str, str]]:
     return pairs
 
 
+
+def special_note_pairs(spec: "PhoneAgentSpec") -> dict[str, tuple[str, str]]:
+    """T-017: without ``outcome_from_notes``, the note reason each returning special path with
+    the note tool writes, mapped to that path's outcome row. A reason two paths name with
+    different rows, a pair that is no table row, or an outcome the notes skip is left out."""
+    notes = spec.closing.data.get("product_notes") or {}
+    if not notes or notes.get("outcome_from_notes"):
+        return {}
+    rows = {(item.outcome, item.reason) for item in spec.outcomes}
+    found: dict[str, tuple[str, str]] = {}
+    clash: set[str] = set()
+    for path in spec.special_paths:
+        if path.then == SPECIAL_THEN_CLOSE or not path.tool or path.tool != notes.get("tool"):
+            continue
+        reason = str((path.tool_args or {}).get(notes.get("reason_field", ""), "") or "")
+        pair = (path.outcome, path.reason or "")
+        if not reason or pair not in rows or path.outcome in (notes.get("skip_outcomes") or []):
+            continue
+        if found.get(reason, pair) != pair:
+            clash.add(reason)
+        found[reason] = pair
+    return {reason: pair for reason, pair in found.items() if reason not in clash}
+
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # Who-answered value the builder adds for a bare greeting or a line check ("Hello?").
