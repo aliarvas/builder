@@ -153,11 +153,19 @@ OPENING_REASK_TASK_TEMPLATE = PromptDefinition(
     ("{address}", "{question}", "{unclear}", "{forbidden}", "{rules}"),
 )
 WHO_ANSWERED_DESCRIPTION = PromptDefinition(
-    "WHO_ANSWERED_DESCRIPTION", "Extraction description of the who-answered variable in the opening steps.",
+    "WHO_ANSWERED_DESCRIPTION", "Extraction description of the who-answered variable in the opening steps; "
+    "every value is described (F-071). A line whose value list is empty is left out.",
     "extraction model", "builder/workflow.py — opening and opening_reask extraction_schema",
-    "Who answered the call. {greeting}: the person only greets or checks the line "
-    "(for example \"Hello?\" or \"Who is this?\") and has not answered the question yet.",
-    ("{greeting}",),
+    "Who answered the call.\n"
+    "{confirm}: the person clearly confirms they are the customer. The documents' rule: {unclear_rule}\n"
+    "{other}: only when the person clearly says they are not the customer (for example someone else's name, "
+    "\"she is not here\", \"I am his wife\").\n"
+    "{close}: only when the person clearly says what that value names.\n"
+    "{stay}: anything else that does not confirm, including a garbled or half-heard answer, an answer in "
+    "another language, or a question back.\n"
+    "{greeting}: the person only greets or checks the line (for example \"Hello?\" or \"Who is this?\") and "
+    "has not answered the question yet.",
+    ("{confirm}", "{unclear_rule}", "{other}", "{close}", "{stay}", "{greeting}"),
 )
 THIRD_PARTY_TASK_TEMPLATE = PromptDefinition(
     "THIRD_PARTY_TASK_TEMPLATE", "Handles a person other than the customer.", "phone agent",
@@ -173,6 +181,25 @@ THIRD_PARTY_INTENT_DESCRIPTION = PromptDefinition(
     "payment information is not a closing situation: choose none so the agent can decline to disclose details "
     "and ask when the customer can be reached.",
     ("{close_values}",),
+)
+THIRD_PARTY_CUSTOMER_DESCRIPTION = PromptDefinition(
+    "THIRD_PARTY_CUSTOMER_DESCRIPTION",
+    "Adds the framework value for a third party who is in fact the customer (F-069).",
+    "extraction model", "builder/workflow.py — appended to the third_party intent extraction field",
+    "{value}: the person says they are the customer themselves, or the customer has come to the phone.",
+    ("{value}",),
+)
+NO_SECURITY_QUESTIONS_LINE = PromptDefinition(
+    "NO_SECURITY_QUESTIONS_LINE",
+    "Keeps security questions out of the steps before identity verification (F-070).",
+    "phone agent", "builder/workflow.py — opening, opening_reask, third_party and third_party_ask task_message",
+    "Never ask security questions or for personal data in this step; only the program verifies identity, later.",
+)
+NO_GOODBYE_LINE = PromptDefinition(
+    "NO_GOODBYE_LINE",
+    "Keeps the goodbye in the closing step (F-072).",
+    "phone agent", "builder/workflow.py — every conversation task_message except the step that says the closing sentence",
+    "Never say goodbye or end the call yourself; the program closes the call.",
 )
 THIRD_PARTY_CLOSE_KIND_DESCRIPTION = PromptDefinition(
     "THIRD_PARTY_CLOSE_KIND_DESCRIPTION",
@@ -769,7 +796,10 @@ PROMPTS = (
     WHO_ANSWERED_DESCRIPTION,
     THIRD_PARTY_TASK_TEMPLATE,
     THIRD_PARTY_INTENT_DESCRIPTION,
+    THIRD_PARTY_CUSTOMER_DESCRIPTION,
     THIRD_PARTY_CLOSE_KIND_DESCRIPTION,
+    NO_SECURITY_QUESTIONS_LINE,
+    NO_GOODBYE_LINE,
     IDENTITY_TASK_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
     OFFER_VERDICT_MESSAGES,

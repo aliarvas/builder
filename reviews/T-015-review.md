@@ -1,0 +1,28 @@
+# T-015 review (claude-dev, F-069…F-072 before-identity fixes)
+
+**Reviewer:** claude-reviewer · **Scope:** `builder/workflow.py` (`_add_customer_return`, `_apply_fixed_lines`, `who_answered_description`), `builder/spec.py` (`THIRD_PARTY_CUSTOMER_VALUE`), `builder/prompts.py` (new lines and descriptions), `_customer_return_scenarios` in `selfcheck.py`, `tests/test_before_identity.py`, the re-pinned `test_notes_outcome` render pin, `tasks/T-015-report.md`.
+**Method:** offline. Rendered the live Brief A and the A+B specs; read the third-party transitions and the reset step; walked 15 third-party ↔ confirmation round trips with the self-check simulator; measured prompt sizes; `python3 -m unittest`: **537 OK**. Scratchpad only; no Freya, no model, no env, no edits.
+
+## Decision: **merge edilebilir** (LOW notes only)
+
+## What is right
+
+- **The return route cannot skip identity.** `third_party` → `third_party_customer` (code) → `opening_reask`; from there only the confirmation values reach `identity_check` (the same route as from the opening), third-party values go back to `third_party`, unclear ones to `opening_unclear`, close values to `closing`. I walked it: after "customer_on_line" the call waits at `opening_reask` and nothing reaches negotiation without the confirmation and the identity steps. A customer who says a callback time **and** `customer_on_line` in the same turn goes to the customer route (the new route sits before `callback_check` in the rendered order), so no callback is booked for someone who is the customer.
+- **No loop in the code.** 15 alternations of "someone else answers" and "the customer is here" ran without a code error or dead end; each round needs a customer turn at `opening_reask` and at `third_party`, so the call can only go on while the person keeps talking, and every step has `max_turn_transition = close_turn_limit`.
+- **Reset of answers:** the step sets the third-party intent and the who-answered value to the framework value `none`, which routes nowhere, so the old answers cannot route again and the confirmation question decides. `third_party_ask` (the callback re-ask copy) has the same value and route (checked in the render). A spec that already uses the value name keeps its own routes (tested).
+- **C2/F-070:** the no-security-questions line sits in exactly `opening`, `opening_reask`, `third_party` and `third_party_ask`; **C4/F-072:** the no-goodbye line sits in every conversation step with no call-end route (today: all of them). I read the rendered prompts of the special-path and transfer steps: none tells the model to say a farewell itself, so the line contradicts nothing; the goodbye comes from `closing_say`.
+- **C3/F-071:** every opening enum value except `none` has a description line, composed from the spec's own value lists and the documents' unclear rule (this text goes to the extraction model, so it is outside the prompt budget).
+- **Prompt budget growth** (measured by `workflow_prompt_estimates`, matches the report): before-identity steps +45 tokens, every other conversation step +18/19. Live Brief A negotiate 1457 → **1476** (target 1200, hard limit 1500, 24 tokens of room); A+B v2 negotiate 1639 → **1658** and AB-tagged 1623, both already over 1500 and shipped with `budget_exceeded_but_shipped`, as the build allows. The staged budget keeps its order. The lint tests pin both lines to the right steps.
+- **Byte-identical pin:** `test_brief_a_renders_byte_identically` was re-pinned on purpose. I compared the earlier render with the T-015 and T-014 changes in mind: the differences are the new fixed lines, the opening description, the new route and step, and the `callback_check` code (T-014). The pin comment says it must follow the next callback change; it will, since T-014 needs a fix (see its review), so expect one more re-pin.
+- **No brief value in `builder/`:** `customer_on_line` is a framework value like `greeting` and `none`; the descriptions use the spec's own lists; leak test green (the report notes it caught a first placeholder key).
+
+## Findings (all LOW)
+
+1. **Stale third-party state after a return.** The reset clears the intent and the who-answered value only. `third_party_close_kind`, the close re-ask count and the callback day/time texts stay. If the person is a third party again, a leftover count can end the call a little early, and a leftover time text with a new `callback` intent will be used. Reset those too (they are all framework variables of the third-party step).
+2. **No bound on the round trips.** The loop is bounded only by the customer's patience and the turn limit per step. A counter in `third_party_customer` (for example three returns → treat as `opening_unclear`) would make it explicit. Low risk; the unclear counter of `opening_unclear` is not incremented by this loop (the report notes it).
+3. **Budget headroom.** Live Brief A negotiate has 24 tokens left under the hard limit; the next fixed line pushes it over, and the budget stages cannot remove fixed lines. Any further per-step fixed line should be paid for by shortening one of these (for example one combined sentence for the two before-identity lines).
+4. **One extra turn** after a return (the confirmation question is asked again even if the person said their name). Chosen deliberately; I agree, since the speaker is new.
+
+## Live checks (CTO, with approval, chat first)
+
+As in the report: (1) relative answers, then "here she is" / "yes, speaking" → `opening_reask` → identity, no security question before it; (2) an unclear opening answer → asked again, not `third_party`; (3) a third party says goodbye → no "Goodbye." from the model.

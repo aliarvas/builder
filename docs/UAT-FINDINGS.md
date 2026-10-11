@@ -30,6 +30,63 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+All five entries F-069..F-073 come from the same run:
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, voice test from the UI without case variables (placeholders)
+- **Run:** version 16, call `67e7c720-3a1d-4341-9968-8b913f24b099`; analysis in `tasks/T-013-voice-call-review.md`
+
+### F-073: "N hours later" is booked as a clock time
+
+- **Symptom:** "call me two hours later" was read as 14:00, whatever `now` is. At 11:00 it books 14:00 instead of 13:00; at 15:30 it gives "outside the window" although 17:30 would be inside.
+- **Root cause:** The duration pattern in the generated callback code covers "in N hours" and "N hours from now", but not "N hours later". That form falls through to the clock-time reader with the afternoon guess.
+- **Category:** date-logic
+- **Fix / lesson:** Treat "<n> hours/minutes later" as a duration. Add a self-check family with relative callback phrases over several `now` values.
+  - **Done (T-014):** every exact relative time ("two hours later", "in an hour", "half an hour later", digits or number words) is now counted from `now`, so 11:00 → 13:00 and 15:30 → 17:30. A vague one ("a couple of hours", "an hour or two", "within two hours") is asked again, as is a duration with another named day.
+  - **Found with it:** without a callback window in the spec, a clock time already past today was booked (at 15:30, "at 2" became 02:00 today). Now it is asked again.
+  - **Self-check:** a new family, `callback_relative_*`, checks these forms against the spec window on every moment the build plays.
+- **Status:** fixed offline (T-014)
+- **Retest:** a chat or voice callback case with a relative time (needs approval)
+
+### F-072: The agent says goodbye in a step that cannot close
+
+- **Symptom:** After a farewell from the caller, the model said "Goodbye." in `third_party`. No route matched, so the call went on and the caller was confused.
+- **Root cause:** Conversation steps do not forbid a goodbye. Only `closing_say` should say it.
+- **Category:** policy
+- **Fix / lesson:** Add a fixed line to every conversation step without a closing route: never say goodbye or end the call yourself. Check it with a prompt lint test.
+- **Status:** fixed offline (T-015)
+- **Retest:** pending
+
+### F-071: An answer that does not confirm is read as "someone else answered"
+
+- **Symptom:** A garbled, non-confirming answer gave `caller_role = other_person` (confidence 1.0) and routed to the third-party step instead of asking again.
+- **Root cause:** The opening extraction field describes only one value. "Someone else" and "unclear" are not described, so the brief's "not a confirmation → ask once more" rule is not in the extraction.
+- **Category:** extraction
+- **Fix / lesson:** Describe each opening value. "Someone else" applies only when the person clearly says they are not the customer; any other answer that does not confirm is "unclear".
+- **Status:** fixed offline (T-015)
+- **Retest:** pending
+
+### F-070: The model ran its own identity check in the third-party step and invented a question
+
+- **Symptom:**
+  - It asked for the date of birth plus "the first line of your address", which is not in the brief.
+  - It collected a date of birth from someone treated as a third party and asked two questions at once.
+  - It never called the identity tool, and it said the address was the only way to verify.
+  - This is a policy and an honesty failure.
+- **Root cause:** There is no route for "I am the customer" (F-069), and the third-party prompt does not forbid security questions.
+- **Category:** honesty / policy
+- **Fix / lesson:** F-069, plus a fixed rule in the third-party and opening steps: never ask security questions or for personal data there; only the program verifies identity.
+- **Status:** fixed offline (T-015)
+- **Retest:** pending (chat persona: a relative hands over the phone)
+
+### F-069: A third party who turns out to be the customer cannot get back to verification
+
+- **Symptom:** After a misroute to `third_party`, "I am <customer>" had no route. The call stayed in the third-party step for 16 turns and ended `not_reached`.
+- **Root cause:** The third-party intent has only callback and closing values. There is no value or transition for "the person is the customer" or "the customer comes to the phone".
+- **Category:** routing
+- **Fix / lesson:** Add a framework value to the third-party intent that routes back to confirmation and identity.
+- **Status:** fixed offline (T-015)
+- **Retest:** pending
+
 ### F-068: The third-party close guard uses `json` without importing it, so the call does not close
 
 - **Date:** 2026-10-11

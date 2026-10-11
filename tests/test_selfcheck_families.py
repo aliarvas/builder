@@ -237,3 +237,89 @@ class WalkerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RelativeCallbackTests(unittest.TestCase):
+    """T-014 (F-073): relative callback times are counted from now and checked on the window."""
+
+    def relative(self, name, now):
+        spec, workflow = render(name)
+        plays = [s for s in scenarios(spec, now) if s.id.startswith("callback_relative_")]
+        return spec, workflow, plays
+
+    def test_the_family_passes_at_eleven_and_half_past_three(self):
+        for name in (BRIEF_A, AB):
+            for now in ("2026-10-14T11:00", "2026-10-14T15:30"):
+                spec, workflow, plays = self.relative(name, now)
+                self.assertGreaterEqual(len(plays), 6)
+                with self.subTest(spec=name, now=now):
+                    self.assertEqual({}, failed(spec, workflow, {s.id for s in plays}, now))
+
+    def test_expected_times_by_hand(self):
+        want = {
+            ("2026-10-14T11:00", "callback_relative_two_hours_later"): ("2026-10-14", "13:00"),
+            ("2026-10-14T15:30", "callback_relative_two_hours_later"): ("2026-10-14", "17:30"),
+            ("2026-10-14T15:30", "callback_relative_half_an_hour_later"): ("2026-10-14", "16:00"),
+            ("2026-10-14T11:00", "callback_relative_in_forty_five_minutes"): ("2026-10-14", "11:45"),
+            # Not exact: asked again, then the next business day at the window's start (A+B: 10:00).
+            ("2026-10-14T15:30", "callback_relative_in_a_couple_of_hours"): ("2026-10-15", "10:00"),
+            # 18:30 + 2 h is after the window (19:00): asked again; Friday -> Monday 10:00.
+            ("2026-10-16T18:30", "callback_relative_two_hours_later"): ("2026-10-19", "10:00"),
+            # Review T-014: compound durations add every span; a bare number after a unit is asked again.
+            ("2026-10-14T11:00", "callback_relative_two_hours_thirty_minutes_later"): ("2026-10-14", "13:30"),
+            ("2026-10-14T15:30", "callback_relative_in_2_hours_30_minutes"): ("2026-10-14", "18:00"),
+            ("2026-10-14T11:00", "callback_relative_in_one_hour_fifteen"): ("2026-10-15", "10:00"),
+            # The window's edge (19:00): the last minute is booked, one minute later is asked again.
+            ("2026-10-14T11:00", "callback_relative_window_last_minute"): ("2026-10-14", "19:00"),
+            ("2026-10-14T15:30", "callback_relative_window_last_minute"): ("2026-10-14", "19:00"),
+            ("2026-10-14T15:30", "callback_relative_window_one_minute_past"): ("2026-10-15", "10:00"),
+        }
+        for (now, scenario_id), callback in want.items():
+            _, _, plays = self.relative(AB, now)
+            with self.subTest(now=now, scenario=scenario_id):
+                self.assertEqual(callback, next(s for s in plays if s.id == scenario_id).callback)
+
+    def test_build_mode_plays_the_family_on_every_moment(self):
+        for name in (BRIEF_A, AB):
+            spec, workflow = render(name)
+            report = run_selfcheck(spec, workflow)  # the build's now plus check_nows
+            with self.subTest(spec=name):
+                self.assertEqual(3, len(report.nows))
+                self.assertFalse([r for r in report.results if "relative" in r.scenario and not r.passed])
+
+    def test_reading_only_the_first_span_of_a_compound_duration_is_caught(self):
+        # Review T-014 finding 1: the T-014 code read "two hours thirty minutes later" as 30 minutes.
+        def first_span_only(workflow):
+            code = workflow["nodes"]["callback_check"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]
+            for text in ("(?: (?:and )?(\\d+) (?:minutes?|mins?))?", "if not found or BARE.search(text):",
+                         "    if len(SPANS.findall(text)) != len(SPANS.findall(found.group(0))):\n        return -1\n"):
+                self.assertIn(text, code["default"])
+            code["default"] = (code["default"]
+                               .replace("(?: (?:and )?(\\d+) (?:minutes?|mins?))?", "(?: and (\\d+) (?:minutes?|mins?))?")
+                               .replace("if not found or BARE.search(text):", "if not found:")
+                               .replace("    if len(SPANS.findall(text)) != len(SPANS.findall(found.group(0))):\n"
+                                        "        return -1\n", ""))
+        compound = {"callback_relative_in_2_hours_30_minutes", "callback_relative_two_hours_thirty_minutes_later",
+                    "callback_relative_in_one_hour_fifteen"}
+        for name in (BRIEF_A, AB):
+            spec, workflow, _ = self.relative(name, "2026-10-14T11:00")
+            first_span_only(workflow)
+            with self.subTest(spec=name):
+                self.assertEqual(compound, set(failed(spec, workflow, compound, "2026-10-14T11:00")))
+
+    def test_reading_two_hours_later_as_a_clock_time_is_caught(self):
+        # The F-073 code: no duration reading, so "two hours later" became the clock time 14:00.
+        def old(workflow):
+            code = workflow["nodes"]["callback_check"]["pre_actions"][0]["function"]["parameters"]["properties"]["code"]
+            for text in ("    offset = duration_minutes(time_text)\n", "        offset = duration_minutes(day_text)\n"):
+                self.assertIn(text, code["default"])
+                code["default"] = code["default"].replace(text, text.split("=")[0] + "= None\n")
+            code["default"] = code["default"].replace("    if DURATION.search(text):\n        return []\n", "")
+        for name in (BRIEF_A, AB):
+            for now in ("2026-10-14T11:00", "2026-10-14T15:30"):
+                spec, workflow, _ = self.relative(name, now)
+                old(workflow)
+                result = failed(spec, workflow, {"callback_relative_two_hours_later"}, now)
+                with self.subTest(spec=name, now=now):
+                    # Brief A (no window) books 02:00, the A+B window 14:00 (or "outside" at 15:30).
+                    self.assertTrue(result)

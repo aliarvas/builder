@@ -183,12 +183,70 @@ class ResolveAndWindowTests(unittest.TestCase):
 
     def test_durations_and_several_clock_numbers_are_unclear(self):
         # Review finding 2b, 2c: a wrong guess loses the case, one more question does not.
-        for words in ("in two hours", "in an hour", "half an hour", "20 minutes from now",
+        # T-014: an exact duration with another named day, or an inexact one, is still asked again.
+        for words in ("in two hours", "in an hour", "half an hour", "20 minutes from now", "two hours later",
                       "between 2 and 4", "2 or 3", "at 3 or maybe 5"):
             with self.subTest(words=words):
                 variables = check(spec_with(), "tomorrow", words)
                 self.assertEqual(callback.WINDOW_UNCLEAR, variables[callback.VERDICT])
                 self.assertNotIn(callback.CALLBACK_DATE, variables)
+        for words in ("in a couple of hours", "an hour or two", "in 2 to 3 hours", "two hours", "within two hours",
+                      "in a few minutes", "an hour"):
+            with self.subTest(words=words):
+                variables = check(spec_with(), "", words)
+                self.assertEqual(callback.WINDOW_UNCLEAR, variables[callback.VERDICT])
+                self.assertNotIn(callback.CALLBACK_DATE, variables)
+
+    def test_f073_relative_times_count_from_now(self):
+        # T-014: "two hours later" was read as the clock time 14:00 whatever now was.
+        forms = (("two hours later", 120), ("in two hours", 120), ("in 2 hours", 120), ("after two hours", 120),
+                 ("2 hours from now", 120), ("in an hour", 60), ("an hour later", 60), ("half an hour later", 30),
+                 ("in half an hour", 30), ("an hour and a half from now", 90), ("in 1.5 hours", 90),
+                 ("in two and a half hours", 150), ("in 45 minutes", 45), ("twenty five minutes later", 25),
+                 ("in an hour and 15 minutes", 75), ("a quarter of an hour later", 15),
+                 # Review T-014 finding 1: compound durations add every span.
+                 ("in 2 hours 30 minutes", 150), ("two hours thirty minutes later", 150),
+                 ("in one hour and fifteen minutes", 75))
+        for now, clock in (("2026-10-14T11:00", 11 * 60), ("2026-10-14T15:30", 15 * 60 + 30)):
+            for words, minutes in forms:
+                with self.subTest(now=now, words=words):
+                    target = clock + minutes
+                    variables = check(spec_with(), "", words, now=now)
+                    if target <= 19 * 60:
+                        self.assert_booked(variables, "2026-10-14", "%02d:%02d" % divmod(target, 60))
+                    else:
+                        self.assertEqual(callback.WINDOW_OUTSIDE, variables[callback.VERDICT])
+        # The review's table (T-013 C5), by hand.
+        self.assert_booked(check(spec_with(), "", "two hours later", now="2026-10-14T11:00"), "2026-10-14", "13:00")
+        self.assert_booked(check(spec_with(), "", "two hours later", now="2026-10-14T15:30"), "2026-10-14", "17:30")
+        self.assertEqual(callback.WINDOW_OUTSIDE,
+                         check(spec_with(), "", "four hours later", now="2026-10-14T15:30")[callback.VERDICT])
+        # "today" with a duration is the same day; the words may also come in the day field.
+        self.assert_booked(check(spec_with(), "today", "in two hours"), "2026-10-14", "13:00")
+        self.assert_booked(check(spec_with(), "in two hours", ""), "2026-10-14", "13:00")
+
+    def test_f073_a_compound_duration_it_cannot_read_whole_is_asked_again(self):
+        # Review T-014 finding 1: a span left out, or a bare number after a unit, would book a wrong time.
+        for words in ("in one hour fifteen", "in 2 hours and 30", "30 minutes and 2 hours later",
+                      "in 2 hours or 30 minutes"):
+            with self.subTest(words=words):
+                variables = check(spec_with(), "", words)
+                self.assertEqual(callback.WINDOW_UNCLEAR, variables[callback.VERDICT])
+                self.assertEqual("", variables.get(callback.CALLBACK_TIME, ""))
+
+    def test_f073_a_duration_on_the_window_edge(self):
+        # Review T-014 finding 3: now + duration exactly on the last minute is booked; one minute later is outside.
+        self.assert_booked(check(spec_with(), "", "in 8 hours", now="2026-10-14T11:00"), "2026-10-14", "19:00")
+        self.assert_booked(check(spec_with(), "", "in 3 hours 30 minutes", now="2026-10-14T15:30"),
+                           "2026-10-14", "19:00")
+        self.assertEqual(callback.WINDOW_OUTSIDE,
+                         check(spec_with(), "", "in 481 minutes", now="2026-10-14T11:00")[callback.VERDICT])
+        self.assertEqual(callback.WINDOW_OUTSIDE,
+                         check(spec_with(), "", "in 3 hours 31 minutes", now="2026-10-14T15:30")[callback.VERDICT])
+
+    def test_f073_without_a_window_a_duration_past_midnight_is_the_next_day(self):
+        self.assert_booked(check(spec_with(None), "", "two hours later", now="2026-10-14T23:30"),
+                           "2026-10-15", "01:30")
 
     def test_hour_is_never_read_from_the_day_field_when_a_time_was_given(self):
         # Review finding 2d: "20 October" + "3 pm" is 15:00 on 20 October (outside: 4 business days ahead).
@@ -202,6 +260,16 @@ class ResolveAndWindowTests(unittest.TestCase):
 
     def test_without_a_window_the_date_is_still_resolved_in_code(self):
         self.assert_booked(check(spec_with(None), "tomorrow", "eleven"), "2026-10-15", "11:00")
+
+    def test_without_a_window_a_time_already_past_today_is_asked_again(self):
+        # T-014: without a window, "at 2" at 15:30 was booked as 02:00 today.
+        for words in ("at 2", "2pm", "11am"):
+            with self.subTest(words=words):
+                variables = check(spec_with(None), "", words, now="2026-10-14T15:30")
+                self.assertEqual(callback.WINDOW_OUTSIDE, variables[callback.VERDICT])
+                self.assertNotIn(callback.CALLBACK_DATE, variables)
+        self.assert_booked(check(spec_with(None), "", "at 4", now="2026-10-14T15:30"), "2026-10-14", "16:00")
+        self.assert_booked(check(spec_with(None), "tomorrow", "at 2", now="2026-10-14T15:30"), "2026-10-15", "02:00")
 
     def test_calendar_window_of_two_days(self):
         window = {**WINDOW, "days_ahead": 2, "day_unit": "calendar", "earliest_time": "09:00", "latest_time": "18:00"}

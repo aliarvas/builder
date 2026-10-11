@@ -23,11 +23,14 @@ from .prompts import (
     IDENTITY_TASK_TEMPLATE,
     MULTI_STEP_SYSTEM_PROMPT_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
+    NO_GOODBYE_LINE,
+    NO_SECURITY_QUESTIONS_LINE,
     OPENING_REASK_TASK_TEMPLATE,
     OPENING_TASK_TEMPLATE,
     SPECIAL_ASK_TASK_TEMPLATE,
     SPECIAL_PATH_TASK_TEMPLATE,
     SPECIAL_CLOSE_TOOL_TASK_TEMPLATE,
+    THIRD_PARTY_CUSTOMER_DESCRIPTION,
     THIRD_PARTY_TASK_TEMPLATE,
     WHO_ANSWERED_DESCRIPTION,
     render_phone_agent_system_prompt,
@@ -46,8 +49,8 @@ from .record_loop import (
 )
 from .product_notes import NOTE_RECORD, PRODUCT_REFUSAL, add_product_steps, refusal_values
 from .spec import (
-    ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath,
-    notes_outcome_pairs,
+    ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec,
+    Rule, SpecError, SpecialPath, notes_outcome_pairs,
 )
 from .spoken import agent_directed, quoted_speech, spoken_words
 from .callback import (
@@ -196,6 +199,73 @@ def _apply_conversation_tool_rules(node: dict[str, Any]) -> None:
     for field in ("task_message", "loop_prompt"):
         if field in node:
             node[field] = str(node[field]).rstrip() + "\n\n" + rule
+
+
+# Steps before identity verification that talk to whoever answered (F-070).
+BEFORE_IDENTITY_STEPS = ("opening", "opening_reask", "third_party", THIRD_PARTY_ASK)
+# Steps that end the call: the step that says the closing sentence has a route to these.
+CALL_END_STEPS = ("end_call", "close_attempt")
+
+
+def _apply_fixed_lines(key: str, node: dict[str, Any]) -> None:
+    """Fixed lines in conversation prompts (T-015): no security questions before identity
+    (F-070), and no goodbye in any step but the one that says the closing sentence (F-072)."""
+    if node.get("node_type") != "conversation":
+        return
+    lines = []
+    if key in BEFORE_IDENTITY_STEPS:
+        lines.append(NO_SECURITY_QUESTIONS_LINE.text)
+    if not any(transition.get("target_node") in CALL_END_STEPS for transition in node.get("transitions", [])):
+        lines.append(NO_GOODBYE_LINE.text)
+    for field in ("task_message", "loop_prompt"):
+        if field in node and lines:
+            node[field] = str(node[field]).rstrip() + "\n" + "\n".join(lines)
+
+
+def who_answered_description(spec: PhoneAgentSpec) -> str:
+    """The opening extraction field: every value described by its route (F-071). A line for
+    a route without values is left out."""
+    opening = spec.opening.data
+    values = {
+        "confirm": opening["identity_values"], "other": opening["third_party_values"],
+        "close": opening["close_values"], "stay": opening["stay_values"], "greeting": [OPENING_GREETING_VALUE],
+    }
+    lines = []
+    for line in WHO_ANSWERED_DESCRIPTION.text.split("\n"):
+        name = next((key for key in values if line.startswith("{" + key + "}")), None)
+        if name is not None and not values[name]:
+            continue
+        lines.append(line)
+    text = " ".join(lines).replace("{unclear_rule}", opening["unclear_instruction"]["text"])
+    for key, items in values.items():
+        text = text.replace("{" + key + "}", ", ".join(map(str, items)))
+    return text
+
+
+THIRD_PARTY_CUSTOMER = "third_party_customer"
+
+
+def _add_customer_return(spec: PhoneAgentSpec, nodes: dict[str, Any], code_node: Any) -> None:
+    """F-069: a third party who turns out to be the customer (or hands the phone over) goes
+    back to the confirmation question, then identity. A framework intent value; skipped when
+    the spec already uses that value."""
+    third, opening = spec.third_party.data, spec.opening.data
+    if THIRD_PARTY_CUSTOMER_VALUE in third["intent_values"]:
+        return
+    intent = third["intent_variable"]
+    for field in nodes["third_party"]["extraction_schema"]:
+        if field["name"] == intent:
+            field["enum_values"] = [*field["enum_values"], THIRD_PARTY_CUSTOMER_VALUE]
+            field["description"] += " " + render_prompt(THIRD_PARTY_CUSTOMER_DESCRIPTION, value=THIRD_PARTY_CUSTOMER_VALUE)
+    # The step resets both answers, so neither the old third-party intent nor the old
+    # who-answered value routes again; the confirmation question decides.
+    nodes[THIRD_PARTY_CUSTOMER] = code_node(THIRD_PARTY_CUSTOMER, (
+        f"vars[{intent!r}] = {FRAMEWORK_NONE_VALUE!r}\n"
+        f"vars[{opening['who_answered_variable']!r}] = {FRAMEWORK_NONE_VALUE!r}\n"
+    ), [{"target_node": "opening_reask", "description": "Ask the confirmation question", "condition": {"operator": "always"}}])
+    nodes["third_party"]["transitions"].append(_transition(
+        THIRD_PARTY_CUSTOMER, "The person is the customer or the customer came to the phone",
+        [_condition(intent, "equals", THIRD_PARTY_CUSTOMER_VALUE)]))
 
 
 def _tool_index(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1096,6 +1166,7 @@ def _render_spec_workflow(
     ] + [(negotiation["intent_variable"], FRAMEWORK_NONE_VALUE), (confirmation["intent_variable"], FRAMEWORK_NONE_VALUE)]
     used = {
         "opening", "opening_reask", "opening_unclear", "third_party", THIRD_PARTY_ASK, THIRD_PARTY_CLOSE_CHECK,
+        THIRD_PARTY_CUSTOMER,
         IDENTITY_CHECK, "identity", "account", "negotiate",
         "confirm_record", RECORD_NEXT, RECORD_PROMISE, "confirmation_progress", "closing", "closing_say", "close_attempt",
         "offer_setup", "check_offer", OFFER_SAY, REVISE_ASK,
@@ -1375,11 +1446,12 @@ def _render_spec_workflow(
     for key in ("opening", "opening_reask"):
         nodes[key]["extraction_schema"] = [{
             "name": opening["who_answered_variable"], "type": "string",
-            "description": render_prompt(WHO_ANSWERED_DESCRIPTION, greeting=OPENING_GREETING_VALUE),
+            "description": who_answered_description(spec),
             "enum_values": [*opening["who_answered_options"], OPENING_GREETING_VALUE, FRAMEWORK_NONE_VALUE],
             "min_confidence": 0.8,
         }]
     nodes["third_party"]["extraction_schema"] = third_party_extraction_fields(third)
+    _add_customer_return(spec, nodes, _code_node)
     # F-055: the callback day and time are resolved and checked in code (builder/callback.py);
     # the model only copies the person's words and never types the date.
     callback = callback_nodes(spec, by_name["schedule_callback"], _code_node, "closing", warnings)
@@ -1455,7 +1527,8 @@ def _render_spec_workflow(
         clone["on_enter"] = {"type": "tts", "text": line}
         nodes[clone_key] = clone
 
-    for node in [*nodes.values(), *global_nodes.values()]:
+    for key, node in [*nodes.items(), *global_nodes.items()]:
+        _apply_fixed_lines(key, node)
         _apply_conversation_tool_rules(node)
         if node.get("transitions"):
             node["transitions"] = group_transitions_by_target(node["transitions"])

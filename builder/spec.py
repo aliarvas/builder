@@ -412,6 +412,9 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Who-answered value the builder adds for a bare greeting or a line check ("Hello?").
 # It routes nowhere: the opening step stays and asks again, and it never counts as unclear.
 OPENING_GREETING_VALUE = "greeting"
+# Third-party value the builder adds (F-069): the person says they are the customer, or the
+# customer comes to the phone. It routes back to the confirmation question, then identity.
+THIRD_PARTY_CUSTOMER_VALUE = "customer_on_line"
 # Value the builder writes to reset an enum variable (F-052). The platform rejects "" for an
 # enum, so a reset with "" silently kept the old value. It routes nowhere.
 FRAMEWORK_NONE_VALUE = "none"

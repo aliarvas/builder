@@ -189,7 +189,10 @@ class RenderTests(unittest.TestCase):
         self.assertIn(NOTES_OUTCOME_BODY.splitlines()[0], json.dumps(derived["nodes"][NOTES_OUTCOME]))
 
     def test_brief_a_renders_byte_identically(self):
-        # The render of spec-brief-a.json at the T-011 start (commit 74eb27a), sha256 of the JSON.
+        # T-011 added nothing to Brief A (no block): its render was pinned at 74eb27a. Re-pinned at
+        # T-015, which changes Brief A on purpose (fixed lines, opening descriptions, customer return)
+        # together with T-014's callback code; re-pinned again for the T-014 review fix (compound
+        # durations in the callback code only). A change here must be a deliberate one.
         import hashlib
         data = json.loads((ROOT / "tests/fixtures/spec-brief-a.json").read_text(encoding="utf-8"))
         workflow = build_spec_workflow(parse_spec(data), kit_tools(0))
@@ -206,7 +209,7 @@ class RenderTests(unittest.TestCase):
                     parse_spec(data)
 
 
-BRIEF_A_RENDER_SHA256 = "f7a8c468bdcec17c1adb1b6b6954503081a4ef8112470f5940371f0d61f8def7"
+BRIEF_A_RENDER_SHA256 = "63bfaf8e55441086efade9cbc70d326768d6626c4ca704abb75f05d477033f70"
 
 
 class ExtractionTests(unittest.TestCase):

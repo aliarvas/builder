@@ -182,8 +182,18 @@ DAY_PATTERN = (r'\b(\d{4}-\d{1,2}-\d{1,2}|day after tomorrow|tomorrow|today|toni
                r'(?:next |this )?(?:' + WEEKDAY_WORDS + r')(?: the ' + ORDINAL + r')?|'
                r'(?:the )?' + ORDINAL + r' (?:of )?(?:' + MONTH_WORDS + r')|(?:' + MONTH_WORDS + r') (?:the )?' + ORDINAL + r'|'
                r'the \d{1,2}(?:st|nd|rd|th))\b')
-DURATION = re.compile(r'\b(?:in|within|after)\s+(?:an?|half an?|a few|\d+|[a-z]+)\s+(?:hours?|minutes?|mins?)\b'
-                      r'|\b(?:hours?|minutes?|mins?)\s+from now\b|\bhalf an hour\b')
+# Any hour or minute word: the words name a duration, never a clock time (T-014, F-073).
+DURATION = re.compile(r'\b(?:hours?|hrs?|minutes?|mins?)\b')
+# An exact duration after the normalising in duration_minutes: "2 hours", "1.5 hours", "1 hour and 15 minutes",
+# "2 hours 30 minutes".
+SPAN = r'(\d+(?:\.\d+)?) (hours?|hrs?|minutes?|mins?)(?: (?:and )?(\d+) (?:minutes?|mins?))?'
+# Every number-unit span, and a bare number after a unit ("one hour fifteen"): what RELATIVE must account for.
+SPANS = re.compile(r'\d+(?:\.\d+)? (?:hours?|hrs?|minutes?|mins?)\b')
+BARE = re.compile(r'\b(?:hours?|hrs?|minutes?|mins?) (?:and )?\d+(?:\.\d+)?(?![\d.])(?! (?:hours?|hrs?|minutes?|mins?)\b)')
+# "within two hours" names a range, not a time: it is not exact and is asked again.
+RELATIVE = re.compile(r'\b(?:in|after) ' + SPAN + r'\b|\b' + SPAN + r' (?:later|from now|after now)\b')
+# Words that make an amount inexact: "a few hours", "an hour or two", "2 to 3 hours".
+VAGUE = re.compile(r'\b(?:few|several|couple|some|many|or so|ish)\b|\d (?:hours? |hrs? |minutes? |mins? )?(?:or|to) \d')
 
 
 def day_words(text):
@@ -223,6 +233,46 @@ def number_value(words, index):
     if word in UNIT_WORDS:
         return UNIT_WORDS.index(word), 1
     return None, 0
+
+
+def duration_minutes(text):
+    # Minutes from now that relative words name ("in two hours", "2 hours later", "half an
+    # hour from now", "an hour and a half later"). None: the words name no duration.
+    # -1: a duration that is not exact or not tied to now ("a couple of hours", "an hour or
+    # two", "two hours" without in/after/later); the caller asks again.
+    words = re.findall(r'\d+(?:\.\d+)?|[a-z]+', str(text or '').lower())
+    if not any(DURATION.fullmatch(word) for word in words):
+        return None
+    parts = []
+    index = 0
+    while index < len(words):
+        value, used = (None, 0) if '.' in words[index] else number_value(words, index)
+        if value is None:
+            parts.append(words[index])
+            index += 1
+        else:
+            parts.append(str(value))
+            index += used
+    text = ' ' + ' '.join(parts) + ' '
+    text = re.sub(r' (?:a |an )?quarter (?:of )?an? (?:hour|hr) ', ' 15 minutes ', text)
+    text = re.sub(r' half (?:an? )?(?:hour|hr) ', ' 30 minutes ', text)
+    text = re.sub(r' an? (?=(?:hours?|hrs?|minutes?|mins?) )', ' 1 ', text)
+    text = re.sub(r' (\d+) and an? half (?:hours?|hrs?) ', r' \1.5 hours ', text)
+    text = re.sub(r' (\d+) (?:hours?|hrs?) and an? half ', r' \1.5 hours ', text)
+    if VAGUE.search(text):
+        return -1
+    found = RELATIVE.search(text)
+    if not found or BARE.search(text):
+        return -1
+    # A span the match leaves out ("30 minutes and 2 hours later") would change the time: ask again.
+    if len(SPANS.findall(text)) != len(SPANS.findall(found.group(0))):
+        return -1
+    groups = found.groups()
+    amount, unit, extra = groups[0:3] if groups[0] else groups[3:6]
+    minutes = float(amount) * (60 if unit.startswith('h') else 1) + int(extra or 0)
+    if minutes <= 0 or minutes != int(minutes):
+        return -1
+    return int(minutes)
 
 
 def clock_candidates(text):
@@ -323,7 +373,9 @@ def now_minutes():
 
 def in_window(day, minutes):
     if WINDOW is None:
-        return day >= today()
+        # No window in the spec: any time from now on (T-014: never a time already past today).
+        current = now_minutes()
+        return day > today() or day == today() and (current is None or minutes > current)
     if day not in window_days(today()):
         return False
     if minutes < WINDOW['earliest'] or minutes > WINDOW['latest']:
@@ -370,6 +422,18 @@ try:
         day = today()  # no day named in any turn
     # The time is read from the time field; the day field only when no time field was given.
     candidates = clock_candidates(time_text if time_text.strip() else day_text)
+    # T-014 (F-073): an exact relative time ("in two hours", "two hours later") is counted
+    # from now, on today unless it passes midnight. A vague one, or one with another named
+    # day, stays unclear and the person is asked again.
+    offset = duration_minutes(time_text)
+    if offset is None:
+        offset = duration_minutes(day_text)
+    if offset is not None:
+        candidates = []
+        current = now_minutes()
+        if offset > 0 and current is not None and (fresh is None or fresh == today()):
+            day = today() + datetime.timedelta(days=(current + offset) // (24 * 60))
+            candidates = [(current + offset) % (24 * 60)]
     verdict = CALLBACK['verdict_unclear']
     if day is not None and candidates:
         chosen = next((minutes for minutes in candidates if in_window(day, minutes)), None)

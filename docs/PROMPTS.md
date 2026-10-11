@@ -151,13 +151,18 @@ Rules:
 
 ## WHO_ANSWERED_DESCRIPTION
 
-- Purpose: Extraction description of the who-answered variable in the opening steps.
+- Purpose: Extraction description of the who-answered variable in the opening steps; every value is described (F-071). A line whose value list is empty is left out.
 - Receiver: extraction model
 - Used at: builder/workflow.py — opening and opening_reask extraction_schema
-- Approximate tokens: ~37 static + `{greeting}` characters ÷ 4 at runtime
+- Approximate tokens: ~137 static + `{confirm}` characters ÷ 4 + `{unclear_rule}` characters ÷ 4 + `{other}` characters ÷ 4 + `{close}` characters ÷ 4 + `{stay}` characters ÷ 4 + `{greeting}` characters ÷ 4 at runtime
 
 ```text
-Who answered the call. {greeting}: the person only greets or checks the line (for example "Hello?" or "Who is this?") and has not answered the question yet.
+Who answered the call.
+{confirm}: the person clearly confirms they are the customer. The documents' rule: {unclear_rule}
+{other}: only when the person clearly says they are not the customer (for example someone else's name, "she is not here", "I am his wife").
+{close}: only when the person clearly says what that value names.
+{stay}: anything else that does not confirm, including a garbled or half-heard answer, an answer in another language, or a question back.
+{greeting}: the person only greets or checks the line (for example "Hello?" or "Who is this?") and has not answered the question yet.
 ```
 
 ## THIRD_PARTY_TASK_TEMPLATE
@@ -184,6 +189,17 @@ Rules:
 The third party's current intent. Closing values are: {close_values}. Choose one when the person's message clearly states the situation that value names. A question, an offer to pay, or a request for account or payment information is not a closing situation: choose none so the agent can decline to disclose details and ask when the customer can be reached.
 ```
 
+## THIRD_PARTY_CUSTOMER_DESCRIPTION
+
+- Purpose: Adds the framework value for a third party who is in fact the customer (F-069).
+- Receiver: extraction model
+- Used at: builder/workflow.py — appended to the third_party intent extraction field
+- Approximate tokens: ~23 static + `{value}` characters ÷ 4 at runtime
+
+```text
+{value}: the person says they are the customer themselves, or the customer has come to the phone.
+```
+
 ## THIRD_PARTY_CLOSE_KIND_DESCRIPTION
 
 - Purpose: Provides an independent guard signal for third-party closing intents (F-064).
@@ -193,6 +209,28 @@ The third party's current intent. Closing values are: {close_values}. Choose one
 
 ```text
 Classify only the third party's last message. Closing values are: {close_values}. Choose explicit_close when the person clearly states a situation named by one of those values, for example a refusal of a callback, that the customer cannot be reached, or "she doesn't want to be called". Choose other for every question, offer to pay, request for information, vague reply, or non-answer, for example "I can pay it myself if you tell me the amount".
+```
+
+## NO_SECURITY_QUESTIONS_LINE
+
+- Purpose: Keeps security questions out of the steps before identity verification (F-070).
+- Receiver: phone agent
+- Used at: builder/workflow.py — opening, opening_reask, third_party and third_party_ask task_message
+- Approximate tokens: ~27 (characters ÷ 4)
+
+```text
+Never ask security questions or for personal data in this step; only the program verifies identity, later.
+```
+
+## NO_GOODBYE_LINE
+
+- Purpose: Keeps the goodbye in the closing step (F-072).
+- Receiver: phone agent
+- Used at: builder/workflow.py — every conversation task_message except the step that says the closing sentence
+- Approximate tokens: ~18 (characters ÷ 4)
+
+```text
+Never say goodbye or end the call yourself; the program closes the call.
 ```
 
 ## IDENTITY_TASK_TEMPLATE

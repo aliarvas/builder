@@ -27,6 +27,7 @@ import dataclasses
 import datetime
 import functools
 import json
+import re
 import time
 from typing import Any, Callable
 
@@ -37,7 +38,7 @@ from .callback import (
 from .offer_check import ACCEPTS_YES, OFFER_ACCEPTS, OFFER_AMOUNT, OFFER_DATE, OFFER_PRODUCT
 from .selfcheck_calendar import SpecCalendar, first_rule
 from .record_loop import RECORD_PROMISE
-from .spec import FRAMEWORK_NONE_VALUE, SPECIAL_THEN_CLOSE, PhoneAgentSpec
+from .spec import FRAMEWORK_NONE_VALUE, SPECIAL_THEN_CLOSE, THIRD_PARTY_CUSTOMER_VALUE, PhoneAgentSpec
 from .tools_from_openapi import CALL_VARIABLES
 
 END_CALL = "end_call"
@@ -701,6 +702,7 @@ def scenarios(spec: PhoneAgentSpec, now: str) -> list[Scenario]:
 
     # Third party.
     result.extend(_third_party_scenarios(spec, plan, one))
+    result.extend(_customer_return_scenarios(spec, plan, one, notes_for))
 
     # Special paths.
     for path in spec.special_paths:
@@ -815,6 +817,23 @@ def _callback_slot(spec, plan) -> tuple[datetime.date, str, dict[str, Any] | Non
     return day, f"{minutes // 60:02d}:{minutes % 60:02d}", window
 
 
+def _customer_return_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
+    """T-015 (F-069): the third party says they are the customer (or hands the phone over);
+    the call goes back to the confirmation question, identity and a normal promise."""
+    if not plan.opening.get("third_party_values") or THIRD_PARTY_CUSTOMER_VALUE in plan.third["intent_values"]:
+        return []
+    day = plan.good_day(one)
+    if not day:
+        return []
+    is_customer = {"kind": "say", "label": "third_party",
+                   "vars": {plan.third["intent_variable"]: THIRD_PARTY_CUSTOMER_VALUE}}
+    return [Scenario(
+        "third_party_is_customer",
+        [plan.answer_who("third_party_values"), is_customer, *plan.reach_negotiation(), plan.offer(1, day), plan.confirm()],
+        "promise_recorded", one, promises=[plan.promise(one[0], day)],
+        notes=notes_for(one, promised=["p1"], state="promise_recorded"), step="third_party")]
+
+
 def _special_scenarios(spec, plan, path, one, notes_for) -> list[Scenario]:
     from .workflow import special_result_variable
 
@@ -892,6 +911,7 @@ def _call_end_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
         *_turn_limit_scenarios(spec, plan, one, notes_for),
         *_account_failed_scenarios(spec, plan, one),
         *_callback_answer_scenarios(spec, plan, one),
+        *_relative_callback_scenarios(spec, plan, one),
         *_revise_scenarios(spec, plan, one, notes_for),
         *_two_special_scenarios(spec, plan, one, notes_for),
         *_special_elsewhere_scenarios(spec, plan, one, notes_for),
@@ -981,6 +1001,69 @@ def _callback_answer_scenarios(spec, plan, one) -> list[Scenario]:
             Scenario("callback_need_time_give_up", [who, answer(day.isoformat(), "", repeat=True)], give_up, one,
                      step="callback_check", callback=()),
         ]
+    return result
+
+
+# T-014 (F-073): relative callback times and the minutes they name (None: not exact, asked
+# again). Generic English forms, digits and number words; no brief value.
+RELATIVE_CALLBACKS = (
+    ("two hours later", 120), ("in 2 hours", 120), ("in an hour", 60), ("half an hour later", 30),
+    ("an hour and a half from now", 90), ("in forty five minutes", 45), ("in a couple of hours", None),
+    ("in 2 hours 30 minutes", 150), ("two hours thirty minutes later", 150), ("in one hour fifteen", None),
+)
+
+
+def _callback_allowed(spec, plan, day: datetime.date, minutes: int) -> bool:
+    """Whether the spec's callback window allows ``day`` at ``minutes`` (written apart from
+    the generated callback code)."""
+    window = callback_window(spec)
+    today = plan.calendar.today
+    if window is None:
+        return day >= today
+    days = [today] + [plan.calendar.add(today, step, window["day_unit"]) for step in range(1, window["days_ahead"] + 1)]
+    clock = int(plan.now[11:13]) * 60 + int(plan.now[14:16]) if len(plan.now) >= 16 else None
+    if day not in days or not window["earliest"] <= minutes <= window["latest"]:
+        return False
+    return not (window["after_now"] and day == today and clock is not None and minutes <= clock)
+
+
+def _relative_callback_scenarios(spec, plan, one) -> list[Scenario]:
+    """A relative callback time is counted from ``now``: booked when the window allows it;
+    otherwise (or when it is not exact) the person is asked again and names a slot that fits,
+    or, with no further asks allowed, the call closes with the window's close value."""
+    if not plan.opening.get("third_party_values") or len(plan.now) < 16:
+        return []
+    slot = _callback_slot(spec, plan)
+    window = callback_window(spec)
+    who = plan.answer_who("third_party_values")
+    clock = int(plan.now[11:13]) * 60 + int(plan.now[14:16])
+    phrases = [(words, minutes, "_".join(re.findall(r"[a-z0-9]+", words))) for words, minutes in RELATIVE_CALLBACKS]
+    # The window's edge: now + duration on its last minute is booked; one minute later is outside.
+    if window is not None and clock < window["latest"]:
+        last = window["latest"] - clock
+        phrases += [(f"in {last} minutes", last, "window_last_minute"),
+                    (f"in {last + 1} minutes", last + 1, "window_one_minute_past")]
+    result = []
+    for words, minutes, slug in phrases:
+        name = "callback_relative_" + slug
+        said = {"kind": "say", "label": "callback_time", "vars": {DAY_TEXT: "", TIME_TEXT: words}}
+        if minutes is not None:
+            day = plan.calendar.today + datetime.timedelta(days=(clock + minutes) // (24 * 60))
+            target = (clock + minutes) % (24 * 60)
+            if _callback_allowed(spec, plan, day, target):
+                result.append(Scenario(name, [who, said], "callback_scheduled", one, step="callback_check",
+                                       callback=(day.isoformat(), f"{target // 60:02d}:{target % 60:02d}")))
+                continue
+            if window is not None and window["max_outside_asks"] == 0:
+                result.append(Scenario(name, [who, said], "third_party:" + window["outside_close_value"], one,
+                                       step="callback_check", callback=()))
+                continue
+        if slot is None:
+            continue
+        day, time_said, _ = slot
+        again = {"kind": "say", "label": "callback_time", "vars": {DAY_TEXT: day.isoformat(), TIME_TEXT: time_said}}
+        result.append(Scenario(name, [who, said, again], "callback_scheduled", one, step="callback_check",
+                               callback=(day.isoformat(), time_said)))
     return result
 
 
