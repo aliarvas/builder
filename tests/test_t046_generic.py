@@ -363,3 +363,84 @@ class T052Tests(unittest.TestCase):
         client = self.client([refused, ("{}", "end_turn")], sent)
         self.assertEqual("{}", self.complete(client, max_tokens=64000).text)
         self.assertEqual([64000, 48000], [item["max_tokens"] for item in sent])
+
+    @staticmethod
+    def stream_client(streams, sent):
+        import os
+        from builder.llm import AnthropicClient
+
+        class Reply(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def opener(request, timeout):
+            sent.append(json.loads(request.data))
+            pieces, stop = streams.pop(0)
+            events = [{"type": "message_start", "message": {"model": "m", "usage": {"input_tokens": 1}}},
+                      *({"type": "content_block_delta", "delta": {"type": "text_delta", "text": piece}}
+                        for piece in pieces),
+                      {"type": "message_delta", "delta": {"stop_reason": stop}, "usage": {"output_tokens": 9}}]
+            return Reply(b"".join(b"data: " + json.dumps(item).encode() + b"\n\n" for item in events))
+
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test"}):
+            return AnthropicClient(opener=opener, temperature=None, stream=True)
+
+    def test_a_whitespace_run_after_whole_json_ends_the_reply(self):
+        sent = []
+        client = self.stream_client([(['{"a": 1}', " " * 1500, "\n" * 1500, "never read"], "max_tokens")], sent)
+        result = self.complete(client)
+        self.assertEqual(('{"a": 1}', "end_turn", 1), (result.text.strip(), result.stop_reason, len(sent)))
+
+    def test_a_whitespace_run_inside_json_is_continued(self):
+        sent = []
+        client = self.stream_client([(['{"a": [1,', " " * 2500], "max_tokens"), ([' 2]}'], "end_turn")], sent)
+        result = self.complete(client)
+        self.assertEqual('{"a": [1, 2]}', result.text)
+        self.assertEqual('{"a": [1,', sent[1]["messages"][-1]["content"])
+
+
+class T053Tests(unittest.TestCase):
+    """T-053: an api_call body or headers given as one default object becomes properties leaves."""
+
+    def tool(self):
+        return {"type": "function", "config": {"timeoutMs": 30000}, "function": {
+            "name": "load", "handler": "__function__:api_call", "parameters": {"type": "object", "properties": {
+                "url": {"type": "string", "default": MOCK + "/v1/a.list"},
+                "method": {"type": "string", "default": "POST"},
+                "headers": {"type": "object", "default": {"Content-Type": "application/json"}},
+                "body": {"type": "object", "default": {"call": {"ani": "", "count": 2, "live": True},
+                                                       "data": {"no": "{{customerNumber}}"}}}}}}}
+
+    def test_a_default_object_becomes_properties_in_pre_actions_and_tools(self):
+        workflow = copy.deepcopy(WORKFLOW)
+        workflow["nodes"]["lookup"]["pre_actions"] = [self.tool()]
+        workflow["global_nodes"] = {"g": {"node_type": "conversation", "tools": [self.tool()]}}
+        cleaned = generic.clean(workflow)
+        for tool in (cleaned["nodes"]["lookup"]["pre_actions"][0], cleaned["global_nodes"]["g"]["tools"][0]):
+            properties = tool["function"]["parameters"]["properties"]
+            self.assertEqual({"type": "object", "properties": {"Content-Type": {
+                "type": "string", "default": "application/json"}}}, properties["headers"])
+            self.assertEqual({"type": "object", "properties": {
+                "call": {"type": "object", "properties": {"ani": {"type": "string", "default": ""},
+                                                          "count": {"type": "number", "default": 2},
+                                                          "live": {"type": "boolean", "default": True}}},
+                "data": {"type": "object", "properties": {"no": {"type": "string",
+                                                                 "default": "{{customerNumber}}"}}}}},
+                properties["body"])
+
+    def test_a_written_leaf_keeps_its_description(self):
+        spec = {"type": "object", "default": {"no": "{{n}}"},
+                "properties": {"no": {"type": "string", "description": "number"}}}
+        self.assertEqual({"type": "object", "properties": {"no": {"type": "string", "default": "{{n}}",
+                                                                  "description": "number"}}},
+                         generic._as_properties(spec))
+
+    def test_validate_names_a_default_object_body(self):
+        problems = []
+        generic_tool = self.tool()
+        problems = generic._tool_problems(generic_tool, "node lookup", [], MOCK)
+        self.assertTrue(any("body must use properties" in item for item in problems), problems)
+        self.assertTrue(any("headers must use properties" in item for item in problems), problems)

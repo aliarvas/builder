@@ -14,7 +14,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 API_URL = "https://api.anthropic.com/v1/messages"
@@ -30,6 +30,10 @@ MAX_OUTPUT_TOKENS = 48000
 REQUEST_TIMEOUT_SECONDS = 600
 # T-052: a reply cut at the output limit is continued at most this many times.
 MAX_CONTINUATIONS = 2
+# T-052: a streamed reply that runs into this much whitespace in a row has degenerated
+# (seen live: tens of thousands of blank tokens inside a JSON reply); reading stops there.
+WHITESPACE_RUN_LIMIT = 2000
+WHITESPACE_RUN = "whitespace_run"
 CONTINUE_NOTE = ("Your reply was cut at the output limit. Continue exactly where you stopped: write only the "
                  "remaining text, starting with the next character, with no repetition and no comment.")
 KEY_ENV = "ANTHROPIC_API_KEY"
@@ -153,9 +157,9 @@ class AnthropicClient:
         Still cut after the last continuation: LLMError."""
         limit = max_tokens or self.max_tokens
         allowed = self.continuations if continuations is None else continuations
-        result = self._once(system, messages, purpose, limit)
+        result = _settled(self._once(system, messages, purpose, limit))
         text, results = result.text, [result]
-        while result.stop_reason == "max_tokens" and len(results) <= allowed:
+        while result.stop_reason in ("max_tokens", WHITESPACE_RUN) and len(results) <= allowed:
             prefill = text.rstrip()
             purpose_next = f"{purpose}_continue_{len(results)}"
             if self._prefill:
@@ -163,6 +167,7 @@ class AnthropicClient:
                     result = self._once(system, [*messages, {"role": "assistant", "content": prefill}],
                                         purpose_next, limit)
                     text = prefill + _rejoin(text[len(prefill):], result.text)
+                    result = _settled(result, text)
                     results.append(result)
                     continue
                 except LLMError as exc:
@@ -174,8 +179,9 @@ class AnthropicClient:
             result = self._once(system, [*messages, {"role": "assistant", "content": prefill},
                                          {"role": "user", "content": CONTINUE_NOTE}], purpose_next, limit)
             text = prefill + _rejoin(text[len(prefill):], _without_overlap(prefill, result.text))
+            result = _settled(result, text)
             results.append(result)
-        if result.stop_reason == "max_tokens":
+        if result.stop_reason in ("max_tokens", WHITESPACE_RUN):
             raise LLMError(f"model call {purpose!r} hit the output limit ({limit} tokens"
                            + (f", {len(results) - 1} continuation(s))" if len(results) > 1 else ")"))
         if len(results) == 1:
@@ -246,6 +252,21 @@ class AnthropicClient:
         return result
 
 
+def _settled(result: LLMResult, text: str | None = None) -> LLMResult:
+    """A reply stopped at a whitespace run is finished when the text so far is one whole JSON
+    value; otherwise it is continued like a reply cut at the output limit."""
+    if result.stop_reason != WHITESPACE_RUN:
+        return result
+    whole = (result.text if text is None else text).strip()
+    if whole.startswith("```"):
+        whole = whole.strip("`").removeprefix("json").strip()
+    try:
+        json.loads(whole)
+    except ValueError:
+        return result
+    return replace(result, stop_reason="end_turn")
+
+
 def _rejoin(trimmed: str, continuation: str) -> str:
     """The whitespace trimmed from the prefill (the API refuses it) comes back, unless the
     continuation starts with its own."""
@@ -264,6 +285,7 @@ def _read_stream(response: Any) -> dict[str, Any]:
     """A streamed Messages reply (server-sent events) as the body a plain reply would have."""
     text: list[str] = []
     body: dict[str, Any] = {"usage": {}, "stop_reason": ""}
+    blank = 0  # whitespace characters at the end of the text so far
     for raw in response:
         line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
         if not line.startswith("data:"):
@@ -278,7 +300,12 @@ def _read_stream(response: Any) -> dict[str, Any]:
             body["model"] = message.get("model")
             body["usage"].update(message.get("usage") or {})
         elif kind == "content_block_delta" and (event.get("delta") or {}).get("type") == "text_delta":
-            text.append(event["delta"].get("text", ""))
+            piece = event["delta"].get("text", "")
+            text.append(piece)
+            blank = blank + len(piece) if not piece.strip() else len(piece) - len(piece.rstrip())
+            if blank > WHITESPACE_RUN_LIMIT:
+                body["stop_reason"] = WHITESPACE_RUN
+                break
         elif kind == "message_delta":
             body["stop_reason"] = (event.get("delta") or {}).get("stop_reason") or body["stop_reason"]
             body["usage"].update({key: value for key, value in (event.get("usage") or {}).items() if value is not None})

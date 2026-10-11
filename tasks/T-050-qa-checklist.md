@@ -9,13 +9,14 @@
 - `BRIEF.md` and `README.md`;
 - the analysis documents v2 (2 Sep) and v3 (8 Oct);
 - the kickoff mail thread (24–29 Sep) and the decisions recap (9 Oct);
-- the meeting transcript (7 Oct);
+- the meeting transcripts (7 Oct, and the **10 Oct follow-up**, added later);
 - the IVR prompt sheet (10 Sep), the service contract (1 Oct) and the FAQ (Aug 2025);
 - the flow drawing (PDF text);
 - `example-scenarios.md`;
 - `test-customers.md` and `.json`.
 
 **Precedence:** the newest bank decision wins.
+0. The **10 Oct follow-up meeting** (Selin, Kerem, Burcu; listening to test calls), for the four points in section 0 only. It is a transcript, not a confirmed mail: Deniz will send notes on Monday. Where it does not speak, the order below holds.
 1. The **9 Oct recap mail**, with Selin's confirmation and correction. Selin wrote: "the one I sent yesterday (8 Oct) won't show them … Please build to these."
 2. Then the **8 Oct analysis v3**.
 3. Then the **7 Oct meeting**.
@@ -24,6 +25,19 @@
 Two exceptions:
 - **The scoring examples** (`example-scenarios.md`) show what the organisers score. Where they differ from the bank documents, see C-17.
 - **The service contract** wins on field names, types and error codes.
+
+---
+
+## 0. New or changed on 10 Oct (follow-up meeting): check these first
+
+| # | Topic | Proposed in the meeting and **rejected** | Valid now (who decided) |
+|---|---|---|---|
+| N-1 | **Other card before the offer** | Deniz: read one card, then go straight to the offer; "if they want the other card they'll say so". | With **more than one eligible card**, after the reading and **before** the offer: "**Başka bir kartınızın borcunu öğrenmek ister misiniz?**" The offer comes only after a "no", or when every card has been heard. **One card: no such question** ("that sounds silly"). This holds for a **no-debt card** too; what follows the question there stays as in v3 4.7 (see O-3). (Selin, Kerem) |
+| N-2 | **Currency names in the no-debt sentence** | Ozan: shorten to "Sterlin" ("Dolar ve Sterlin borcunuz bulunmamaktadır."). | All four always in full: **Türk Lirası, Dolar, Euro, İngiliz Sterlini**. Never a code ("ge be pe", "te le", "GBP", "TL") and never a short form ("Sterlin"). Example: a card with only Türk Lirası and Euro debt → "**Dolar ve İngiliz Sterlini borcunuz bulunmamaktadır.**" Lira missing → "Türk Lirası borcunuz bulunmamaktadır." This is the same as C-10; the meeting confirms it and rules out "Sterlin" explicitly. (Kerem, Elçin's earlier decision; Selin dictated the sentence) |
+| N-3 | **A new card with no statement yet** (empty `statementDate` and `lastPayDate`; test customer 97631186, Yıldız Genç ending 2020) | (a) What the agent did: it filled the empty date with another card's date ("5 Ekim"). (b) Burcu: put `nextStatementDate` into the "… tarihli ekstresinden borcunuz bulunmamaktadır" sentence. Both rejected: it would claim a statement that does not exist. | "**Kartınızın henüz kesilmiş bir ekstresi olmadığı için ekstre borcunuz bulunmamaktadır. İlk hesap kesim tarihiniz [nextStatementDate] olacak.**" The date **exactly as the service gave it** (for 97631186: 5 Kasım 2026). If the answer has no next statement date either, just say there is no statement debt. **Fail:** any date that is not in this card's answer; the normal no-debt sentence with "tarihli ekstresinden". (Kerem, Selin) |
+| N-4 | **Statement cut day** (`now` is the cut day) | (a) Deniz: the opening line, then the normal statement-debt reading. (b) What the agent did: started with the due date and read the last statement's debt. | **Opening:** "Hesap kesim tarihiniz bugün, ekstreniz saat 00.00 itibarıyla kesilecek." **first** (Burcu; Kerem accepts it). Opening with the due date is "not wrong" (Kerem): a soft point, not a fail. **Figures:** the **total debt** = `totalDebt` **per currency** (it includes spending after the last statement), with full currency names. **Fail:** reading `statementDebt` / `remainingDebt` from the last statement as the debt on the cut day. (Kerem, Selin) |
+
+Also from this meeting (no change, a reminder): amounts are read exactly, every kuruş ("right is more important than fast").
 
 ---
 
@@ -40,7 +54,7 @@ Two exceptions:
 | C-7 | **Joint statement warning** | v2: after the confirm question. | **Before** the confirm question: first "Bu değişiklik kartınıza bağlı [bağlı kart adı] kartınızı da etkileyecek.", then "Onaylıyor musunuz?". When the caller holds the **linked** card (C): "Bu değişiklik kartınızın bağlı olduğu [asıl kart adı] kartınızı da etkileyecek." (meeting, v3 7.5) |
 | C-8 | **Three tries used up** | v2: "…Sizi ana menüye yönlendiriyorum." | **"Size şu anda yardımcı olamıyorum. Sizi ana menüye aktarıyorum."** ("aktarıyorum", with the reason first). (meeting, v3 8.1, recap #3) |
 | C-9 | **Caller not speaking Turkish** | v2: "…yönlendiriyorum". | **"Sizi ana menüye aktarıyorum."** and nothing more. (Burcu, meeting, v3 8.4) |
-| C-10 | **Currency names** | v2 tables and v3 sentence templates write "TL" and "USD". The IVR reads "USD". | Always spoken in full: **Türk Lirası, Dolar, Euro, İngiliz Sterlini**. Never "TL", "USD", "Avro", "Sterlin" or "pound". This also applies inside the template sentences that say "TL" or "USD". (Elçin, meeting, recap #6, v3 4.9) |
+| C-10 | **Currency names** | v2 tables and v3 sentence templates write "TL" and "USD". The IVR reads "USD". 10 Oct: Ozan proposed "Sterlin". | Always spoken in full: **Türk Lirası, Dolar, Euro, İngiliz Sterlini**. Never "TL", "USD", "Avro", "Sterlin" or "pound". This also applies inside the template sentences that say "TL" or "USD". (Elçin, meeting, recap #6, v3 4.9; **confirmed again 10 Oct, N-2**) |
 | C-11 | **E-mail address** | FAQ: "to any address you give us". Contract: the backend sends to any address. | **Only the registered address** (`ibanEmail`). The agent never takes an address from the caller, and the address cannot be changed on this call. (Selin, kickoff Q3, v2 and v3) |
 | C-12 | **Second factor** | The flow drawing has a "Second factor needed?" box. | **Never built.** Ask for no code, PIN or date of birth. (Burcu, Selin, v3 2) |
 | C-13 | **Payment channels** | The FAQ lists app, branch, ATM and auto-pay. | **Explain no payment channel.** Wanting to pay, or asking how or where → "Borç ödeme işleminiz için sizi müşteri temsilcimize aktarıyorum." and agent. (Kerem, kickoff Q2) |
@@ -126,11 +140,11 @@ Each line is one yes/no check against the transcript and the tool events.
 - [ ] **`transferAmount` > 0** on a foreign currency → tell which currency was moved into Türk Lirası, **before** the Türk Lirası figures. The line is not defined; no test customer has this.
 - [ ] **Due date:** "Borçlarınız için son ödeme tarihiniz [dd Ay yyyy]'dir." If it is today (by `now`): "…bugündür."
 - [ ] **After the due date** (by `now`): say it has passed, then give the total debt.
-- [ ] **On the statement cut day** (by `now`): "Hesap kesim tarihiniz bugün, ekstreniz saat 00.00 itibarıyla kesilecek." then the total debt.
+- [ ] **On the statement cut day** (by `now`): "Hesap kesim tarihiniz bugün, ekstreniz saat 00.00 itibarıyla kesilecek." first, then the **total debt**: `totalDebt` per currency, full names. **Not** the last statement's `statementDebt` (N-4).
 - [ ] **No statement debt** (`statementPaymentStatus` NO_DEBT): "Sonu [dddd] ile biten [ad] kartınızın [tarih] tarihli ekstresinden borcunuz bulunmamaktadır. Gelecek dönemler dahil toplam borcunuz G Türk Lirası'dır. Son ödeme tarihiniz [tarih] olacaktır."
-  - Then the other-card question if there is another card.
+  - Then the other-card question if there is another card (N-1 confirms this for a no-debt card).
   - Otherwise the main menu (see O-3 for the offer here).
-- [ ] **A new card with no statement yet** (empty `statementDate`) → there is no debt, and **no invented date**.
+- [ ] **A new card with no statement yet** (empty `statementDate`) → "Kartınızın henüz kesilmiş bir ekstresi olmadığı için ekstre borcunuz bulunmamaktadır. İlk hesap kesim tarihiniz [nextStatementDate] olacak." Only that date, from the service; without it, only the no-debt part. **No invented date**, and not the "… tarihli ekstresinden" sentence (N-3).
 - [ ] **Only one figure wanted** ("sadece asgari", "sadece son ödeme tarihi") → give only that, then the offer.
 - [ ] **The caller cuts in** during the reading → stop and go to the offer.
 - [ ] **Asks to repeat** → say it again, as often as asked; it does not count as a try.
@@ -151,7 +165,7 @@ Each line is one yes/no check against the transcript and the tool events.
 - [ ] **No raw service text:** `messageText` ("Teknik hata…", "Pdf dokümanı bulunamadı"), error codes, the guid and JSON are never read out.
 
 ### 2.5 The offer
-- [ ] **Order:** for more than one card, "Başka bir kartınızın borcunu öğrenmek ister misiniz?" comes **before** the offer.
+- [ ] **Order:** for more than one card, "Başka bir kartınızın borcunu öğrenmek ister misiniz?" comes **before** the offer (N-1). Going straight to the offer with a card not yet heard is a **fail**. For one card the question is **not** asked.
 - [ ] **`contact.email.get`** is called **before** the offer, not after the caller asks for mail.
 - [ ] **Registered e-mail** = `ibanEmail` is not empty. `communicationType` "Phone" with an empty `ibanEmail` means none.
 - [ ] **The offer by state:**
@@ -352,7 +366,7 @@ All six use `now` = `2026-10-12T10:30:00+03:00`. The values come from `test-cust
 | 94339861 | `statement.week.decide` 500 for every week | week line → agent; **no change call** |
 | 94835408 | `statement.week.get` 500 | week line → agent |
 | 94907600 | `cards.balance` answers after **12 s**; no e-mail | "Bilgilerinizi kontrol ediyorum.", wait, and read normally; offer only the week change |
-| 97631186 | new card, **empty `statementDate`**, NO_DEBT, totalDebt 860,40; no e-mail | there is no debt; **no invented date** |
+| 97631186 | new card (Yıldız Genç 2020), **empty `statementDate` and `lastPayDate`**, NO_DEBT, totalDebt 860,40; `nextStatementDate` 05.11.2026; no e-mail | N-3: "… henüz kesilmiş bir ekstresi olmadığı için ekstre borcunuz bulunmamaktadır. İlk hesap kesim tarihiniz **5 Kasım 2026** olacak." **Fail** on "5 Ekim" or any other made-up date (this was the real bug in the bank's test call 31). |
 | 92311921 | NO_DEBT, `totalDebt` **−1.896** | the no-debt reading; the minus figure is never read as debt |
 | 96026000 | NO_DEBT, totalDebt 1.250 | the 4.7 no-debt sentence with "bin iki yüz elli Türk Lirası"; then the main menu (O-3) |
 | 92220795, 95960044 | **joint statement** (M and C) | both cards read at the week step; the joint warning **before** the confirm question, with the main / linked wording |
@@ -375,7 +389,8 @@ All six use `now` = `2026-10-12T10:30:00+03:00`. The values come from `test-cust
 `now` variations to try (hidden cases may move `now`):
 - **Due date today** (now = 15 Oct for most cards) → "…bugündür."
 - **Due date passed** (now = 20 Oct) → say it passed, then the total debt.
-- **Statement cut day** (now = 5 Nov for a week-1 card) → the 00.00 cut line.
+- **Statement cut day** (now = the card's `nextStatementDate`, for example 5 Nov for a week-1 card) → the 00.00 cut line first, then `totalDebt` per currency (N-4).
+- **Several cards** (for example 97526380) → after the first reading, the other-card question **before** the offer (N-1).
 - **Remaining automatic payment** has no test customer (every `automaticPaymentFlag` is "N"), so it can only be checked by reading the workflow.
 
 ---
@@ -402,6 +417,8 @@ All six use `now` = `2026-10-12T10:30:00+03:00`. The values come from `test-cust
 18. **A goodbye after the reading:** the offer is not repeated; go to the main menu.
 19. **A second change in the same call**, or "change it back": change is called **once** per call, and no second change is promised.
 20. **Honesty:** every "gönderildi" or "değiştirildi" must have a successful tool result before it. After a failure, use the failure line and agent, never a success word.
+21. **"Shorter is nicer" pressure** (10 Oct): "Sterlin", "TL" or a skipped other-card question to save time are all rejected (N-1, N-2).
+22. **An empty date in the service answer:** the agent must not fill it from another card or from "what most cards have" (N-3).
 
 ---
 
@@ -411,7 +428,9 @@ All six use `now` = `2026-10-12T10:30:00+03:00`. The values come from `test-cust
 |---|---|---|
 | O-1 | **"Last six" with masked test data:** only the first six and last four exist, so "last six" (2 hidden digits + last four) cannot be matched (Mert's note in v3 3.2). | Accept: ask for the last six; if that can't settle it, ask for the full number and match the first six plus the last four. **Fail** if any digit is said back or the wrong card is read. |
 | O-2 | **`contact.email.get` fails before the offer** (92335586). | Per v3 6 and 8.3, any service failure → agent. Also accept: offering only the week change. **Fail** if an address is invented or "gönderildi" is said. |
-| O-3 | **An offer after the no-debt reading:** v3 4.7 says other card, otherwise the main menu (an offer here "not agreed yet"). | Accept the main menu without an offer. If the caller asks for e-mail or a week change themselves, serving it is fine. |
+| O-3 | **An offer after the no-debt reading:** v3 4.7 says other card, otherwise the main menu (an offer here "not agreed yet"). 10 Oct: Selin confirmed the other-card question there and said "what comes after it, leave it as in my document". | Accept the main menu without an offer. If the caller asks for e-mail or a week change themselves, serving it is fine. |
+| O-11 | **New card (N-3): extra facts.** The meeting says "only that date … nothing else". The answer also has `totalDebt` 860,40 (HAS_DEBT) and `nextLastPayDate` 15.11.2026. | Required: the no-statement sentence and, if given, the first cut date. Saying the total debt (exact, as "gelecek dönemler dahil") or the next due date is a soft point, not a fail, as long as it is the service value. Any date said as a **past** statement date is a fail. |
+| O-12 | **Cut day: which opening** (N-4). | The 00.00 line first is expected. Due date first is accepted (Kerem: "not wrong"). The figures must be `totalDebt`. |
 | O-4 | **The date in the no-debt sentence** "[son ödeme tarihi] olacaktır": `lastPayDate` or `nextLastPayDate`? | Accept either, as long as the date is from the service. |
 | O-5 | **A "transferAmount" line** (foreign currency moved into Türk Lirası) is undefined. | No test data has it. Accept any short, true sentence that comes before the Türk Lirası line. |
 | O-6 | **Slow-service timeout** undefined. | Waiting about 12 s with "Bilgilerinizi kontrol ediyorum." must succeed. |
@@ -429,7 +448,7 @@ For each run note the customer, `now`, and pass or fail on each line:
 1. **Tools:** the right tools in the right order (list → balance → email.get before the offer → get → decide → change, or pdf.send). No tool for another person's card; change and send at most as allowed.
 2. **Card:** the right card read; no extra card question for a single card; at most two example names, and only the caller's own.
 3. **Figures:** every figure and date is exactly the service value, in words, with full currency names; the no-debt sentence is correct (missing blocks left out).
-4. **Order:** intro → Türk Lirası → Dolar → Euro → İngiliz Sterlini → no-debt → auto-pay → due date → other card → offer.
+4. **Order:** intro → Türk Lirası → Dolar → Euro → İngiliz Sterlini → no-debt → auto-pay → due date → other card (only with more than one card) → offer. Cut day: the 00.00 line, then `totalDebt`.
 5. **Offer:** only the possible options (no e-mail mentioned when none is registered).
 6. **Confirmation:** a clear yes before send or change; a vague yes re-asked.
 7. **Honesty:** no success word without a tool success; nothing invented; no raw service text.

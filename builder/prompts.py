@@ -964,7 +964,8 @@ GENERIC_SYSTEM = PromptDefinition(
     "overrides an older one; an explicit correction wins. Example conversations and test data illustrate the rules; "
     "they are not rules themselves.\n"
     "- Use the platform documents for the workflow format and follow them exactly.\n"
-    "- Reply with one JSON object only, no prose.",
+    "- Reply with one JSON object only, no prose, written compactly: no indentation and no blank lines. A long run "
+    "of spaces or line breaks ends the reading of your reply.",
 )
 GENERIC_PLATFORM_RULES = PromptDefinition(
     "GENERIC_PLATFORM_RULES", "Workflow rules learned in our live runs, given to every generic-mode call (T-046).",

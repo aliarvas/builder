@@ -372,6 +372,7 @@ def clean(workflow: dict[str, Any]) -> dict[str, Any]:
 
     result = strip(workflow)
     _tool_timeouts(result)
+    _api_properties(result)
     result.pop("agent_config", None)
     result.pop("nodePositions", None)
     for section in ("nodes", "global_nodes"):
@@ -385,15 +386,60 @@ def clean(workflow: dict[str, Any]) -> dict[str, Any]:
 TOOL_TIMEOUT_MS = 30000
 
 
-def _tool_timeouts(workflow: dict[str, Any]) -> None:
-    """Every api tool waits at least TOOL_TIMEOUT_MS per attempt."""
+def _api_tools(workflow: dict[str, Any]) -> list[dict[str, Any]]:
     tools = list(workflow.get("tools") or [])
     for section in ("nodes", "global_nodes"):
         for node in (workflow.get(section) or {}).values():
             if isinstance(node, dict):
                 tools += [*(node.get("tools") or []), *(node.get("pre_actions") or [])]
-    for tool in tools:
-        if isinstance(tool, dict) and (tool.get("function") or {}).get("handler") == "__function__:api_call":
+    return [tool for tool in tools
+            if isinstance(tool, dict) and (tool.get("function") or {}).get("handler") == "__function__:api_call"]
+
+
+# T-053: the engine reads an api_call body and headers only as `properties`, one `default` per
+# leaf; a whole object under `default` is never sent (seen live: the call never started).
+API_OBJECT_PARTS = ("body", "headers")
+
+
+def _api_properties(workflow: dict[str, Any]) -> None:
+    """Rewrite a body or headers given as one ``default`` object into ``properties`` leaves."""
+    for tool in _api_tools(workflow):
+        properties = ((tool.get("function") or {}).get("parameters") or {}).get("properties")
+        if not isinstance(properties, dict):
+            continue
+        for part in API_OBJECT_PARTS:
+            spec = properties.get(part)
+            if isinstance(spec, dict) and isinstance(spec.get("default"), dict):
+                properties[part] = _as_properties(spec)
+
+
+def _as_properties(spec: dict[str, Any]) -> dict[str, Any]:
+    value = spec.get("default")
+    result = {**{key: item for key, item in spec.items() if key != "default"}, **dict(type="object")}
+    leaves = {key: _schema_of(item) for key, item in value.items()}
+    for key, leaf in (spec.get("properties") or {}).items():  # a written leaf keeps its description, enum, ...
+        if isinstance(leaf, dict) and isinstance(leaves.get(key), dict):
+            leaf = {**leaves[key], **leaf} if "properties" not in leaves[key] else leaves[key]
+        leaves[key] = leaf
+    result["properties"] = leaves
+    return result
+
+
+def _schema_of(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(type="object", properties={key: _schema_of(item) for key, item in value.items()})
+    if isinstance(value, bool):
+        return dict(type="boolean", default=value)
+    if isinstance(value, (int, float)):
+        return dict(type="number", default=value)
+    if isinstance(value, list):
+        return dict(type="array", default=value)
+    return dict(type="string", default=value)
+
+
+def _tool_timeouts(workflow: dict[str, Any]) -> None:
+    """Every api tool waits at least TOOL_TIMEOUT_MS per attempt."""
+    for tool in _api_tools(workflow):
             config = tool.setdefault("config", {})
             try:
                 current = int(config.get("timeoutMs") or 0)
@@ -518,6 +564,11 @@ def _tool_problems(tool: Any, where: str, operations: list[tuple[str, str, re.Pa
     if handler != "__function__:api_call":
         return []
     properties = (function.get("parameters") or {}).get("properties") or {}
+    shape = [f"{where}: tool {name}: api_call {part} must use properties (one leaf per field with its own "
+             f"default), not one default object" for part in API_OBJECT_PARTS
+             if isinstance(properties.get(part), dict) and isinstance(properties[part].get("default"), dict)]
+    if shape:
+        return shape
     url = str((properties.get("url") or {}).get("default") or "")
     method = str((properties.get("method") or {}).get("default") or "GET").upper()
     base = mock_url.rstrip("/")

@@ -46,3 +46,25 @@ python3 builder/build.py --slot final ~/Desktop/final-case/case https://freya-fi
 
 - **Prefill support:** I could not check whether Sonnet 5.5 accepts an assistant prefill without a model call. A rejection falls back automatically.
 - **A cut in the middle of the JSON:** the continuation joins the raw text. If the joined text is not valid JSON, the existing `render_retry` asks once more.
+
+## Update after the 21:30 build (status ok, 1389 s)
+
+**What the trace showed:**
+- The fallback worked: the prefill was **rejected** (HTTP 400), so the run switched to the user note.
+- The render took 480 + 441 + 69 s, for **141k** output tokens. Its real content was only about **25k** tokens; the rest was a run of blank characters.
+- **Evidence:** the input tokens of `continue_1` show that the first 64000-token part held only ~1k tokens once trimmed.
+- The design was cut at 8000 tokens twice, most likely for the same reason. It then fell back to rendering from the documents.
+
+**Fix:**
+- `_read_stream` stops reading after **2000 blank characters in a row** (stop reason `whitespace_run`).
+  - If the text so far is one whole JSON value, the reply counts as finished.
+  - Otherwise it is continued like a reply cut at the output limit.
+- `GENERIC_SYSTEM` now asks for compact JSON, with no indentation and no blank lines.
+- 2 new tests.
+
+**Expected effect:** the render takes about 2–3 minutes instead of about 16, and the design fits in 8000 tokens.
+
+**Self-test, 8 of 8 errors:** `POST /api/v2/chat/message -> 504` on the first turn, after 28–43 s.
+- The opening runs several silent steps in one turn: cards.list → code → balance → email → code. The kit notes that a long turn can return 504.
+- Part of it was probably the pre_action body problem (T-053): the calls did not start and the turn went to end_fail.
+- After T-053, a single chat turn is needed to check this (Freya approval).
