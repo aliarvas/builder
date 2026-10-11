@@ -24,8 +24,10 @@ EXTRACTION_MODEL = "claude-sonnet-5-5"
 # Sampling temperature sent with each request; None sends none. The pinned model rejects the
 # setting ("temperature is deprecated for this model", live run T-006), so none is sent.
 EXTRACTION_TEMPERATURE: float | None = None
-MAX_OUTPUT_TOKENS = 16000
-REQUEST_TIMEOUT_SECONDS = 300
+# Raw bank material makes long replies (evidence quotes): one outcomes reply passed 16000 in the
+# organizer rehearsal, which stopped the build. The limit is only a ceiling; replies are billed by use.
+MAX_OUTPUT_TOKENS = 48000
+REQUEST_TIMEOUT_SECONDS = 600
 KEY_ENV = "ANTHROPIC_API_KEY"
 ANTHROPIC_KEY_PATTERN = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
 RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504, 529})
