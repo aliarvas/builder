@@ -28,6 +28,8 @@ CASES = {case["id"]: case for case in json.loads(
 # (T-006, F-040; the older shape) and fixture B.
 AB_SPECS = {
     "tagged": ROOT / "tests/fixtures/extract/brief-ab-extracted-tagged.json",
+    # Fresh live A+B extraction with the F-061/F-062 fields (AB-FRESH).
+    "v2": ROOT / "tests/fixtures/extract/brief-ab-extracted-v2.json",
     "f040-b": ROOT / "traces/f040-b.spec.json",
     "t006-brief-b": ROOT / "traces/t006-brief-b.spec.json",
     # Hand-written Brief B fixture in the current spec shape (product kind and label, F-044).
@@ -192,6 +194,16 @@ class Session:
         intent = closing["condition"]["conditions"][0]["conditions"][0]
         return {intent["variable"]: intent["operand"]}
 
+    def end_product(self, refusal=None, limit=5):
+        """Refuse the product being discussed until code ends it: with persuasion attempts in
+        the spec, each refusal uses one attempt while attempts are left (AB-FRESH risk 1)."""
+        refusal = refusal or self.refusal()
+        for _ in range(limit):
+            self.say(**refusal)
+            if self.step != "negotiate":
+                break
+        return self
+
     def named(self, kind_words, ordinal):
         """How the bank line names a product: by kind when the spec has the kind field (F-044)."""
         return kind_words if self.has_kind else "the " + ordinal + " product"
@@ -286,15 +298,14 @@ class MultiProductCaseTests(unittest.TestCase):
         # F-061/F-062 (was the MULTI-READY gap): each refused product is closed in code and
         # gets add_note(refused) before the goodbye; the ledger matches the case.
         case = CASES["PUB-12"]
-        for name in ("tagged", "fixture-b"):
+        for name in ("tagged", "v2", "fixture-b"):
             with self.subTest(spec=name):
                 session = Session(AB_SPECS[name], case)
                 session.say(offer_date="tomorrow", offer_product_number=1)
-                refusal = session.refusal()
-                session.say(**refusal)  # the loan: refused for good
+                session.end_product()  # the loan: refused until its attempts are used up
                 self.assertEqual("offer_say", session.step)
                 self.assertIn(session.named("car loan", "third"), session.vars["offer_message"])
-                session.say(**refusal)  # the car loan
+                session.end_product()  # the car loan
                 self.assertEqual("confirm_record", session.step)
                 session.record_all()
                 self.assertEqual("promise", session.close()[0])
@@ -306,24 +317,53 @@ class MultiProductCaseTests(unittest.TestCase):
 
     def test_pub12_persuasion_attempts_are_counted_per_product_band(self):
         # Check "two attempts on the personal loan (late band), one on the car loan (early band)":
-        # the tagged spec gives the attempts per band; code counts the refusals.
-        session = Session(AB_SPECS["tagged"], CASES["PUB-12"])
-        attempt = {"negotiation_reply": "refusal_attempts_left"}
+        # the tagged and the fresh spec give the attempts per band; code counts the refusals.
+        for name in ("tagged", "v2"):
+            with self.subTest(spec=name):
+                session = Session(AB_SPECS[name], CASES["PUB-12"])
+                negotiation = session.spec.negotiation.data
+                attempt = {negotiation["intent_variable"]: negotiation["attempt_values"][0]}
+                session.say(offer_date="tomorrow", offer_product_number=1)
+                steps = []
+                for _ in range(5):
+                    session.say(**attempt)
+                    steps.append((session.step, session.vars["persuasion_attempt"]))
+                    if session.step == "confirm_record":
+                        break
+                self.assertEqual([
+                    ("negotiate", 1), ("negotiate", 2),   # the loan: two persuasion attempts
+                    ("offer_say", 0),                     # used up: the car loan starts at attempt 0
+                    ("negotiate", 1),                     # the car loan: one attempt
+                    ("confirm_record", 1),                # used up; the card's offer is read back
+                ], steps)
+                self.assertEqual("none", session.vars[negotiation["intent_variable"]])
+                self.assertEqual({"2": "refused", "3": "refused"}, json.loads(session.vars["product_note_reasons"]))
+
+    def test_an_end_value_with_attempts_left_uses_an_attempt(self):
+        # AB-FRESH risk 1: the model writes the "product ends" value on the first no; code
+        # still makes the persuasion attempts of the band (the loan: 2, the car loan: 1).
+        for name in ("tagged", "v2"):
+            with self.subTest(spec=name):
+                session = Session(AB_SPECS[name], CASES["PUB-12"])
+                negotiation = session.spec.negotiation.data
+                end = {negotiation["intent_variable"]: negotiation["product_end_values"][0]}
+                session.say(offer_date="tomorrow", offer_product_number=1)
+                steps = []
+                for _ in range(5):
+                    session.say(**end)
+                    steps.append((session.step, session.vars["persuasion_attempt"]))
+                    if session.step == "confirm_record":
+                        break
+                self.assertEqual([("negotiate", 1), ("negotiate", 2), ("offer_say", 0),
+                                  ("negotiate", 1), ("confirm_record", 1)], steps)
+                self.assertEqual({"2": "refused", "3": "refused"}, json.loads(session.vars["product_note_reasons"]))
+
+    def test_without_persuasion_attempts_an_end_value_ends_the_product_at_once(self):
+        session = Session(AB_SPECS["fixture-b"], CASES["PUB-12"])
         session.say(offer_date="tomorrow", offer_product_number=1)
-        steps = []
-        for _ in range(5):
-            session.say(**attempt)
-            steps.append((session.step, session.vars["persuasion_attempt"]))
-            if session.step == "confirm_record":
-                break
-        self.assertEqual([
-            ("negotiate", 1), ("negotiate", 2),   # the loan: two persuasion attempts
-            ("offer_say", 0),                     # used up: the car loan starts at attempt 0
-            ("negotiate", 1),                     # the car loan: one attempt
-            ("confirm_record", 1),                # used up; the card's offer is read back
-        ], steps)
-        self.assertEqual("none", session.vars["negotiation_reply"])
-        self.assertEqual({"2": "refused", "3": "refused"}, json.loads(session.vars["product_note_reasons"]))
+        session.say(**session.refusal())
+        self.assertEqual("offer_say", session.step)
+        self.assertEqual({"2": "refused"}, json.loads(session.vars["product_note_reasons"]))
 
     def test_old_specs_without_the_new_fields_keep_the_old_routes(self):
         # Live A+B specs extracted before F-061/F-062: the refusal still goes to the read-back

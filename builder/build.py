@@ -21,7 +21,10 @@ if __package__:
     from .slots import save_with_slot_check
     from .spec import SpecError, load_spec, spec_entry_variables
     from .tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
-    from .workflow import BUDGET_EXCEEDED, build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
+    from .workflow import (
+        BUDGET_EXCEEDED, SANDBOX_PAYLOAD_LIMIT, VARIABLE_RESERVE_BYTES, build_spec_workflow, build_workflow,
+        workflow_code_payloads, workflow_prompt_estimates, workflow_tools_by_step,
+    )
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from builder import freya, freya_chat
@@ -32,7 +35,10 @@ else:
     from builder.slots import save_with_slot_check
     from builder.spec import SpecError, load_spec, spec_entry_variables
     from builder.tools_from_openapi import CALL_VARIABLES, OpenAPIError, tools_from_openapi
-    from builder.workflow import BUDGET_EXCEEDED, build_spec_workflow, build_workflow, workflow_prompt_estimates, workflow_tools_by_step
+    from builder.workflow import (
+        BUDGET_EXCEEDED, SANDBOX_PAYLOAD_LIMIT, VARIABLE_RESERVE_BYTES, build_spec_workflow, build_workflow,
+        workflow_code_payloads, workflow_prompt_estimates, workflow_tools_by_step,
+    )
 
 
 class BuilderInputError(ValueError):
@@ -274,6 +280,13 @@ def main(argv: list[str] | None = None) -> int:
             trace.add("prompt_estimate", f"{step}: ~{estimate} tokens")
             if estimate > 1500:
                 trace.add("warning", f"{step}: prompt estimate ~{estimate} tokens; OVER BUDGET")
+        # F-066: code plus call variables must stay under the sandbox payload limit.
+        code_budget = SANDBOX_PAYLOAD_LIMIT - VARIABLE_RESERVE_BYTES
+        for site, size in workflow_code_payloads(workflow).items():
+            trace.add("code_payload", f"{site}: {size} bytes (code budget {code_budget})")
+            if size > code_budget:
+                trace.add("warning", f"{site}: code {size} bytes leaves under {VARIABLE_RESERVE_BYTES} bytes "
+                          f"for call variables (sandbox limit {SANDBOX_PAYLOAD_LIMIT}); the step may not run")
 
         if args.print_only:
             print(json.dumps(workflow, indent=2, ensure_ascii=False))

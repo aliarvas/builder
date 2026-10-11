@@ -20,8 +20,8 @@ from .offer_check import (
     NOTE_PRODUCT_ID, NOTE_REASON, NOTE_RESULT, NOTE_STATE, PERSUASION_ATTEMPT, PRODUCT_REFUSAL_STATE,
     note_next_code, product_refusal_code,
 )
-from .prompts import PERSUASION_STATE_LINE, PRODUCT_INTENT_DESCRIPTION
-from .record_loop import RECORDED_NUMBERS
+from .prompts import PERSUASION_STATE_LINE, PRODUCT_END_COUNTED_DESCRIPTION, PRODUCT_INTENT_DESCRIPTION
+from .record_loop import FAILED_NUMBERS, RECORDED_NUMBERS
 from .spec import FRAMEWORK_NONE_VALUE, PhoneAgentSpec, SpecError
 from .tools_from_openapi import CALL_VARIABLES
 
@@ -110,11 +110,15 @@ def add_product_steps(
         negotiate["transitions"].insert(1, _transition(
             PRODUCT_REFUSAL, "The customer refuses the product being discussed",
             [_condition(intent, "equals", value) for value in values]))
+        product_end = ", ".join(negotiation.get("product_end_values", []))
+        attempt = ", ".join(negotiation.get("attempt_values", [])) or FRAMEWORK_NONE_VALUE
         for field in negotiate.get("extraction_schema", []):
             if field["name"] == intent:
                 field["description"] += " " + PRODUCT_INTENT_DESCRIPTION.text.replace(
-                    "{product_end}", ", ".join(negotiation.get("product_end_values", []))
-                ).replace("{attempt}", ", ".join(negotiation.get("attempt_values", [])) or FRAMEWORK_NONE_VALUE)
+                    "{product_end}", product_end).replace("{attempt}", attempt)
+                if spec.offer.data.get("persuasion_attempts"):
+                    field["description"] += " " + PRODUCT_END_COUNTED_DESCRIPTION.text.replace(
+                        "{product_end}", product_end).replace("{attempt}", attempt)
         if spec.offer.data.get("persuasion_attempts"):
             negotiate["task_message"] += "\n" + PERSUASION_STATE_LINE.text.replace(
                 "{attempt}", "{{" + PERSUASION_ATTEMPT + "}}")
@@ -128,7 +132,7 @@ def add_product_steps(
             if warnings is not None:
                 warnings.append(f"{NOTES_DROPPED}: {exc}")
             return
-        nodes[NOTE_NEXT] = code_node(NOTE_NEXT, note_next_code(spec, RECORDED_NUMBERS, special_results), [
+        nodes[NOTE_NEXT] = code_node(NOTE_NEXT, note_next_code(spec, RECORDED_NUMBERS, special_results, FAILED_NUMBERS), [
             _transition(NOTE_RECORD, "A product without a promise has no note yet",
                         [_condition(NOTE_STATE, "equals", "note")]),
             {"target_node": "closing_say", "description": "Every note is written", "condition": {"operator": "always"}},

@@ -44,12 +44,13 @@ from .record_loop import (
     RESULT_VARIABLE as RECORD_RESULT,
     record_next_code, record_promise_node, record_values,
 )
-from .product_notes import add_product_steps
+from .product_notes import NOTE_RECORD, PRODUCT_REFUSAL, add_product_steps, refusal_values
 from .spec import ENFORCEMENT_CHECKS, FRAMEWORK_NONE_VALUE, OPENING_GREETING_VALUE, PhoneAgentSpec, Rule, SpecError, SpecialPath
 from .spoken import agent_directed, spoken_words
 from .callback import (
-    BOOK_FAILURE_COUNT, THIRD_PARTY_ASK, add_collect_rule, callback_entry_transition, callback_extraction_fields,
-    callback_nodes, third_party_ask_node,
+    BOOK_FAILURE_COUNT, THIRD_PARTY_ASK, THIRD_PARTY_CLOSE_CHECK, add_collect_rule, callback_entry_transition,
+    callback_extraction_fields, callback_nodes, third_party_ask_node, third_party_close_guard_node,
+    third_party_extraction_fields,
 )
 from .tools_from_openapi import CALL_VARIABLES
 
@@ -573,6 +574,21 @@ def _increment_code(variable: str, clear_variable: str, clear_value: str = "") -
     )
 
 
+# F-065: the silent loops (close and record) exit on variables their code steps write. When the
+# code sandbox is unreachable those steps do not run, and the loop would call the bank again and
+# again. Each loop also exits on the engine's own call counters, which need no code. The record
+# cap allows twice the most products in a kit case, each with every attempt the spec allows.
+RECORD_LOOP_PRODUCT_CAP = 2 * ESTIMATED_PRODUCTS
+
+
+def _engine_call_cap(names: tuple[str, ...], cap: int) -> list[dict[str, Any]]:
+    """Conditions true once any call counter of ``names`` (node ids or tool names) passes ``cap``."""
+    return [
+        _condition(f"{name}_{kind}_count", "greater_than", cap)
+        for name in names for kind in ("success", "failure")
+    ]
+
+
 def _confirmation_progress_code(spec: PhoneAgentSpec) -> str:
     """After each promise call of the record loop (F-063): count it, apply the per-product
     retry rule, and remember which products are recorded so ``record_next`` moves on.
@@ -1068,7 +1084,8 @@ def _render_spec_workflow(
         (special_result_variable(path), "") for path in spec.special_paths
     ] + [(negotiation["intent_variable"], FRAMEWORK_NONE_VALUE), (confirmation["intent_variable"], FRAMEWORK_NONE_VALUE)]
     used = {
-        "opening", "opening_reask", "opening_unclear", "third_party", IDENTITY_CHECK, "identity", "account", "negotiate",
+        "opening", "opening_reask", "opening_unclear", "third_party", THIRD_PARTY_ASK, THIRD_PARTY_CLOSE_CHECK,
+        IDENTITY_CHECK, "identity", "account", "negotiate",
         "confirm_record", RECORD_NEXT, RECORD_PROMISE, "confirmation_progress", "closing", "closing_say", "close_attempt",
         "offer_setup", "check_offer", OFFER_SAY, REVISE_ASK,
         "close_record", "end_call",
@@ -1160,8 +1177,10 @@ def _render_spec_workflow(
         ), [callback_tool], [
             to_closing("callback_scheduled", "Callback was scheduled"),
             to_closing("callback_failed", "Callback could not be scheduled"),
-            *(to_closing("third_party:" + value, "Third-party path is complete") for value in third["close_values"]),
+            *(_transition(THIRD_PARTY_CLOSE_CHECK, "Check the third-party closing intent",
+                          rules["third_party:" + value]) for value in third["close_values"]),
         ]),
+        THIRD_PARTY_CLOSE_CHECK: third_party_close_guard_node(spec, _code_node, "closing"),
         # F-049: a replayed or re-entered identity step must not ask again once verified.
         IDENTITY_CHECK: _code_node(IDENTITY_CHECK, "vars['identity_checked'] = 'yes'\n", [
             _transition("account", "Identity already verified", [
@@ -1263,6 +1282,10 @@ def _render_spec_workflow(
             _transition("closing", "Every accepted offer has been recorded", [
                 _condition(RECORD_STATE, "equals", "done")
             ]),
+            _transition("closing", "The promise tool ran more often than any call needs (F-065)", _engine_call_cap(
+                (RECORD_PROMISE, _tool_name(promise_tool)),
+                confirmation["max_attempts_per_product"] * RECORD_LOOP_PRODUCT_CAP,
+            )),
             {"target_node": RECORD_PROMISE, "description": "Record the next product", "condition": {"operator": "always"}},
         ]),
         RECORD_PROMISE: record_promise_node(spec, promise_tool, "confirmation_progress"),
@@ -1307,6 +1330,8 @@ def _render_spec_workflow(
                 _transition("end_call", "Closing tool failed twice; end without claiming success", [
                     _condition("close_attempts", "greater_than", 1)
                 ]),
+                _transition("end_call", "Closing tool ran twice without the code counting it (F-065)",
+                            _engine_call_cap(("close_record",), 1)),
                 {"target_node": "close_attempt", "description": "Retry the closing tool once", "condition": {"operator": "always"}},
             ],
         },
@@ -1343,11 +1368,7 @@ def _render_spec_workflow(
             "enum_values": [*opening["who_answered_options"], OPENING_GREETING_VALUE, FRAMEWORK_NONE_VALUE],
             "min_confidence": 0.8,
         }]
-    nodes["third_party"]["extraction_schema"] = [{
-        "name": third["intent_variable"], "type": "string",
-        "description": "The third party's current intent", "enum_values": [*third["intent_values"], FRAMEWORK_NONE_VALUE],
-        "min_confidence": 0.8,
-    }]
+    nodes["third_party"]["extraction_schema"] = third_party_extraction_fields(third)
     # F-055: the callback day and time are resolved and checked in code (builder/callback.py);
     # the model only copies the person's words and never types the date.
     callback = callback_nodes(spec, by_name["schedule_callback"], _code_node, "closing", warnings)
@@ -1357,7 +1378,7 @@ def _render_spec_workflow(
         add_collect_rule(nodes["third_party"])
         nodes["third_party"]["extraction_schema"].extend(callback_extraction_fields())
         nodes["third_party"]["transitions"].append(callback_entry_transition())
-        nodes[THIRD_PARTY_ASK] = third_party_ask_node(nodes["third_party"])
+    nodes[THIRD_PARTY_ASK] = third_party_ask_node(nodes["third_party"])
     nodes["negotiate"]["extraction_schema"] = [{
         "name": OFFER_DATE, "type": "string",
         "description": "Copy the payment date phrase from the customer's last message unchanged. If the customer accepts a date the agent just proposed without naming it (for example \"yes, that works\"), copy the date as the agent said it. Do not resolve relative dates with the system clock. Empty if none.",
@@ -1476,12 +1497,32 @@ STEP_NODES = {
     "negotiate": ("negotiate", "offer_say", "revise_ask"), "confirm_record": ("confirm_record",),
 }
 _FILLER = re.compile(r"\b(?:the|a|an|that)\b")
+# Words that add a condition, a limit, a negation or an alternative. A budget stage never
+# leaves out a rule on the strength of a wording that differs by one of them (T-009d fix): "treat
+# it as a refusal and count it" covers "treat it as a refusal", but "if X, ask", "don't ask",
+# "ask twice" or "ask or refuse instead" do not cover "ask".
+_LIMIT_WORDS = frozenset((
+    "if when whenever unless only except after before while until once twice again not never no none "
+    "nothing without but or instead rather avoid stop refuse decline other otherwise than most least "
+    "more less any all every each first last same can cannot must may should").split())
+# Words that make a rule something the agent says or decides, not something code does.
+_SPEECH_WORDS = frozenset("say says tell tells mention mentions inform explain announce read ask asks".split())
+_PROPOSAL_WORDS = frozenset(
+    "propose proposes offer offers ask asks say says tell amount amounts date dates deadline floor".split())
+TAGS_T009D = frozenset({"persuasion_attempts", "product_refusal", "product_notes", "product_notes_skip"})
+_CONTRACTIONS = ((r"\bcan[’']t\b", "can not"), (r"\bcannot\b", "can not"), (r"\bwon[’']t\b", "will not"),
+                 (r"n[’']t\b", " not"))
 
 
-def enforcement_available(spec: PhoneAgentSpec, check: str) -> bool:
-    """True when the generated code really performs ``check`` for this spec."""
+def enforcement_available(spec: PhoneAgentSpec, check: str, nodes: Any = None) -> bool:
+    """True when the generated code really performs ``check`` for this spec.
+
+    ``nodes`` (the rendered node names, when known) confirms that the code step exists: the
+    note loop is left out when the note tool cannot carry the spec's fields (F-061)."""
     offer = spec.offer.data
     limit = offer.get("max_rejected_offers")
+    refusal = bool(refusal_values(spec)) and (nodes is None or PRODUCT_REFUSAL in nodes)
+    notes = bool(spec.closing.data.get("product_notes")) and (nodes is None or NOTE_RECORD in nodes)
     return {
         # Dates: a latest-date rule must exist (earliest alone does not cover deadline rules).
         "offer_dates": bool(offer.get("latest")),
@@ -1491,6 +1532,13 @@ def enforcement_available(spec: PhoneAgentSpec, check: str) -> bool:
         "invalid_offer_limit": isinstance(limit, int) and not isinstance(limit, bool) and limit >= 1,
         "identity_attempts": bool(spec.identity.data.get("attempts_left_field") and spec.identity_questions),
         "closing_outcome": bool(spec.outcomes and spec.closing.data.get("outcome_field")),
+        # T-009d: F-062 counts persuasion attempts per product and moves on; F-061 writes the notes.
+        "persuasion_attempts": refusal and bool(offer.get("persuasion_attempts")
+                                                and spec.negotiation.data.get("attempt_values")),
+        "product_refusal": refusal,
+        "product_notes": notes,
+        # Review fix 4: "no notes on X" holds in code only when the note rule lists outcomes to skip.
+        "product_notes_skip": notes and bool(spec.closing.data["product_notes"].get("skip_outcomes")),
     }.get(check, False)
 
 
@@ -1499,8 +1547,35 @@ def _sentences(text: str) -> frozenset[str]:
 
 
 def _norm_rule(text: str) -> str:
-    text = re.sub(r"[^a-z0-9<> ]+", " ", text.lower())
+    text = text.lower()
+    for pattern, replacement in _CONTRACTIONS:  # "don't" -> "do not", so the negation is a word
+        text = re.sub(pattern, replacement, text)
+    text = re.sub(r"[^a-z0-9<> ]+", " ", text)
     return re.sub(r"\s+", " ", _FILLER.sub(" ", text)).strip()
+
+
+def _covers(longer: str, shorter: str) -> bool:
+    """True when normalized sentence ``shorter`` (five words or more) is ``longer`` with only
+    plain words left out: same order, nothing before its first word (a prefix such as "avoid"
+    or "you must not" governs the whole sentence), no left-out word in ``_LIMIT_WORDS`` and no
+    left-out number."""
+    small, big = shorter.split(), longer.split()
+    if len(small) < 5 or len(small) >= len(big) or big[0] != small[0]:
+        return False
+    extra, index = [], 0
+    for word in big:
+        if index < len(small) and word == small[index]:
+            index += 1
+        else:
+            extra.append(word)
+    return (index == len(small) and not _LIMIT_WORDS & set(extra)
+            and not any(any(char.isdigit() for char in word) for word in extra))
+
+
+def _covered_by(mine: frozenset[str], theirs: frozenset[str]) -> bool:
+    """Every sentence of a rule is said, word for word or covered, by another rule."""
+    return bool(mine) and all(sentence in theirs or any(_covers(other, sentence) for other in theirs)
+                              for sentence in mine)
 
 
 class RulePlan:
@@ -1517,6 +1592,11 @@ class RulePlan:
         # (rule id, rule, step it is rendered in, or None when it is not in any prompt)
         self.entries: list[list[Any]] = []
         self.notes: dict[str, str] = {}
+        # Set from the first render (``observe``): node names, tools a code loop calls, and the
+        # tools each plan step's prompts offer to the model.
+        self.nodes: set[str] | None = None
+        self.code_tools: dict[str, str] = {}
+        self.offered: dict[str, set[str]] = {}
         for step, names in RULE_STEPS.items():
             for name in names:
                 for index, rule in enumerate(sections[name]):
@@ -1526,8 +1606,50 @@ class RulePlan:
         # Closing rules have no step prompt: all start in the global prompt. A rule tagged
         # closing_outcome leaves it only under budget pressure, like every other tag (T-009b).
 
+    def observe(self, workflow: dict[str, Any]) -> None:
+        """Note the rendered steps, the tools the promise and note loops call (F-061/F-063),
+        and which tools each step's prompts offer to the model."""
+        nodes = {**workflow.get("nodes", {}), **workflow.get("global_nodes", {})}
+        self.nodes = set(nodes)
+        for key in (RECORD_PROMISE, NOTE_RECORD):
+            for tool in nodes.get(key, {}).get("pre_actions", []):
+                if _tool_name(tool):
+                    self.code_tools[_tool_name(tool)] = key
+        offers = lambda keys: {_tool_name(tool) for key in keys for tool in nodes.get(key, {}).get("tools", [])}
+        self.offered = {step: offers(keys) for step, keys in STEP_NODES.items()}
+
     def _code_ok(self, rule: Rule) -> bool:
-        return bool(rule.enforced_by) and enforcement_available(self.spec, rule.enforced_by)
+        return (bool(rule.enforced_by) and enforcement_available(self.spec, rule.enforced_by, self.nodes)
+                and not self._says_more(rule))
+
+    @staticmethod
+    def _says_more(rule: Rule) -> bool:
+        """Review fix 5: a rule with a T-009d tag that also says what to propose, ask or say
+        is not only counting or notes; it stays in the prompt whatever its tag. So does a
+        "no notes" rule tagged product_notes instead of product_notes_skip."""
+        if rule.enforced_by not in TAGS_T009D:
+            return False
+        text = _norm_rule(rule.text)
+        # Review fix 4: "add no notes on X" is the skip rule; under product_notes it would be
+        # dropped although the plain note loop writes notes on X.
+        wrong_note_tag = (rule.enforced_by == "product_notes"
+                          and re.search(r"\b(?:no|not|never)\b(?: \w+){0,2} notes?\b", text))
+        return bool(_PROPOSAL_WORDS & set(text.split())) or bool(wrong_note_tag)
+
+    def _code_tool(self, rule: Rule, step: str) -> str:  # step: a key of STEP_NODES
+        """A tool that a code loop calls and ``step`` never offers, when every sentence of
+        ``rule`` is only a plain call of it ("call X with ...", "for each ..., call X ...");
+        "" otherwise. Review fix (T-009d): a sentence with a speech word or a condition, limit or
+        negation word (``_LIMIT_WORDS``, contractions included) keeps the rule; code does not
+        guarantee what the model says or a condition the brief adds."""
+        sentences = [part for part in re.split(r"(?<=[.!?;])\s+", rule.text) if part.strip()]
+        for tool in sorted(set(self.code_tools) - self.offered.get(step, set())):
+            shape = re.compile(rf"^(?:for each [^,]+,\s*)?call {re.escape(tool)}\b", re.IGNORECASE)
+            if sentences and all(shape.match(part.strip()) and not (
+                    (_LIMIT_WORDS | _SPEECH_WORDS) & set(_norm_rule(part).removeprefix("for each ").split()))
+                    for part in sentences):
+                return tool
+        return ""
 
     def _to_code(self, entry: list[Any]) -> None:
         entry[2] = None
@@ -1537,18 +1659,40 @@ class RulePlan:
         return tuple(rule for _, rule, where in self.entries if where == step)
 
     def drop_code_enforced(self, steps: set[str]) -> int:
+        """Leave out rules the generated code guarantees: tagged rules whose check this spec
+        renders, rules about a tool only code calls, and copies of such rules (T-009d)."""
         moved = 0
         for entry in self.entries:
             if entry[2] in steps and self._code_ok(entry[1]):
                 self._to_code(entry)
                 moved += 1
+        for entry in self.entries:
+            # Step rules only: a global rule (often an honesty rule) stays where every step sees it.
+            tool = self._code_tool(entry[1], entry[2]) if entry[2] in steps and entry[2] != GLOBAL else ""
+            if tool:
+                entry[2] = None
+                self.notes[entry[0]] = f"code: {tool} is called by code ({self.code_tools[tool]}), not by this step"
+                moved += 1
+        in_code = [(key, _sentences(rule.text)) for key, rule, where in self.entries
+                   if where is None and self.notes[key].startswith("code: ")]
+        for entry in self.entries:
+            if entry[2] not in steps:
+                continue
+            mine = _sentences(entry[1].text)
+            for key, theirs in in_code:
+                if mine and mine <= theirs:
+                    entry[2] = None
+                    self.notes[entry[0]] = f"code: same wording as {key} ({self.notes[key].removeprefix('code: ')})"
+                    moved += 1
+                    break
         return moved
 
     def drop_duplicates(self, steps: set[str]) -> int:
         """Remove a step rule whose every sentence appears word for word (ignoring case,
         punctuation and articles) in another rule of the same step or in a global rule, which
         every step prompt includes. Whole sentences only: a part of a sentence can change its
-        meaning ("offer the floor" inside "do not offer the floor")."""
+        meaning ("offer the floor" inside "do not offer the floor"). A sentence also counts as
+        said when a longer sentence there contains it with only plain words added (``_covers``)."""
         moved = 0
         for entry in self.entries:
             key, rule, where = entry
@@ -1561,10 +1705,13 @@ class RulePlan:
                 if where == GLOBAL and other_where != GLOBAL:
                     continue
                 theirs = _sentences(other.text)
-                if mine <= theirs and (mine != theirs or other_where != where or self._before(other_key, key)):
+                exact = mine <= theirs
+                if (exact and (mine != theirs or other_where != where or self._before(other_key, key))) or (
+                        not exact and _covered_by(mine, theirs)):
                     entry[2] = None
                     place = "global prompt" if other_where == GLOBAL else f"step {other_where}"
-                    self.notes[key] = f"duplicate of {other_key} ({place})"
+                    covered = "" if exact else "; its wording contains this rule"
+                    self.notes[key] = f"duplicate of {other_key} ({place}{covered})"
                     moved += 1
                     break
         return moved
@@ -1572,6 +1719,64 @@ class RulePlan:
     def _before(self, first: str, second: str) -> bool:
         keys = [entry[0] for entry in self.entries]
         return keys.index(first) < keys.index(second)
+
+    def _path_for(self, rule: Rule) -> SpecialPath | None:
+        """A rendered special path that carries out ``rule``, or None when in doubt.
+
+        The rule comes from the same brief text as the path's spoken line or question
+        (``source`` excerpts), with at most a few joining words more ("and continue"). The
+        path speaks its own line and routes the call, so the rule needs no prompt where the
+        path is available. Review fix (T-009d): the rule stays when its leftover source words,
+        or the words of its text that the path's lines do not contain, add a condition, a limit
+        or a negation (``_LIMIT_WORDS``; a leading "if"/"when" names the trigger), or when its
+        text has more sentences than the path pieces it matched."""
+        source = _norm_rule(rule.source)
+        sentences = _sentences(rule.text)
+        for path in self.spec.special_paths:
+            if f"special_{path.id}" not in (self.nodes or set()) or path.say.text == SPECIAL_SAY_FALLBACK.text:
+                continue
+            rest, matched = source, 0
+            for part in (path.say, path.ask):
+                piece = _norm_rule(part.source) if part else ""
+                if len(piece.split()) >= 4 and piece in rest:
+                    rest, matched = rest.replace(piece, " "), matched + 1
+            if not matched or len(rest.split()) > 4 or _LIMIT_WORDS & set(rest.split()):
+                continue
+            if len(sentences) > matched:
+                continue
+            known = set(" ".join(_norm_rule(part.text + " " + part.source)
+                                 for part in (path.when, path.say, path.ask) if part).split())
+            extra = set()
+            for sentence in sentences:
+                words = sentence.split()
+                if words and words[0] in ("if", "when"):
+                    words = words[1:]
+                extra |= set(words) - known
+            if _LIMIT_WORDS & extra:
+                continue
+            return path
+        return None
+
+    def move_to_special_paths(self, steps: set[str]) -> int:
+        """T-009d: a rule a special path carries out leaves the steps where that path is
+        available. A global rule needed by exactly one other step moves to that step."""
+        moved = 0
+        for entry in self.entries:
+            key, rule, where = entry
+            path = self._path_for(rule) if where in steps else None
+            if path is None:
+                continue
+            needs = set(STEP_NODES) - set(path.available_in) if where == GLOBAL else {where} - set(path.available_in)
+            if not needs:
+                entry[2] = None
+                self.notes[key] = f"special path {path.id}: it says its line and routes the call in every step"
+            elif where == GLOBAL and len(needs) == 1:
+                entry[2] = needs.pop()
+                self.notes[key] = f"moved: was global; special path {path.id} covers the other steps"
+            else:
+                continue
+            moved += 1
+        return moved
 
     def move_shared_to_global(self) -> int:
         """A rule whose wording appears in two or more step prompts is said once, globally."""
@@ -1599,6 +1804,8 @@ class RulePlan:
             note = self.notes[key]
             if where and rule.enforced_by:
                 note += (f"; code also enforces {rule.enforced_by}, kept: within budget" if self._code_ok(rule)
+                         else f"; tagged {rule.enforced_by} but it says more than that check does, kept"
+                         if self._says_more(rule)
                          else f"; tagged {rule.enforced_by} but this spec has no data for that check, kept")
             lines.append(f"{key} -> {place} ({note}): {rule.text[:80]}")
         return lines
@@ -1665,6 +1872,7 @@ def build_spec_workflow(
         return workflow, found, workflow_prompt_estimates(workflow)
 
     workflow, found, estimates = render()
+    plan.observe(workflow)
     before = dict(estimates)
     stages: list[str] = []
 
@@ -1677,6 +1885,7 @@ def build_spec_workflow(
     for name, stage in (
         ("code-enforced rules left out", plan.drop_code_enforced),
         ("duplicate wording removed", plan.drop_duplicates),
+        ("rules a special path carries out left to it", plan.move_to_special_paths),
     ):
         steps = over_steps(target_tokens)
         if not steps:
@@ -1737,6 +1946,38 @@ def workflow_prompt_estimates(workflow: dict[str, Any], products: int = ESTIMATE
         for key, node in {**workflow.get("nodes", {}), **workflow.get("global_nodes", {})}.items()
         if node.get("node_type") == "conversation"
     }
+
+
+# F-066: a sandbox run (code step or hook) gets the code plus every call variable. Another team
+# saw "Sandbox payload too large" past 131072 bytes, and the step then did not run at all
+# [TO-CONFIRM: not in the kit]. Live runs (versions 10-13) peaked at ~9.4 KB of variables; the
+# reserve leaves room for more products, longer account data and runtime texts.
+SANDBOX_PAYLOAD_LIMIT = 131_072
+VARIABLE_RESERVE_BYTES = 32_768
+
+
+def workflow_code_payloads(workflow: dict[str, Any]) -> dict[str, int]:
+    """Bytes of each code snippet the sandbox runs, JSON-escaped (as it travels), largest first."""
+    sites: dict[str, int] = {}
+
+    def add(site: str, code: Any) -> None:
+        if isinstance(code, str) and code.strip():
+            sites[site] = len(json.dumps(code).encode("utf-8"))
+
+    def hooks(owner: str, tool: dict[str, Any]) -> None:
+        name = _tool_name(tool)
+        if name == "code_exec":
+            add(owner, tool.get("function", {}).get("parameters", {}).get("properties", {})
+                .get("code", {}).get("default"))
+        for kind in ("pre_process_code", "post_process_code"):
+            add(f"{owner}/{name}.{kind.split('_')[0]}", tool.get(kind))
+
+    for key, node in {**workflow.get("nodes", {}), **workflow.get("global_nodes", {})}.items():
+        for tool in [*node.get("pre_actions", []), *node.get("tools", [])]:
+            hooks(key, tool)
+    for tool in workflow.get("tools", []):
+        hooks("tools", tool)
+    return dict(sorted(sites.items(), key=lambda item: -item[1]))
 
 
 def workflow_tools_by_step(workflow: dict[str, Any]) -> dict[str, list[str]]:

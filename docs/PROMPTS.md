@@ -104,11 +104,10 @@ Fields: {field_details}
 - Purpose: Sets spec-derived identity and global rules for the multi-step phone agent.
 - Receiver: phone agent
 - Used at: builder/workflow.py — spec workflow system_prompt
-- Approximate tokens: ~83 static + `{agent_name}` characters ÷ 4 + `{language}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~73 static + `{agent_name}` characters ÷ 4 + `{language}` characters ÷ 4 + `{rules}` characters ÷ 4 at runtime
 
 ```text
-You are {agent_name}. Speak {language}. Keep every turn concise and truthful. Call at most one tool per message. Never claim an action succeeded unless its tool result says so.
-Never say a payment or promise was recorded unless create_promise returned ok true. Never say a note or callback was recorded unless its tool returned ok true.
+You are {agent_name}. Speak {language}. Keep every turn concise and truthful. Call at most one tool per message. Never claim an action succeeded, or a note or callback was recorded, unless its tool returned ok true; never say a payment or promise was recorded unless create_promise returned ok true.
 Global rules:
 {rules}
 ```
@@ -174,6 +173,28 @@ Rules:
 {rules}
 ```
 
+## THIRD_PARTY_INTENT_DESCRIPTION
+
+- Purpose: Restricts third-party closing intents to situations named by the spec's closing values (F-064).
+- Receiver: extraction model
+- Used at: builder/callback.py — third_party intent extraction field
+- Approximate tokens: ~86 static + `{close_values}` characters ÷ 4 at runtime
+
+```text
+The third party's current intent. Closing values are: {close_values}. Choose one when the person's message clearly states the situation that value names. A question, an offer to pay, or a request for account or payment information is not a closing situation: choose none so the agent can decline to disclose details and ask when the customer can be reached.
+```
+
+## THIRD_PARTY_CLOSE_KIND_DESCRIPTION
+
+- Purpose: Provides an independent guard signal for third-party closing intents (F-064).
+- Receiver: extraction model
+- Used at: builder/callback.py — third_party close-kind extraction field
+- Approximate tokens: ~109 static + `{close_values}` characters ÷ 4 at runtime
+
+```text
+Classify only the third party's last message. Closing values are: {close_values}. Choose explicit_close when the person clearly states a situation named by one of those values, for example a refusal of a callback, that the customer cannot be reached, or "she doesn't want to be called". Choose other for every question, offer to pay, request for information, vague reply, or non-answer, for example "I can pay it myself if you tell me the amount".
+```
+
 ## IDENTITY_TASK_TEMPLATE
 
 - Purpose: Asks ordered identity questions and uses the verification tool.
@@ -199,7 +220,7 @@ Rules:
 - Purpose: Discusses the account and obtains a date and an amount per product.
 - Receiver: phone agent
 - Used at: builder/workflow.py — negotiate
-- Approximate tokens: ~268 static + `{rules}` characters ÷ 4 at runtime
+- Approximate tokens: ~262 static + `{rules}` characters ÷ 4 at runtime
 
 ```text
 Calendar: {{calendar_text}}
@@ -207,8 +228,8 @@ Account facts: {{products_facts}}
 Last offer verdict: {{offer_verdict}}. Last offer check: {{offer_message}}
 Offers accepted so far: {{offers_summary}}
 Use only these dates and amounts; never work out a date or an amount yourself. Name each product as the account facts do, never by a list number. Never read an internal id aloud. Never mention internal step, tool or variable names, and never write code.
-The bank system checks every date and amount the customer names and has already said the last offer check to the customer: do not repeat it; answer the customer. When it names a date or an amount, offer exactly that. Verdict none: propose or ask, but never say whether a date or an amount is allowed. Never state a limit yourself; say one only when the last offer check names it.
-A checked offer is not recorded: never say a payment or promise was recorded here.
+The bank system checks every date and amount the customer names and has already said the last offer check to the customer: do not repeat it; answer the customer, offering exactly a date or an amount it names. Verdict none: propose or ask, but never say whether a date or an amount is allowed. Never state a limit yourself unless the last offer check names it.
+A checked offer is not recorded: never say a payment or promise was recorded.
 Get a concrete date and amount. If the customer names only a date, the amount you last proposed applies. Not paying on one date is not a refusal: ask for another date.
 Rules:
 {rules}
@@ -270,6 +291,39 @@ Thank you. One moment while I check your account.
 
 ```text
 Of course. Which date or amount would you like instead?
+```
+
+## PERSUASION_STATE_LINE
+
+- Purpose: Tells the negotiation step which persuasion attempt it is on (F-062).
+- Receiver: phone agent
+- Used at: builder/product_notes.py — negotiate (only when the spec gives persuasion attempts)
+- Approximate tokens: ~39 static + `{attempt}` characters ÷ 4 at runtime
+
+```text
+Persuasion attempt on this product, counted by the bank system: {attempt} (0: none yet). The bank system moves on to the next product when its attempts are used up.
+```
+
+## PRODUCT_INTENT_DESCRIPTION
+
+- Purpose: Extraction meaning of the per-product refusal values (F-062).
+- Receiver: extraction model
+- Used at: builder/product_notes.py — negotiate extraction field
+- Approximate tokens: ~50 static + `{product_end}` characters ÷ 4 + `{attempt}` characters ÷ 4 at runtime
+
+```text
+Values {product_end} end only the product being discussed; the call goes on with the other products. Values {attempt} are a flat refusal or a non-answer about the product being discussed, which uses one persuasion attempt.
+```
+
+## PRODUCT_END_COUNTED_DESCRIPTION
+
+- Purpose: Extraction note when the spec gives persuasion attempts: code decides when a product ends (AB-FRESH).
+- Receiver: extraction model
+- Used at: builder/product_notes.py — negotiate extraction field (only with persuasion attempts)
+- Approximate tokens: ~50 static + `{product_end}` characters ÷ 4 + `{attempt}` characters ÷ 4 at runtime
+
+```text
+The bank system counts the persuasion attempts and ends the product only when they are used up; while attempts are left, {product_end} also uses one attempt. For any no about the product being discussed, choose {attempt}.
 ```
 
 ## CLOSING_FALLBACK_SAY
@@ -432,6 +486,17 @@ Sorry, could you tell me the day and the time when we can call back?
 Thank you. At what time of day can we call back?
 ```
 
+## THIRD_PARTY_CLOSE_REASK_SAY
+
+- Purpose: One bounded re-ask when a third-party closing intent lacks an explicit refusal (F-064).
+- Receiver: phone agent (fixed spoken line)
+- Used at: builder/callback.py — third_party_ask entry line
+- Approximate tokens: ~20 (characters ÷ 4)
+
+```text
+I cannot discuss account or payment details. When can the customer be reached?
+```
+
 ## CONVERSATION_NO_TOOL_RULE
 
 - Purpose: Explicitly forbids tool calls in a conversation step that exposes no tools.
@@ -477,7 +542,7 @@ You turn a bank's collections brief into structured data for an outbound phone a
 - Purpose: Shared first message of every extraction call: the documents, the tool contract and the call variables.
 - Receiver: builder model
 - Used at: builder/extract.py — shared, cached context block
-- Approximate tokens: ~535 static + `{documents}` characters ÷ 4 + `{contract}` characters ÷ 4 + `{call_variables}` characters ÷ 4 at runtime
+- Approximate tokens: ~681 static + `{documents}` characters ÷ 4 + `{contract}` characters ÷ 4 + `{call_variables}` characters ÷ 4 at runtime
 
 ```text
 # DOCUMENTS (in order; later overrides earlier)
@@ -506,6 +571,10 @@ Any RULE may carry "enforced_by" when program code already guarantees exactly th
 - invalid_offer_limit: a product is given up after too many offers that fail these checks.
 - identity_attempts: wrong identity answers are counted and the check stops when none are left.
 - closing_outcome: the closing table picks the outcome and reason; the goodbye sentence is said first; the closing tool is called exactly once and last; a row marked to win over a promise wins.
+- persuasion_attempts: persuasion attempts are counted per product (each product starts again), a refusal uses one, and the product ends when they are used up. Not what the agent proposes on each attempt.
+- product_refusal: the products are discussed one by one in the account tool's order; a refusal ends only the product being discussed and the call moves on to the next one.
+- product_notes: a note is written for every product that ends without a promise, with its reason.
+- product_notes_skip: no notes at all on the outcomes the note rule lists to skip (for example a transfer).
 Leave enforced_by out for anything the agent must say, ask, propose or decide, and for closing logic the table cannot express. A rule that covers two checks, or a check and an instruction, is split into separate rules.
 ```
 

@@ -23,8 +23,12 @@ from .prompts import (
     CALLBACK_TIME_ASK_SAY,
     CALLBACK_TIME_DESCRIPTION,
     CALLBACK_UNCLEAR_SAY,
+    THIRD_PARTY_CLOSE_KIND_DESCRIPTION,
+    THIRD_PARTY_CLOSE_REASK_SAY,
+    THIRD_PARTY_INTENT_DESCRIPTION,
+    render_prompt,
 )
-from .spec import OFFER_UNITS, PhoneAgentSpec, SpecError
+from .spec import FRAMEWORK_NONE_VALUE, OFFER_UNITS, PhoneAgentSpec, SpecError
 from .tools_from_openapi import CALL_VARIABLES
 
 CALLBACK_TOOL = "schedule_callback"
@@ -39,6 +43,14 @@ MESSAGE = "callback_message"
 OUTSIDE_COUNT = "callback_outside_count"
 UNCLEAR_COUNT = "callback_unclear_count"
 THIRD_PARTY_ASK = "third_party_ask"
+THIRD_PARTY_CLOSE_CHECK = "third_party_close_check"
+THIRD_PARTY_CLOSE_KIND = "third_party_close_kind"
+THIRD_PARTY_CLOSE_COUNT = "third_party_close_reask_count"
+THIRD_PARTY_CLOSE_VERDICT = "third_party_close_verdict"
+THIRD_PARTY_CLOSE_EXPLICIT = "explicit_close"
+THIRD_PARTY_CLOSE_OTHER = "other"
+THIRD_PARTY_CLOSE_NOW = "close_now"
+THIRD_PARTY_CLOSE_REASK = "reask_once"
 # Verdicts of callback_check (prefixed so they never read as brief values).
 WINDOW_OK, WINDOW_OUTSIDE, WINDOW_UNCLEAR, WINDOW_GIVE_UP, WINDOW_NEED_TIME = (
     "window_ok", "window_outside", "window_unclear", "window_give_up", "window_need_time",
@@ -439,6 +451,7 @@ def callback_check_code(spec: PhoneAgentSpec) -> str:
         .replace("__PRODUCT_READER__", "")
         + "CALLBACK = " + _py_literal(config) + "\n"
         + "WINDOW = " + _py_literal(window or dict()) + " or None\n"
+        + f"vars[{THIRD_PARTY_CLOSE_KIND!r}] = {THIRD_PARTY_CLOSE_OTHER!r}\n"
         + CHECK_BODY
     )
 
@@ -448,6 +461,77 @@ def callback_extraction_fields() -> list[dict[str, Any]]:
         dict(name=DAY_TEXT, type="string", description=CALLBACK_DAY_DESCRIPTION.text, min_confidence=0.7),
         dict(name=TIME_TEXT, type="string", description=CALLBACK_TIME_DESCRIPTION.text, min_confidence=0.7),
     ]
+
+
+def third_party_extraction_fields(third_party: dict[str, Any]) -> list[dict[str, Any]]:
+    """Intent plus an independent explicit-close signal for the F-064 guard."""
+    close_values = ", ".join(str(value) for value in third_party["close_values"])
+    return [
+        dict(
+            name=third_party["intent_variable"], type="string",
+            description=render_prompt(THIRD_PARTY_INTENT_DESCRIPTION, close_values=close_values),
+            enum_values=[*third_party["intent_values"], FRAMEWORK_NONE_VALUE], min_confidence=0.8,
+        ),
+        dict(
+            name=THIRD_PARTY_CLOSE_KIND, type="string",
+            description=render_prompt(THIRD_PARTY_CLOSE_KIND_DESCRIPTION, close_values=close_values),
+            enum_values=[THIRD_PARTY_CLOSE_EXPLICIT, THIRD_PARTY_CLOSE_OTHER], min_confidence=0.8,
+        ),
+    ]
+
+
+def third_party_close_guard_code(spec: PhoneAgentSpec) -> str:
+    """Re-ask once when a close intent is not backed by an independently explicit close."""
+    config = {
+        "intent": spec.third_party.data["intent_variable"],
+        "kind": THIRD_PARTY_CLOSE_KIND,
+        "explicit": THIRD_PARTY_CLOSE_EXPLICIT,
+        "other": THIRD_PARTY_CLOSE_OTHER,
+        "count": THIRD_PARTY_CLOSE_COUNT,
+        "verdict": THIRD_PARTY_CLOSE_VERDICT,
+        "verdict_close": THIRD_PARTY_CLOSE_NOW,
+        "reask": THIRD_PARTY_CLOSE_REASK,
+        "none": FRAMEWORK_NONE_VALUE,
+        "message": MESSAGE,
+        "reask_message": THIRD_PARTY_CLOSE_REASK_SAY.text,
+    }
+    return "GUARD = " + _py_literal(config) + "\n" + '''try:
+    kind = str(vars.get(GUARD['kind']) or '')
+    try:
+        count = int(vars.get(GUARD['count']) or 0)
+    except Exception:
+        count = 0
+    should_reask = kind != GUARD['explicit'] and count < 1
+    if should_reask:
+        vars[GUARD['count']] = count + 1
+        vars[GUARD['intent']] = GUARD['none']
+        vars[GUARD['kind']] = GUARD['other']
+        vars[GUARD['message']] = GUARD['reask_message']
+        vars[GUARD['verdict']] = GUARD['reask']
+    else:
+        vars[GUARD['kind']] = GUARD['other']
+        vars[GUARD['verdict']] = GUARD['verdict_close']
+except Exception:
+    vars[GUARD['count']] = 1
+    vars[GUARD['intent']] = GUARD['none']
+    vars[GUARD['kind']] = GUARD['other']
+    vars[GUARD['message']] = GUARD['reask_message']
+    vars[GUARD['verdict']] = GUARD['reask']
+'''
+
+
+def third_party_close_guard_node(spec: PhoneAgentSpec, code_node: Any, closing: str) -> dict[str, Any]:
+    """Bounded gate between a third-party close intent and the closing chain."""
+    return code_node(THIRD_PARTY_CLOSE_CHECK, third_party_close_guard_code(spec), [
+        {
+            "target_node": closing, "description": "Third party explicitly closed or bounded re-ask used",
+            "condition": {"logic": "or", "conditions": [
+                {"variable": THIRD_PARTY_CLOSE_VERDICT, "operator": "equals", "operand": THIRD_PARTY_CLOSE_NOW},
+            ]},
+        },
+        {"target_node": THIRD_PARTY_ASK, "description": "Ask once more when the close was not explicit",
+         "condition": {"operator": "always"}},
+    ])
 
 
 def callback_entry_transition() -> dict[str, Any]:

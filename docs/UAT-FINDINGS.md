@@ -30,6 +30,42 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-066: A code step that is too large for the sandbox does not run, and nobody sees an error
+
+- **Date:** 2026-10-11
+- **Brief / case:** none of ours yet; reported by another team on 2026-10-10 (Freya x YC notes)
+- **Run:** our measurement: `traces/live-runs/*.json` (variable tables, versions 10-13) and `submission/brief-a.workflow.json`
+- **Symptom:** In the other team's runs, a code step whose code plus all call variables passed 131,072 bytes failed with "Sandbox payload too large". The step did not run, the agent negotiated without account data, and no error reached the conversation.
+- **Root cause:** The sandbox payload limit is not in the kit. Each sandbox run gets the code and every call variable, so a large code step plus large variables can pass the limit silently.
+- **Category:** platform
+- **Fix / lesson:** Our sizes today: largest code step `check_offer` ~31.5 KB (JSON-escaped), largest hook ~23.7 KB (`create_promise` pre-hook), call variables at most ~9.4 KB in live runs. We are far below the limit. The builder now measures every code step and hook and writes a `code_payload` line per site to the trace, with a warning when the code leaves less than a 32 KB variable reserve (`workflow_code_payloads`). Keep large data out of call variables. Putting a shared library in a variable (as the other team did) does not lower the payload, because variables count too.
+- **Status:** guarded (trace warning); limit itself `[TO-CONFIRM]`
+- **Retest:** offline test `SandboxPayloadTests` passes for spec A and A+B.
+
+### F-065: When the code sandbox is down, the record and close loops can call the bank without end
+
+- **Date:** 2026-10-11
+- **Brief / case:** graph review after another team's report of "Failed to reach snekbox" (2026-10-10)
+- **Run:** offline; `tests/test_record_loop.py` `SandboxDownTests`
+- **Symptom:** None observed in our runs. The other team saw a hooked tool never reach the bank while the sandbox was unreachable, and their agent looped on "Goodbye".
+- **Root cause:** Our workflow has two silent loops with no conversation step: `record_next → record_promise → confirmation_progress` and `close_attempt ↔ close_record`. Each exits on a variable that its code step writes (`record_state`, `promise_progress_state`, `close_attempts`). If the sandbox cannot run code, those variables never change and the `always` transitions keep calling `create_promise` or `close_call`.
+- **Category:** platform / routing
+- **Fix / lesson:** Both loops also exit on the engine's own call counters (`<node>_success_count`, `<node>_failure_count`), which need no code. The record loop goes to closing once a counter passes the spec's attempts per product times twice the most products in a kit case. The close loop ends the call once a counter passes 1 (at most 3 close calls). A working loop never reaches either cap. Wrong data cannot be recorded when the pre-hook does not run: without it, the promise body has no date or amount, so the bank rejects it and the code counts a failed attempt. Still unknown: what the platform does with a tool whose post-hook cannot run (`[TO-CONFIRM]`).
+- **Status:** fixed (uncommitted)
+- **Retest:** offline: a sandbox-down walk ends both loops (2 close calls; record calls = cap + 1); a working loop where every product fails every attempt still ends through the code. Live: not tested (needs a sandbox outage).
+
+### F-064: A third party's question was read as "no callback" and the call closed at once
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, PUB-02 chat on version 14
+- **Run:** customer `c_b7ac445d-5be`, scratchpad `pub02v14.json`
+- **Symptom:** The husband said "I can pay it myself if you tell me the amount." Extraction set `third_party_reply = no_callback` (confidence 1.0), routing went `third_party → closing`, and the agent said only "Thank you for your time. Goodbye." It did not decline to share details or ask again when Ms Costa can be reached. The person had not refused a callback.
+- **Root cause:** The close values of the third-party intent are taken on any turn, and the extraction description does not say that questions, offers to pay or requests for details are not a refusal. Since F-055 the step has no tool and routes before the model speaks, so a wrong label closes the call with no model reply in between.
+- **Category:** policy / extraction
+- **Fix / lesson:** Close values only on an explicit refusal or "cannot be reached"; otherwise leave the intent empty so the model answers (no details, ask for a time). Consider a code guard: the first close value needs one re-ask unless the words are an explicit refusal.
+- **Status:** fixed offline (F-064): close values are described from the spec's own `close_values`; an independent `explicit_close | other` signal; `third_party_close_check` closes at once on an explicit close (wrong number, deceased, refusal) and re-asks once otherwise (bounded). Reviewed (re-review 2: merge). Retest pending (PUB-02 v15).
+- **Retest:** -
+
 ### F-063: Each promise re-enters confirm_record, so the model may read back again
 
 - **Date:** 2026-10-11

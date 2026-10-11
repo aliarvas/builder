@@ -126,3 +126,5 @@ The workflow cap is unresolved; we update in place so it does not matter.
 - `[TO-CONFIRM]` Whether the submitted `run_command` receives exactly one brief plus one tool file (page) or the sample builder's multi-brief form for Brief B.
 - `[TO-CONFIRM]` Judge phrasing of the checks for hidden briefs (we only see practice checks).
 - `[TO-CONFIRM]` Sandbox limits of `code_exec` beyond `json`, `re`, `datetime`.
+- `[TO-CONFIRM]` Sandbox payload limit: another team saw "Sandbox payload too large" when code plus all call variables passed 131,072 bytes; the step then did not run, with no error in the conversation. Not in the kit. Our largest code step is ~31.5 KB and live call variables peaked at ~9.4 KB (F-066).
+- `[TO-CONFIRM]` What the platform does with a tool whose hook cannot run because the sandbox is unreachable ("Failed to reach snekbox", reported by another team). Our silent loops do not depend on it (F-065).

@@ -6,6 +6,7 @@ import copy
 import json
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 from builder.product_notes import NOTES_DROPPED
@@ -177,9 +178,8 @@ class NoteLoopTests(unittest.TestCase):
         session.vars["add_note_args." + number_field] = 2
         exec(code_of(session.nodes["special_dispute_done"]), {"vars": session.vars})
         self.assertEqual([2], json.loads(session.vars["notes_written"]))
-        refusal = session.refusal()
-        session.say(**refusal)  # product 1
-        session.say(**refusal)  # product 3 (2 is handled)
+        session.end_product()  # product 1
+        session.end_product()  # product 3 (2 is handled)
         self.assertEqual("closing", session.step)
         session.close()
         self.assertEqual([("p1", "refused"), ("p3", "refused")], session.ledger_notes())
@@ -197,13 +197,51 @@ class NoteLoopTests(unittest.TestCase):
         self.assertEqual([("p2", "hardship"), ("p3", "hardship")], session.ledger_notes())
 
 
+    def test_an_accepted_offer_never_sent_takes_the_close_reason(self):
+        # AB-FRESH risk 3: the card is accepted, then hardship is declined before the read-back.
+        # No record call was made, so the card is noted hardship, not the failed reason.
+        session = Session(AB_SPECS["v2"], CASES["PUB-12"])
+        session.say(offer_date="tomorrow", offer_product_number=1)
+        session.vars["close_state"] = "special:hardship_declined"  # the path's code step
+        session.step = "closing"
+        self.assertEqual(("no_promise", "hardship"), session.close())
+        self.assertEqual([("p1", "hardship"), ("p2", "hardship"), ("p3", "hardship")], session.ledger_notes())
+
+    def test_a_product_whose_record_call_failed_keeps_the_failed_reason(self):
+        for name in ("tagged", "v2"):
+            with self.subTest(spec=name):
+                session = Session(AB_SPECS[name], CASES["PUB-11"])
+                for number in (1, 2, 3):
+                    session.say(offer_date="this Friday", offer_product_number=number)
+                session.record_all(answers=[False, False, True, True])
+                self.assertEqual("promise", session.close()[0])
+                self.assertEqual([("p1", "service_error")], session.ledger_notes())
+
+
+class GeneratedCodeTests(unittest.TestCase):
+    def test_builder_and_generated_code_compile_without_escape_warnings(self):
+        # AB-FRESH risk 4: an invalid escape (a regex inside a code template string) is a
+        # SyntaxWarning today and an error in later Python versions.
+        sources = {path.name: path.read_text(encoding="utf-8")
+                   for path in (Path(__file__).resolve().parents[1] / "builder").glob("*.py")}
+        for name, path in AB_SPECS.items():
+            workflow = build_spec_workflow(parse_spec(copy.deepcopy(load(path))), TOOLS)
+            for key, node in {**workflow["nodes"], **workflow.get("global_nodes", {})}.items():
+                if node.get("node_type") == "code":
+                    sources[name + ":" + key] = code_of(node)
+        for name, source in sources.items():
+            with self.subTest(source=name), warnings.catch_warnings():
+                warnings.simplefilter("error", SyntaxWarning)
+                compile(source, name, "exec")
+
 
 class RefusalChoiceTests(unittest.TestCase):
     def test_the_product_the_customer_names_is_the_one_refused(self):
         # Review finding 4: "the car loan is the one I cannot pay" while the loan is next.
         session = Session(AB_SPECS["tagged"], CASES["PUB-12"])
         session.say(offer_date="tomorrow", offer_product_number=1)
-        session.say(offer_product_number=3, negotiation_reply="refused_attempts_exhausted")
+        session.end_product({"offer_product_number": 3, "negotiation_reply": "refused_attempts_exhausted"})
+        self.assertEqual({"3": 1}, json.loads(session.vars["persuasion_used_by_product"]))  # the car loan's one attempt
         self.assertEqual({"3": "refused"}, json.loads(session.vars["product_note_reasons"]))
         self.assertEqual("offer_say", session.step)
         self.assertIn(session.named("personal loan", "second"), session.vars["offer_message"])  # the next open one
@@ -211,7 +249,7 @@ class RefusalChoiceTests(unittest.TestCase):
     def test_a_named_product_already_handled_falls_back_to_account_order(self):
         session = Session(AB_SPECS["tagged"], CASES["PUB-12"])
         session.say(offer_date="tomorrow", offer_product_number=1)
-        session.say(offer_product_number=1, negotiation_reply="refused_attempts_exhausted")
+        session.end_product({"offer_product_number": 1, "negotiation_reply": "refused_attempts_exhausted"})
         self.assertEqual({"2": "refused"}, json.loads(session.vars["product_note_reasons"]))
 
     def test_no_matching_attempt_rule_ends_the_product(self):

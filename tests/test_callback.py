@@ -46,8 +46,64 @@ def check(spec, day, time, now="2026-10-14T11:00", extra=None):
     """Run callback_check once; return the variables it left."""
     code = code_of(render(spec)["nodes"][callback.CALLBACK_CHECK])
     variables = {"now": now, callback.DAY_TEXT: day, callback.TIME_TEXT: time, **(extra or {})}
-    exec(code, {"vars": variables})
+    exec(code, {"vars": variables, "json": json})
     return variables
+
+
+def close_guard(spec, intent, kind, extra=None):
+    """Run the F-064 third-party close guard once."""
+    code = code_of(render(spec)["nodes"][callback.THIRD_PARTY_CLOSE_CHECK])
+    variables = {
+        spec.third_party.data["intent_variable"]: intent,
+        callback.THIRD_PARTY_CLOSE_KIND: kind,
+        **(extra or {}),
+    }
+    exec(code, {"vars": variables, "json": json})
+    return variables
+
+
+def holds(condition, variables):
+    if "logic" in condition:
+        answers = [holds(item, variables) for item in condition["conditions"]]
+        return all(answers) if condition["logic"] == "and" else any(answers)
+    operator = condition["operator"]
+    if operator == "always":
+        return True
+    value = variables.get(condition.get("variable"))
+    if operator == "is_set":
+        return value not in (None, "")
+    if operator == "equals":
+        return value not in (None, "") and str(value) == str(condition.get("operand"))
+    if operator == "not_equals":
+        return not (value not in (None, "") and str(value) == str(condition.get("operand")))
+    return False
+
+
+class ThirdPartySession:
+    """Stateful walk through the rendered third-party conversation and code routes."""
+
+    def __init__(self, spec):
+        self.spec = spec
+        self.nodes = render(spec)["nodes"]
+        self.vars, self.path, self.step = {"now": "2026-10-14T11:00"}, [], "third_party"
+
+    def route(self, key):
+        self.path.append(key)
+        for transition in self.nodes[key]["transitions"]:
+            if holds(transition["condition"], self.vars):
+                return transition["target_node"]
+        return key
+
+    def say(self, intent, kind, **extracted):
+        self.vars[self.spec.third_party.data["intent_variable"]] = intent
+        self.vars[callback.THIRD_PARTY_CLOSE_KIND] = kind
+        self.vars.update(extracted)
+        target = self.route(self.step)
+        while target != "closing" and self.nodes[target]["node_type"] == "code":
+            exec(code_of(self.nodes[target]), {"vars": self.vars, "json": json})
+            target = self.route(target)
+        self.step = target
+        return self
 
 
 class ResolveAndWindowTests(unittest.TestCase):
@@ -244,6 +300,98 @@ class TwoTurnTests(unittest.TestCase):
 
 
 class RenderTests(unittest.TestCase):
+    def test_f064_question_or_payment_offer_reasks_once_instead_of_closing(self):
+        spec = spec_with()
+        fields = {field["name"]: field for field in render(spec)["nodes"]["third_party"]["extraction_schema"]}
+        intent_description = fields[spec.third_party.data["intent_variable"]]["description"].lower()
+        kind_description = fields[callback.THIRD_PARTY_CLOSE_KIND]["description"].lower()
+        phrase = "I can pay it myself if you tell me the amount"
+        self.assertIn("offer to pay", intent_description)
+        self.assertIn(phrase.lower(), kind_description)
+
+        close_value = spec.third_party.data["close_values"][0]
+        first = close_guard(spec, close_value, callback.THIRD_PARTY_CLOSE_OTHER)
+        self.assertEqual(callback.THIRD_PARTY_CLOSE_REASK, first[callback.THIRD_PARTY_CLOSE_VERDICT])
+        self.assertEqual(1, first[callback.THIRD_PARTY_CLOSE_COUNT])
+        self.assertEqual("none", first[spec.third_party.data["intent_variable"]])
+        self.assertEqual(callback.THIRD_PARTY_CLOSE_OTHER, first[callback.THIRD_PARTY_CLOSE_KIND])
+        self.assertIn("when can the customer be reached", first[callback.MESSAGE].lower())
+
+        second = close_guard(spec, close_value, callback.THIRD_PARTY_CLOSE_OTHER,
+                             {callback.THIRD_PARTY_CLOSE_COUNT: 1})
+        self.assertEqual(callback.THIRD_PARTY_CLOSE_NOW, second[callback.THIRD_PARTY_CLOSE_VERDICT])
+
+    def test_f064_every_spec_close_value_is_in_both_extraction_descriptions(self):
+        fixtures = (
+            (ROOT / "tests/fixtures/spec-brief-a.json", OPENAPI),
+            (ROOT / "tests/fixtures/spec-brief-b.json", OPENAPI),  # cumulative A+B fixture
+            (ROOT / "tests/fixtures/spec-synthetic.json", json.loads(
+                (ROOT / "tests/fixtures/openapi-synthetic.json").read_text(encoding="utf-8"))),
+        )
+        for path, document in fixtures:
+            with self.subTest(spec=path.name):
+                spec = parse_spec(json.loads(path.read_text(encoding="utf-8")))
+                fields = {field["name"]: field
+                          for field in render(spec, document)["nodes"]["third_party"]["extraction_schema"]}
+                descriptions = (
+                    fields[spec.third_party.data["intent_variable"]]["description"],
+                    fields[callback.THIRD_PARTY_CLOSE_KIND]["description"],
+                )
+                for value in spec.third_party.data["close_values"]:
+                    self.assertTrue(all(value in description for description in descriptions), value)
+
+    def test_f064_explicit_refusal_closes_without_reask(self):
+        spec = spec_with()
+        fields = {field["name"]: field for field in render(spec)["nodes"]["third_party"]["extraction_schema"]}
+        self.assertIn("she doesn't want to be called",
+                      fields[callback.THIRD_PARTY_CLOSE_KIND]["description"].lower())
+
+        close_value = spec.third_party.data["close_values"][0]
+        variables = close_guard(spec, close_value, callback.THIRD_PARTY_CLOSE_EXPLICIT)
+        self.assertEqual(callback.THIRD_PARTY_CLOSE_NOW, variables[callback.THIRD_PARTY_CLOSE_VERDICT])
+        self.assertEqual(close_value, variables[spec.third_party.data["intent_variable"]])
+        self.assertEqual(callback.THIRD_PARTY_CLOSE_OTHER, variables[callback.THIRD_PARTY_CLOSE_KIND])
+        self.assertNotIn(callback.THIRD_PARTY_CLOSE_COUNT, variables)
+
+    def test_f064_session_routes_refusal_second_nonexplicit_and_deceased_to_closing(self):
+        spec = spec_with()
+        close_values = spec.third_party.data["close_values"]
+        refusal = close_values[0]
+        deceased = next(value for value in close_values if "deceas" in value.lower())
+
+        refusal_session = ThirdPartySession(spec)
+        refusal_session.say(refusal, callback.THIRD_PARTY_CLOSE_OTHER)
+        self.assertEqual(callback.THIRD_PARTY_ASK, refusal_session.step)
+        refusal_session.say(refusal, callback.THIRD_PARTY_CLOSE_EXPLICIT)
+        self.assertEqual("closing", refusal_session.step)
+
+        bounded_session = ThirdPartySession(spec)
+        bounded_session.say(refusal, callback.THIRD_PARTY_CLOSE_OTHER)
+        bounded_session.say(refusal, callback.THIRD_PARTY_CLOSE_OTHER)
+        self.assertEqual("closing", bounded_session.step)
+
+        self.assertIn(deceased, close_values)
+        for close_value in close_values:
+            with self.subTest(first_turn_close=close_value):
+                close_session = ThirdPartySession(spec)
+                close_session.say(close_value, callback.THIRD_PARTY_CLOSE_EXPLICIT)
+                self.assertEqual("closing", close_session.step)
+
+    def test_f064_callback_date_and_time_win_over_stale_explicit_kind_in_the_same_turn(self):
+        spec = spec_with()
+        callback_intent = next(value for value in spec.third_party.data["intent_values"]
+                               if value not in spec.third_party.data["close_values"])
+        session = ThirdPartySession(spec).say(
+            callback_intent, callback.THIRD_PARTY_CLOSE_EXPLICIT,
+            **{callback.DAY_TEXT: "tomorrow", callback.TIME_TEXT: "3pm"},
+        )
+        self.assertEqual(["third_party", callback.CALLBACK_CHECK], session.path)
+        self.assertEqual(callback.CALLBACK_BOOK, session.step)
+        self.assertEqual(callback.WINDOW_OK, session.vars[callback.VERDICT])
+        self.assertEqual(("2026-10-15", "15:00"),
+                         (session.vars[callback.CALLBACK_DATE], session.vars[callback.CALLBACK_TIME]))
+        self.assertEqual(callback.THIRD_PARTY_CLOSE_OTHER, session.vars[callback.THIRD_PARTY_CLOSE_KIND])
+
     def test_model_never_fills_the_callback_date(self):
         workflow = render(spec_with())
         nodes = workflow["nodes"]
@@ -266,6 +414,8 @@ class RenderTests(unittest.TestCase):
         targets = lambda key: [t["target_node"] for t in nodes[key]["transitions"]]
         self.assertEqual([callback.CALLBACK_BOOK, "closing", callback.THIRD_PARTY_ASK], targets(callback.CALLBACK_CHECK))
         self.assertEqual(["closing"], targets(callback.CALLBACK_BOOK))
+        self.assertEqual(["closing", callback.THIRD_PARTY_ASK],
+                         targets(callback.THIRD_PARTY_CLOSE_CHECK))
         serialized = json.dumps(workflow)
         self.assertNotIn("null", serialized)
         self.assertNotIn("{{", code_of(nodes[callback.CALLBACK_CHECK]))

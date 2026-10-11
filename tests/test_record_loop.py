@@ -9,8 +9,8 @@ import unittest
 from builder.prompts import CLOSING_FALLBACK_SAY, PROMISE_NOT_ALL_RECORDED_SAY, SPECIAL_TOOL_FAILED_SAY
 from builder.spec import SpecError, parse_spec
 from builder.record_loop import RECORD_NEXT, RECORD_PROMISE
-from builder.workflow import build_spec_workflow
-from tests.test_multi_ready import AB_SPECS, CASES, ROOT, Session, expected_promises
+from builder.workflow import RECORD_LOOP_PRODUCT_CAP, build_spec_workflow
+from tests.test_multi_ready import AB_SPECS, CASES, ROOT, Session, expected_promises, holds
 from tests.test_multi_step import FIXTURES, code_of, kit_tools, load_spec
 
 LOOP = (RECORD_NEXT, RECORD_PROMISE, "confirmation_progress")
@@ -54,7 +54,7 @@ class RecordLoopTests(unittest.TestCase):
     def test_exhausted_product_is_set_aside_and_the_others_are_recorded(self):
         # F-061/F-062 review finding 1 (replaces the F-063 stop rule): p2 fails twice, the loop
         # goes on with p3; p2 gets the failed reason, no product is noted refused.
-        for name in ("fixture-b", "tagged"):
+        for name in ("fixture-b", "tagged", "v2"):
             with self.subTest(spec=name):
                 session = pub11(Session(AB_SPECS[name], CASES["PUB-11"]))
                 session.record_all([True, False, False, True])
@@ -192,6 +192,50 @@ class ReviewFixTests(unittest.TestCase):
         data["confirmation"]["revise_values"] = list(data["confirmation"]["intent_values"])
         with self.assertRaisesRegex(SpecError, "not in revise_values"):
             parse_spec(data)
+
+
+def run_without_sandbox(nodes, start, stops, limit=200):
+    """F-065: walk silent steps from ``start`` while the code sandbox is down. Code steps
+    change nothing; each api step counts as a failed call on the engine's own counters and
+    the bank answers not ok. Returns the step reached and the number of api calls."""
+    variables, target, calls = {}, start, 0
+    for _ in range(limit):
+        if target in stops:
+            return target, calls
+        node = nodes[target]
+        if node["node_type"] == "api_request":
+            calls += 1
+            key = target + "_failure_count"
+            variables[key] = variables.get(key, 0) + 1
+            for mapping in node.get("response_mapping") or []:
+                variables[mapping["variable"]] = "false"
+        target = next(t["target_node"] for t in node["transitions"] if holds(t["condition"], variables))
+    return target, calls
+
+
+class SandboxDownTests(unittest.TestCase):
+    def test_record_and_close_loops_end_on_engine_counters(self):
+        for index, fixture in enumerate(FIXTURES):
+            spec = load_spec(fixture)
+            nodes = build_spec_workflow(spec, kit_tools(index))["nodes"]
+            maximum = spec.confirmation.data["max_attempts_per_product"]
+            with self.subTest(fixture=fixture.name):
+                step, calls = run_without_sandbox(nodes, RECORD_NEXT, {"closing"})
+                self.assertEqual("closing", step)
+                self.assertEqual(maximum * RECORD_LOOP_PRODUCT_CAP + 1, calls)
+                step, calls = run_without_sandbox(nodes, "close_attempt", {"end_call"})
+                self.assertEqual("end_call", step)
+                self.assertEqual(2, calls)
+
+    def test_the_cap_never_cuts_a_working_loop(self):
+        # Every product of the largest kit case fails every attempt: the code ends the loop
+        # before the engine cap does.
+        session = pub11(Session(AB_SPECS[next(iter(AB_SPECS))], CASES["PUB-11"]))
+        maximum = session.spec.confirmation.data["max_attempts_per_product"]
+        session.record_all(answers=[False] * (3 * maximum))
+        self.assertEqual("closing", session.step)
+        self.assertEqual(3 * maximum, len(session.calls))
+        self.assertLess(3 * maximum, maximum * RECORD_LOOP_PRODUCT_CAP)
 
 
 if __name__ == "__main__":

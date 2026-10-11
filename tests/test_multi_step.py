@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from builder import build
+from builder.callback import THIRD_PARTY_CLOSE_EXPLICIT, THIRD_PARTY_CLOSE_KIND
 from builder.offer_check import AMOUNT_NONE_VALUE
 from builder.prompts import (
     CONVERSATION_NO_TOOL_RULE, CONVERSATION_TOOL_RULE_TEMPLATE, render_prompt,
@@ -98,7 +99,7 @@ def walk(workflow, key, variables, limit=20):
             return key
         node = every[key]
         if node["node_type"] == "code":
-            exec(code_of(node), {"vars": variables})
+            exec(code_of(node), {"vars": variables, "json": json})
         for transition in node.get("transitions", []):
             if not transition.get("is_tool_call") and engine_holds(transition["condition"], variables):
                 key = transition["target_node"]
@@ -683,7 +684,9 @@ class MultiStepWorkflowTests(unittest.TestCase):
             ("callback_scheduled", [("third_party", {**caller, "callback_ok": "True"})]),
             ("callback_failed", [("third_party", {**caller, "schedule_callback_response.data.ok": "false"})]),
             ("callback_failed", [("third_party", {**caller, "schedule_callback_failure_count": 1})]),
-            *((f"third_party:{value}", [("third_party", {**caller, third["intent_variable"]: value})])
+            *((f"third_party:{value}", [("third_party", {
+                **caller, third["intent_variable"]: value, THIRD_PARTY_CLOSE_KIND: THIRD_PARTY_CLOSE_EXPLICIT,
+            })])
               for value in third["close_values"]),
             ("identity_failed", [("identity", {who: opening["identity_values"][0],
                                                "identity_verified": "false", "identity_attempts_left": 0})]),

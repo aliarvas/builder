@@ -124,9 +124,9 @@ MULTI_STEP_SYSTEM_PROMPT_TEMPLATE = PromptDefinition(
     used_at="builder/workflow.py — spec workflow system_prompt",
     text=(
         "You are {agent_name}. Speak {language}. Keep every turn concise and truthful. "
-        "Call at most one tool per message. Never claim an action succeeded unless its tool result says so.\n"
-        "Never say a payment or promise was recorded unless create_promise returned ok true. "
-        "Never say a note or callback was recorded unless its tool returned ok true.\n"
+        "Call at most one tool per message. Never claim an action succeeded, or a note or callback was recorded, "
+        "unless its tool returned ok true; never say a payment or promise was recorded unless create_promise "
+        "returned ok true.\n"
         "Global rules:\n{rules}"
     ),
     runtime_placeholders=("{agent_name}", "{language}", "{rules}"),
@@ -164,6 +164,27 @@ THIRD_PARTY_TASK_TEMPLATE = PromptDefinition(
     "builder/workflow.py — third_party", "Handle the third-party response without disclosing protected details.\nRules:\n{rules}",
     ("{rules}",),
 )
+THIRD_PARTY_INTENT_DESCRIPTION = PromptDefinition(
+    "THIRD_PARTY_INTENT_DESCRIPTION",
+    "Restricts third-party closing intents to situations named by the spec's closing values (F-064).",
+    "extraction model", "builder/callback.py — third_party intent extraction field",
+    "The third party's current intent. Closing values are: {close_values}. Choose one when the person's message "
+    "clearly states the situation that value names. A question, an offer to pay, or a request for account or "
+    "payment information is not a closing situation: choose none so the agent can decline to disclose details "
+    "and ask when the customer can be reached.",
+    ("{close_values}",),
+)
+THIRD_PARTY_CLOSE_KIND_DESCRIPTION = PromptDefinition(
+    "THIRD_PARTY_CLOSE_KIND_DESCRIPTION",
+    "Provides an independent guard signal for third-party closing intents (F-064).",
+    "extraction model", "builder/callback.py — third_party close-kind extraction field",
+    "Classify only the third party's last message. Closing values are: {close_values}. Choose explicit_close when "
+    "the person clearly states a situation named by one of those values, for example a refusal of a callback, "
+    "that the customer cannot be reached, or \"she doesn't want to be called\". Choose other for every question, "
+    "offer to pay, request for information, vague reply, or non-answer, for example \"I can pay it myself if you "
+    "tell me the amount\".",
+    ("{close_values}",),
+)
 IDENTITY_TASK_TEMPLATE = PromptDefinition(
     "IDENTITY_TASK_TEMPLATE", "Asks ordered identity questions and uses the verification tool.", "phone agent",
     "builder/workflow.py — identity",
@@ -186,13 +207,14 @@ NEGOTIATION_TASK_TEMPLATE = PromptDefinition(
     "Last offer verdict: {{offer_verdict}}. Last offer check: {{offer_message}}\n"
     "Offers accepted so far: {{offers_summary}}\n"
     "Use only these dates and amounts; never work out a date or an amount yourself. Name each product as the "
-    "account facts do, never by a list number. Never read an internal id aloud. Never mention internal step, "
-    "tool or variable names, and never write code.\n"
+    "account facts do, "
+    "never by a list number. Never read an internal id aloud. Never mention internal step, tool or variable "
+    "names, and never write code.\n"
     "The bank system checks every date and amount the customer names and has already said the last offer check to "
-    "the customer: do not repeat it; answer the customer. When it names a date or an amount, offer exactly that. "
+    "the customer: do not repeat it; answer the customer, offering exactly a date or an amount it names. "
     "Verdict none: propose or ask, but never say whether a date or an amount is allowed. Never state a limit "
-    "yourself; say one only when the last offer check names it.\n"
-    "A checked offer is not recorded: never say a payment or promise was recorded here.\n"
+    "yourself unless the last offer check names it.\n"
+    "A checked offer is not recorded: never say a payment or promise was recorded.\n"
     "Get a concrete date and amount. If the customer names only a date, the amount you last proposed applies. "
     "Not paying on one date is not a refusal: ask for another date.\nRules:\n{rules}",
     ("{rules}",),
@@ -239,8 +261,8 @@ REVISE_ASK_LINE = PromptDefinition(
 PERSUASION_STATE_LINE = PromptDefinition(
     "PERSUASION_STATE_LINE", "Tells the negotiation step which persuasion attempt it is on (F-062).", "phone agent",
     "builder/product_notes.py — negotiate (only when the spec gives persuasion attempts)",
-    "Persuasion attempt for the product being discussed, counted by the bank system: {attempt} (0: no attempt "
-    "made yet). The bank system moves on to the next product when its attempts are used up.",
+    "Persuasion attempt on this product, counted by the bank system: {attempt} (0: none yet). The bank "
+    "system moves on to the next product when its attempts are used up.",
     ("{attempt}",),
 )
 PRODUCT_INTENT_DESCRIPTION = PromptDefinition(
@@ -249,6 +271,15 @@ PRODUCT_INTENT_DESCRIPTION = PromptDefinition(
     "Values {product_end} end only the product being discussed; the call goes on with the other products. "
     "Values {attempt} are a flat refusal or a non-answer about the product being discussed, which uses one "
     "persuasion attempt.",
+    ("{product_end}", "{attempt}"),
+)
+PRODUCT_END_COUNTED_DESCRIPTION = PromptDefinition(
+    "PRODUCT_END_COUNTED_DESCRIPTION",
+    "Extraction note when the spec gives persuasion attempts: code decides when a product ends (AB-FRESH).",
+    "extraction model", "builder/product_notes.py — negotiate extraction field (only with persuasion attempts)",
+    "The bank system counts the persuasion attempts and ends the product only when they are used up; "
+    "while attempts are left, {product_end} also uses one attempt. For any no about the product being "
+    "discussed, choose {attempt}.",
     ("{product_end}", "{attempt}"),
 )
 CLOSING_FALLBACK_SAY = PromptDefinition(
@@ -339,6 +370,12 @@ CALLBACK_TIME_ASK_SAY = PromptDefinition(
     "phone agent (fixed spoken line)", "builder/callback.py — third_party_ask entry line",
     "Thank you. At what time of day can we call back?",
 )
+THIRD_PARTY_CLOSE_REASK_SAY = PromptDefinition(
+    "THIRD_PARTY_CLOSE_REASK_SAY",
+    "One bounded re-ask when a third-party closing intent lacks an explicit refusal (F-064).",
+    "phone agent (fixed spoken line)", "builder/callback.py — third_party_ask entry line",
+    "I cannot discuss account or payment details. When can the customer be reached?",
+)
 SPECIAL_ASK_PHRASED_TEMPLATE = PromptDefinition(
     "SPECIAL_ASK_PHRASED_TEMPLATE",
     "Lets the agent phrase a special path's question when the spec gives an instruction instead of words (F-047).",
@@ -424,6 +461,12 @@ EXTRACTION_CONTEXT_TEMPLATE = PromptDefinition(
     "- identity_attempts: wrong identity answers are counted and the check stops when none are left.\n"
     "- closing_outcome: the closing table picks the outcome and reason; the goodbye sentence is said first; the "
     "closing tool is called exactly once and last; a row marked to win over a promise wins.\n"
+    "- persuasion_attempts: persuasion attempts are counted per product (each product starts again), a refusal "
+    "uses one, and the product ends when they are used up. Not what the agent proposes on each attempt.\n"
+    "- product_refusal: the products are discussed one by one in the account tool's order; a refusal ends only "
+    "the product being discussed and the call moves on to the next one.\n"
+    "- product_notes: a note is written for every product that ends without a promise, with its reason.\n"
+    "- product_notes_skip: no notes at all on the outcomes the note rule lists to skip (for example a transfer).\n"
     "Leave enforced_by out for anything the agent must say, ask, propose or decide, and for closing logic the table "
     "cannot express. A rule that covers two checks, or a check and an instruction, is split into separate rules.",
     ("{documents}", "{contract}", "{call_variables}"),
@@ -720,12 +763,17 @@ PROMPTS = (
     OPENING_REASK_TASK_TEMPLATE,
     WHO_ANSWERED_DESCRIPTION,
     THIRD_PARTY_TASK_TEMPLATE,
+    THIRD_PARTY_INTENT_DESCRIPTION,
+    THIRD_PARTY_CLOSE_KIND_DESCRIPTION,
     IDENTITY_TASK_TEMPLATE,
     NEGOTIATION_TASK_TEMPLATE,
     OFFER_VERDICT_MESSAGES,
     CONFIRM_TASK_TEMPLATE,
     ACCOUNT_WAIT_LINE,
     REVISE_ASK_LINE,
+    PERSUASION_STATE_LINE,
+    PRODUCT_INTENT_DESCRIPTION,
+    PRODUCT_END_COUNTED_DESCRIPTION,
     CLOSING_FALLBACK_SAY,
     SPECIAL_PATH_TASK_TEMPLATE,
     SPECIAL_CLOSE_TOOL_TASK_TEMPLATE,
@@ -740,6 +788,7 @@ PROMPTS = (
     CALLBACK_OUTSIDE_SAY,
     CALLBACK_UNCLEAR_SAY,
     CALLBACK_TIME_ASK_SAY,
+    THIRD_PARTY_CLOSE_REASK_SAY,
     CONVERSATION_NO_TOOL_RULE,
     CONVERSATION_TOOL_RULE_TEMPLATE,
     EXTRACTION_SYSTEM_PROMPT,

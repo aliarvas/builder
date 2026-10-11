@@ -20,7 +20,8 @@ class SpecError(ValueError):
 # (``enforcement_available`` in builder/workflow.py).
 ENFORCEMENT_CHECKS = (
     "offer_dates", "business_days", "offer_amounts", "weekday_reading", "invalid_offer_limit",
-    "identity_attempts", "closing_outcome",
+    "identity_attempts", "closing_outcome", "persuasion_attempts", "product_refusal", "product_notes",
+    "product_notes_skip",
 )
 
 

@@ -282,7 +282,7 @@ def parse_amount(value):
     if isinstance(value, (int, float)):
         # A negative number is the reset value (F-060), never an amount.
         return float(value) if value >= 0 else None
-    if re.match(r'^\s*-\s*\d', str(value or '')):
+    if re.match(r'^\\s*-\\s*\\d', str(value or '')):
         return None
     text = re.sub(r'[^0-9.,]', '', str(value or ''))
     if ',' in text and '.' in text:
@@ -869,7 +869,10 @@ try:
         current = next((index for index in range(1, len(products) + 1) if index not in handled), None)
     intent = str(vars.get(CONFIG['intent_var']) or '')
     end = intent in CONFIG['product_end_values']
-    if current is not None and not end and intent in CONFIG['attempt_values']:
+    # With persuasion attempts in the spec, code decides when a product ends (AB-FRESH risk 1):
+    # an end value while attempts are left counts as one attempt, like a flat refusal.
+    counted = OFFER.get('persuasion_attempts') and (end or intent in CONFIG['attempt_values'])
+    if current is not None and counted:
         rule = first_rule(products[current - 1], OFFER.get('persuasion_attempts', []))
         if rule is None:
             # No rule matches this product (review finding 5): no attempts, the product ends.
@@ -881,6 +884,7 @@ try:
                 used_by_product[str(current)] = used + 1
                 vars[CONFIG['state']['persuasion_used']] = json.dumps(used_by_product)
                 vars[CONFIG['state']['persuasion_attempt']] = used + 1
+                end = False
             else:
                 end = True
     if end:
@@ -965,13 +969,15 @@ try:
     if str(vars.get('close_outcome') or '') not in notes['skip_outcomes']:
         accepted = accepted_offers()
         recorded = [int(item) for item in json_value(CONFIG['recorded_numbers'], list())]
+        failed = [int(item) for item in json_value(CONFIG['failed_numbers'], list())]
         reasons = json_value(CONFIG['state']['note_reasons'], dict())
         close_reason = str(vars.get('close_reason') or '')
         for index, product in enumerate(products, start=1):
             if index in recorded or index in written or index in given_up:
                 continue
-            # Accepted but not recorded (attempts used up, or never reached): never a refusal.
-            if str(index) in accepted:
+            # The record call was tried and failed: the failed reason, never a refusal. An offer
+            # accepted but never sent (the call closed first) takes the normal order (AB-FRESH risk 3).
+            if str(index) in accepted and (index in failed or int(vars.get('promise_attempts_' + str(index)) or 0) > 0):
                 reason = notes['failed_reason']
             elif reasons.get(str(index)):
                 reason = reasons.get(str(index))
@@ -1004,12 +1010,13 @@ def product_refusal_code(spec: PhoneAgentSpec) -> str:
     return _prelude(spec, config) + PRODUCT_REFUSAL_BODY
 
 
-def note_next_code(spec: PhoneAgentSpec, recorded_numbers: str, special_results: list[str]) -> str:
+def note_next_code(spec: PhoneAgentSpec, recorded_numbers: str, special_results: list[str],
+                   failed_numbers: str = "") -> str:
     """F-061: choose the next product that ended without a promise and the reason of its note."""
     config = _full_config(spec, [])
     config.update({
         "notes": spec.closing.data["product_notes"],
-        "recorded_numbers": recorded_numbers,
+        "recorded_numbers": recorded_numbers, "failed_numbers": failed_numbers,
         "note_special_results": special_results,
         "note_state": NOTE_STATE, "note_number": NOTE_NUMBER, "note_product_id": NOTE_PRODUCT_ID,
         "note_reason": NOTE_REASON, "note_result": NOTE_RESULT,
