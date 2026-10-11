@@ -1695,7 +1695,7 @@ def _render_spec_workflow(
     # T-027 (PUB-12): the read-back is said by code, and a goodbye in the offer talk has an exit
     # (before the special topic value, which must name the goodbye too).
     speak_readback(nodes)
-    add_goodbye_exit(nodes, global_nodes, global_sources, _code_node)
+    add_goodbye_exit(spec, nodes, global_nodes, global_sources, _code_node)
     _add_special_topic(spec, nodes, global_nodes, global_sources)
     side_questions = side_question_steps(spec, nodes)
     for key, node in [*nodes.items(), *global_nodes.items()]:

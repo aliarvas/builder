@@ -220,7 +220,9 @@ class RenderTests(unittest.TestCase):
 
 # T-028/T-026: global exits, identity hook, honesty line, present-tense recording notice. T-027 on top: a
 # weekday with a day in words, the code-built read-back said by confirm_record, the global goodbye step.
-BRIEF_A_RENDER_SHA256 = "69c6e9dbd1411d17e0b47763ced7be0aa8932f48df66c2fc35d0a50af8bf7ff4"
+# T-029: the goodbye exit at every conversation step (special-topic value at the opening and third party,
+# the goodbye value at the global ask steps, the customer_goodbye step). T-030 does not move it.
+BRIEF_A_RENDER_SHA256 = "dde9db86b247aea886abac6b682add375219535c3863485078fd07452298432c"
 
 
 class ExtractionTests(unittest.TestCase):

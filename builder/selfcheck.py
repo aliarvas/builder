@@ -1825,6 +1825,14 @@ def run_selfcheck(spec: PhoneAgentSpec, workflow: dict[str, Any], now: str | Non
         results.append(Result(f"global_exit[{step}]", False, BUILDER, problem, step=step))
         played += 1
     try:
+        from .goodbye import goodbye_exit_gaps
+        stalls = goodbye_exit_gaps(workflow)
+    except Exception as exc:  # a render shape the check does not know
+        stalls = [("-", f"check failed: {type(exc).__name__}: {exc}")]
+    for step, problem in stalls:
+        results.append(Result(f"goodbye_exit[{step}]", False, BUILDER, problem, step=step))
+        played += 1
+    try:
         claims = recorded_claim_gaps(workflow)
     except Exception as exc:  # a render shape the check does not know
         claims = [("-", f"check failed: {type(exc).__name__}: {exc}")]
@@ -2038,9 +2046,20 @@ GOODBYE_TURNS = 2
 def _play_goodbye(sim: Simulator, action: dict[str, Any]) -> bool:
     """The customer only says goodbye: the extraction gives the step's choice field the value
     that routes nowhere (its description names the goodbye), so the global step starts."""
+    from .goodbye import CUSTOMER_GOODBYE, GOODBYE_VALUE
     from .workflow import choice_variables
 
+    if action.get("enter") and not sim.enter_special(_special_entry(sim, action["enter"])):
+        return False
     waiting = sim.advance()
+    # T-029: a global conversation step leaves by a choice value of its own.
+    own = [leaf.get("variable") for transition in sim.nodes.get(waiting, {}).get("transitions") or []
+           if transition.get("target_node") == CUSTOMER_GOODBYE for leaf in _leaves(transition.get("condition") or {})]
+    if own:
+        if not sim.turn({own[0]: GOODBYE_VALUE}):
+            sim.problems.append(f"at {waiting} the goodbye value has no route")
+            return False
+        return True
     names = choice_variables(sim.spec)
     said = {field["name"]: FRAMEWORK_NONE_VALUE for field in sim.nodes.get(waiting, {}).get("extraction_schema") or []
             if field.get("name") in names}
@@ -2060,14 +2079,32 @@ def _goodbye(label: str = "goodbye") -> dict[str, Any]:
 
 def _goodbye_scenarios(spec, plan, one, notes_for) -> list[Scenario]:
     """A goodbye at the offer step closes the call; with an accepted offer the read-back is
-    said once, and a second goodbye closes without a promise, a yes records it."""
-    result = [Scenario("goodbye_negotiate", [*plan.reach_negotiation(), _goodbye()], "hangup", one,
-                       notes=notes_for(one, state="hangup"), repeats={"goodbye": 1}, step="negotiate")]
+    said once, and a second goodbye closes without a promise, a yes records it. T-029: a
+    goodbye at the opening, the identity step, the third party and a special-path question."""
+    from .goodbye import goodbye_states
+
+    after, before, third_state = goodbye_states(spec)
+    result = [
+        Scenario("goodbye_opening", [_goodbye()], before, one, repeats={"goodbye": 1}, step="opening"),
+        Scenario("goodbye_identity", [plan.answer_who("identity_values"), _goodbye()], before, one,
+                 repeats={"goodbye": 1}, step="identity"),
+    ]
+    if plan.opening.get("third_party_values"):
+        result.append(Scenario("goodbye_third_party", [plan.answer_who("third_party_values"), _goodbye()],
+                               third_state, one, repeats={"goodbye": 1}, step="third_party"))
+    for path in spec.special_paths:
+        if path.ask is not None:
+            result.append(Scenario(
+                f"goodbye_special_{path.id}", [*plan.reach_negotiation(),
+                                               {**_goodbye(), "repeat": False, "enter": "special_" + path.id}],
+                after, one, notes=notes_for(one, state=after), step="special_" + path.id))
+    result += [Scenario("goodbye_negotiate", [*plan.reach_negotiation(), _goodbye()], after, one,
+                       notes=notes_for(one, state=after), repeats={"goodbye": 1}, step="negotiate")]
     day = plan.good_day(one)
     if day:
         result.append(Scenario(
-            "goodbye_at_readback", [*plan.reach_negotiation(), plan.offer(1, day), _goodbye()], "hangup", one,
-            notes=notes_for(one, state="hangup"), repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record"))
+            "goodbye_at_readback", [*plan.reach_negotiation(), plan.offer(1, day), _goodbye()], after, one,
+            notes=notes_for(one, state=after), repeats={"goodbye": GOODBYE_TURNS}, step="confirm_record"))
     if plan.notes or plan.negotiation.get("product_end_values"):
         products = synthetic_products(spec, 3)
         day = plan.good_day(products)

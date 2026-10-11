@@ -375,13 +375,24 @@ The program has just said this read-back to the customer: "{{readback_text}}" Do
 
 ## CUSTOMER_ENDS_CALL_INTENT
 
-- Purpose: Routing intent of the global step for a customer who ends the call during the offer talk (T-027, PUB-12: "Thank you, goodbye" matched no route and the step repeated itself).
+- Purpose: Routing intent of the global step for a customer who ends the call (T-027, PUB-12: "Thank you, goodbye" matched no route and the step repeated itself; T-029: every step).
 - Receiver: routing model
 - Used at: builder/goodbye.py — global step customer_ends_call
-- Approximate tokens: ~25 (characters ÷ 4)
+- Approximate tokens: ~31 (characters ÷ 4)
 
 ```text
-The customer only says goodbye or thanks to end the call, with no refusal, no offer and no question.
+The customer only says goodbye or thanks to end the call: not an answer to a question, no refusal, no offer and no question.
+```
+
+## GOODBYE_CHOICE_DESCRIPTION
+
+- Purpose: Choice value of a global ask step for a customer who ends the call there; a global step cannot start the goodbye step (T-029).
+- Receiver: extraction model
+- Used at: builder/goodbye.py — choice field of each global conversation step
+- Approximate tokens: ~23 static + `{value}` characters ÷ 4 at runtime
+
+```text
+ {value}: the customer only says goodbye or thanks to end the call, not an answer to the question.
 ```
 
 ## CONFIRM_TASK_TEMPLATE
@@ -423,24 +434,24 @@ Of course. Which date or amount would you like instead?
 
 ## PERSUASION_STATE_LINE
 
-- Purpose: Tells the negotiation step which persuasion attempt it is on (F-062).
+- Purpose: Tells the negotiation step which persuasion attempt it is on (F-062) and what one persuasion turn may do (T-030, PUB-12: the model read back, said "recorded" and said goodbye).
 - Receiver: phone agent
 - Used at: builder/product_notes.py — negotiate (only when the spec gives persuasion attempts)
-- Approximate tokens: ~39 static + `{attempt}` characters ÷ 4 at runtime
+- Approximate tokens: ~53 static + `{attempt}` characters ÷ 4 at runtime
 
 ```text
-Persuasion attempt on this product, counted by the bank system: {attempt} (0: none yet). The bank system moves on to the next product when its attempts are used up.
+Persuasion attempts used on this product (bank count): {attempt}. Each turn: one reason the documents allow, then ask if and when they can pay; never read back or sum up offers, say "record" or "confirm", or thank them.
 ```
 
 ## PERSUASION_PRODUCT_LINE
 
-- Purpose: Names the product a counted persuasion attempt is about (T-027, PUB-12).
+- Purpose: Names the product a counted persuasion attempt is about (T-027, PUB-12); the bank system moves to the next product (T-030).
 - Receiver: phone agent
 - Used at: builder/product_notes.py — negotiate (specs with per-product refusals and persuasion attempts)
-- Approximate tokens: ~20 static + `{product}` characters ÷ 4 at runtime
+- Approximate tokens: ~6 static + `{product}` characters ÷ 4 at runtime
 
 ```text
-A counted attempt is about the {product} only; never move to another product yourself.
+Talk only about the {product}.
 ```
 
 ## PRODUCT_INTENT_DESCRIPTION

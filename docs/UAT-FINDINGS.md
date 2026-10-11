@@ -30,6 +30,25 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-089: Outside the offer steps a goodbye had no exit, and the persuasion turn could sum up or say thanks
+
+- **Date:** 2026-10-11
+- **Brief / case:** PUB-12 follow-up (F-088); `tasks/T-029-report.md`, `tasks/T-030-report.md`
+- **Run:** call `1c73c93a-64f1-485f-bff1-05a4596689b1`
+- **Symptom:**
+  - A goodbye at the opening, identity, third party or a special-path question would loop just as it did in negotiate.
+  - The persuasion turn read back offers, said "I'll record this" and thanked the customer.
+- **Root cause:**
+  - T-027 added the goodbye exit only to the offer steps.
+  - The persuasion lines did not say what the turn must not do.
+- **Category:** routing / honesty
+- **Fix / lesson:**
+  - **Goodbye exit (T-029).** Every conversation step that waits for the customer has a goodbye exit: the global `customer_ends_call` on normal steps, and its own `ends_call` value on global ask steps. These hand over to the code step `customer_goodbye`. It reads back accepted offers once, then closes with the hang-up state the end-of-call hook would use.
+  - **Static check `goodbye_exit[<step>]`.** It fails the build check when a step has no exit.
+  - **Persuasion lines (T-030).** One reason and one question per turn; no read-back, no "record" or "confirm", no thanks. These lines are merged into the existing ones, so the prompt does not grow.
+- **Status:** fixed offline (T-029, T-030)
+- **Retest:** pending: a live run with a goodbye at the opening, identity and a special question
+
 ### F-088: Several products: refusal counted for the wrong product, the agent said goodbye, and a "goodbye" loop ran until max duration
 
 - **Date:** 2026-10-11

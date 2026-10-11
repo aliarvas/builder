@@ -23,7 +23,7 @@ from builder.spec import (
 )
 from builder.tools_from_openapi import CALL_VARIABLES, tools_from_openapi
 from builder.spoken import present_recording_notice
-from builder.workflow import GLOBAL_EXIT_CONDITION, build_spec_workflow, close_table, source_steps, workflow_prompt_estimates
+from builder.workflow import GLOBAL_EXIT_CONDITION, SPECIAL_TOPIC_VALUE, build_spec_workflow, close_table, source_steps, workflow_prompt_estimates
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1062,7 +1062,9 @@ class MultiStepWorkflowTests(unittest.TestCase):
                 field = node["extraction_schema"][0]
                 with self.subTest(fixture=FIXTURES[index].name, step=key):
                     self.assertEqual(opening["who_answered_variable"], field["name"])
-                    self.assertEqual([*opening["who_answered_options"], OPENING_GREETING_VALUE, "none"], field["enum_values"])
+                    # T-029: the special-topic value names the goodbye, which leaves by the global step.
+                    self.assertEqual([*opening["who_answered_options"], OPENING_GREETING_VALUE, SPECIAL_TOPIC_VALUE, "none"],
+                                     field["enum_values"])
                     self.assertIn(OPENING_GREETING_VALUE + ":", field["description"])
                     self.assertNotIn(f'"operand": "{OPENING_GREETING_VALUE}"', json.dumps(node["transitions"]))
                     variables = {opening["who_answered_variable"]: OPENING_GREETING_VALUE}

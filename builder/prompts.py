@@ -312,10 +312,18 @@ CONFIRM_READBACK_SAID_LINE = PromptDefinition(
     "the customer asks; answer the customer and wait for one clear confirmation.",
 )
 CUSTOMER_ENDS_CALL_INTENT = PromptDefinition(
-    "CUSTOMER_ENDS_CALL_INTENT", "Routing intent of the global step for a customer who ends the call during the "
-    "offer talk (T-027, PUB-12: \"Thank you, goodbye\" matched no route and the step repeated itself).",
+    "CUSTOMER_ENDS_CALL_INTENT", "Routing intent of the global step for a customer who ends the call (T-027, "
+    "PUB-12: \"Thank you, goodbye\" matched no route and the step repeated itself; T-029: every step).",
     "routing model", "builder/goodbye.py — global step customer_ends_call",
-    "The customer only says goodbye or thanks to end the call, with no refusal, no offer and no question.",
+    "The customer only says goodbye or thanks to end the call: not an answer to a question, no refusal, "
+    "no offer and no question.",
+)
+GOODBYE_CHOICE_DESCRIPTION = PromptDefinition(
+    "GOODBYE_CHOICE_DESCRIPTION", "Choice value of a global ask step for a customer who ends the call there; a "
+    "global step cannot start the goodbye step (T-029).", "extraction model",
+    "builder/goodbye.py — choice field of each global conversation step",
+    " {value}: the customer only says goodbye or thanks to end the call, not an answer to the question.",
+    ("{value}",),
 )
 CONFIRM_TASK_TEMPLATE = PromptDefinition(
     "CONFIRM_TASK_TEMPLATE", "Reads back the checked offers once and asks for one confirmation; the program "
@@ -341,16 +349,19 @@ REVISE_ASK_LINE = PromptDefinition(
     "Of course. Which date or amount would you like instead?",
 )
 PERSUASION_STATE_LINE = PromptDefinition(
-    "PERSUASION_STATE_LINE", "Tells the negotiation step which persuasion attempt it is on (F-062).", "phone agent",
+    "PERSUASION_STATE_LINE", "Tells the negotiation step which persuasion attempt it is on (F-062) and what one "
+    "persuasion turn may do (T-030, PUB-12: the model read back, said \"recorded\" and said goodbye).", "phone agent",
     "builder/product_notes.py — negotiate (only when the spec gives persuasion attempts)",
-    "Persuasion attempt on this product, counted by the bank system: {attempt} (0: none yet). The bank "
-    "system moves on to the next product when its attempts are used up.",
+    "Persuasion attempts used on this product (bank count): {attempt}. Each turn: one reason the documents "
+    "allow, then ask if and when they can pay; never read back or sum up offers, say \"record\" or \"confirm\", "
+    "or thank them.",
     ("{attempt}",),
 )
 PERSUASION_PRODUCT_LINE = PromptDefinition(
-    "PERSUASION_PRODUCT_LINE", "Names the product a counted persuasion attempt is about (T-027, PUB-12).", "phone agent",
+    "PERSUASION_PRODUCT_LINE", "Names the product a counted persuasion attempt is about (T-027, PUB-12); the bank "
+    "system moves to the next product (T-030).", "phone agent",
     "builder/product_notes.py — negotiate (specs with per-product refusals and persuasion attempts)",
-    "A counted attempt is about the {product} only; never move to another product yourself.",
+    "Talk only about the {product}.",
     ("{product}",),
 )
 PRODUCT_INTENT_DESCRIPTION = PromptDefinition(
@@ -901,6 +912,7 @@ PROMPTS = (
     READBACK_ITEM,
     CONFIRM_READBACK_SAID_LINE,
     CUSTOMER_ENDS_CALL_INTENT,
+    GOODBYE_CHOICE_DESCRIPTION,
     CONFIRM_TASK_TEMPLATE,
     ACCOUNT_WAIT_LINE,
     REVISE_ASK_LINE,
