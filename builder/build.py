@@ -17,6 +17,7 @@ if __package__:
     from .extract import ExtractionError, ExtractionResult, extract_spec
     from .llm import AnthropicClient, LLMResult
     from .run_trace import ANTHROPIC_KEY_PATTERN, FREYA_KEY_PATTERN, SECRET_ENV_NAMES, TraceWriter
+    from .selfcheck import run_selfcheck
     from .selftest import run_self_tests
     from .slots import save_with_slot_check
     from .spec import SpecError, load_spec, spec_entry_variables
@@ -31,6 +32,7 @@ else:
     from builder.extract import ExtractionError, ExtractionResult, extract_spec
     from builder.llm import AnthropicClient, LLMResult
     from builder.run_trace import ANTHROPIC_KEY_PATTERN, FREYA_KEY_PATTERN, SECRET_ENV_NAMES, TraceWriter
+    from builder.selfcheck import run_selfcheck
     from builder.selftest import run_self_tests
     from builder.slots import save_with_slot_check
     from builder.spec import SpecError, load_spec, spec_entry_variables
@@ -39,6 +41,10 @@ else:
         BUDGET_EXCEEDED, SANDBOX_PAYLOAD_LIMIT, VARIABLE_RESERVE_BYTES, build_spec_workflow, build_workflow,
         workflow_code_payloads, workflow_prompt_estimates, workflow_tools_by_step,
     )
+
+
+# T-010: no self-check repair round once this much of the 30-minute build has passed.
+SELF_CHECK_REPAIR_SECONDS = 15 * 60
 
 
 class BuilderInputError(ValueError):
@@ -166,8 +172,25 @@ def _error_text(exc: BaseException) -> str:
     return text[:300]
 
 
+def _render_for_check(spec: Any, document: dict[str, Any]) -> dict[str, Any]:
+    """The workflow the build would send, for the offline self-check (T-010)."""
+    tools = tools_from_openapi(document, warnings=[],
+                               known_entry_variables=CALL_VARIABLES | spec_entry_variables(spec))
+    return build_spec_workflow(spec, tools)
+
+
+def _self_check_problems(spec: Any, document: dict[str, Any]) -> list[tuple[str, str]]:
+    """Spec problems the self-check finds, for an extraction repair round."""
+    try:
+        workflow = _render_for_check(spec, document)
+    except Exception:  # a render error is reported by the build itself
+        return []
+    return run_selfcheck(spec, workflow).repair_messages()
+
+
 def _extract(
-    brief_paths: list[Path], document: dict[str, Any], slot: str, trace: TraceWriter
+    brief_paths: list[Path], document: dict[str, Any], slot: str, trace: TraceWriter,
+    deadline: float | None = None,
 ) -> ExtractionResult:
     """Extract the spec from the brief with the builder model and write traces/<slot>.spec.json."""
     calls: list[LLMResult] = []
@@ -185,7 +208,8 @@ def _extract(
     try:
         client = AnthropicClient(log=log_call, note=lambda message: trace.add("warning", message))
         trace.add("model_settings", client.settings())
-        result = extract_spec(documents, document, client, log=trace.add)
+        result = extract_spec(documents, document, client, log=trace.add,
+                              self_check=lambda spec: _self_check_problems(spec, document), deadline=deadline)
     except ExtractionError as exc:
         if exc.candidate is not None:
             failed_path = Path("traces") / f"{slot}.spec.failed.json"
@@ -219,8 +243,24 @@ def _run_stamp(trace: TraceWriter) -> str:
     return (digits or time.strftime("%Y%m%dT%H%M%S", time.gmtime())) + "Z"
 
 
+def _trace_self_check(spec: Any, workflow: dict[str, Any], trace: TraceWriter) -> None:
+    """T-010: the offline self-check of the rendered workflow, in every mode; never fatal."""
+    try:
+        report = run_selfcheck(spec, workflow)
+    except Exception as exc:
+        trace.add("warning", f"self_check not run: {type(exc).__name__}: {exc}")
+        return
+    for key, value in report.trace_lines():
+        trace.add(key, value)
+    if report.spec_problems:
+        trace.add("warning", f"self_check: {len(report.spec_problems)} spec problem(s) left; shipped anyway")
+    if report.builder_problems:
+        trace.add("warning", f"self_check: {len(report.builder_problems)} scenario(s) fail on builder code; shipped anyway")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    build_started = time.monotonic()
     provisional_briefs = [Path(value) for value in args.inputs[:-1]]
     slot = args.slot or _default_slot(provisional_briefs)
     trace = TraceWriter(_trace_path(slot, args.print_only, args.validate))
@@ -248,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.single_step:
             trace.add("model_calls", "none")
         else:
-            extraction = _extract(brief_paths, document, slot, trace)
+            extraction = _extract(brief_paths, document, slot, trace, deadline=build_started + SELF_CHECK_REPAIR_SECONDS)
             spec, unmapped = extraction.spec, extraction.unmapped
         if spec is not None:
             known_entry_variables = CALL_VARIABLES | spec_entry_variables(spec)
@@ -277,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         trace.add("rule_placement", line)
             trace.add("renderer", "multi-step spec_version=1")
+            _trace_self_check(spec, workflow, trace)
         else:
             workflow = build_workflow(brief_text, tools)
             trace.add("renderer", "single-step fallback (--single-step)")

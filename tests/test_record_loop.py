@@ -195,7 +195,7 @@ class ReviewFixTests(unittest.TestCase):
 
 
 def run_without_sandbox(nodes, start, stops, limit=200):
-    """F-065: walk silent steps from ``start`` while the code sandbox is down. Code steps
+    """F-067: walk silent steps from ``start`` while the code sandbox is down. Code steps
     change nothing; each api step counts as a failed call on the engine's own counters and
     the bank answers not ok. Returns the step reached and the number of api calls."""
     variables, target, calls = {}, start, 0

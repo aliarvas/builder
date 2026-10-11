@@ -1519,7 +1519,7 @@ class MultiStepWorkflowTests(unittest.TestCase):
         allowed_fixed_tools = allowed_fixed_tools | CALL_VARIABLES
         # Common words allowed only in the files that use them for their own meaning.
         file_scoped = {
-            "type": {"tools_from_openapi.py", "workflow.py", "llm.py", "product_notes.py"},  # JSON schema / Freya node / Anthropic block keyword
+            "type": {"tools_from_openapi.py", "workflow.py", "llm.py", "product_notes.py", "selfcheck.py"},  # JSON schema / Freya node / Anthropic block keyword
             "default": {"spec.py", "tools_from_openapi.py", "workflow.py"},  # schema default, default row
             "close": {"spec.py", "workflow.py"},                     # special path then=close
             "return": {"spec.py", "workflow.py"},                    # special path then=return

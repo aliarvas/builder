@@ -18,7 +18,7 @@ from pathlib import Path
 
 from builder.spec import parse_spec
 from builder.workflow import build_spec_workflow
-from tests.test_offer_amount_reset import fits
+from builder.selfcheck import Bank, Simulator, holds as selfcheck_holds
 from tests.test_offer_date_only import TOOLS, code_of
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,26 +42,8 @@ def load(path):
     return data.get("spec", data)
 
 
-def holds(condition, variables):
-    """The rendered transition condition, evaluated the way the platform compares values."""
-    if "logic" in condition:
-        parts = [holds(item, variables) for item in condition["conditions"]]
-        return all(parts) if condition["logic"] == "and" else any(parts)
-    operator = condition["operator"]
-    if operator == "always":
-        return True
-    value = variables.get(condition.get("variable"))
-    operand = condition.get("operand")
-    if operator == "is_set":
-        return value is not None
-    if operator in ("equals", "not_equals"):
-        same = value is not None and str(value) == str(operand)
-        return same if operator == "equals" else not same
-    try:
-        number, limit = float(value), float(operand)
-    except (TypeError, ValueError):
-        return False
-    return number > limit if operator == "greater_than" else number < limit
+# The simulator lives in the builder (T-010); the test session drives it from the account result.
+holds = selfcheck_holds
 
 
 class Session:
@@ -70,31 +52,27 @@ class Session:
     def __init__(self, spec_path, case):
         spec = parse_spec(copy.deepcopy(load(spec_path)))
         self.spec = spec
-        self.nodes = build_spec_workflow(spec, TOOLS)["nodes"]
+        workflow = build_spec_workflow(spec, TOOLS)
+        self.nodes = workflow["nodes"]
         self.has_kind = bool(spec.account.data.get("product_kind_field"))
         self.body_fields = {key: spec.confirmation.data[key] for key in (
             "product_number_field", "promise_product_id_field", "promise_date_field", "promise_amount_field")}
-        self.fields = {field["name"]: field for node in self.nodes.values()
-                       for field in node.get("extraction_schema") or []}
         products = [dict(product, product_id="p" + str(index))
                     for index, product in enumerate(case["products"], start=1)]
-        self.vars = dict(case["variables"])
-        self.vars[spec.account.data["products_variable"]] = json.dumps(products)
-        self.promises, self.rejected, self.path, self.calls = [], [], [], []
+        variables = dict(case["variables"], customer_id="c-1")
+        variables[spec.account.data["products_variable"]] = json.dumps(products)
+        self.bank = Bank(spec, products)
+        self.sim = Simulator(workflow, spec, self.bank, variables)
+        self.vars, self.rejected, self.fields = self.sim.vars, self.sim.rejected, self.sim.fields
+        self.promises, self.path, self.calls = [], [], []
         self.notes, self.note_calls = [], []
         self.run_code("offer_setup")
         self.step = self.route("offer_setup")
 
     def run_code(self, key):
-        before = dict(self.vars)
-        exec(code_of(self.nodes[key]), {"vars": self.vars})
-        for name, field in self.fields.items():
-            if name in self.vars and self.vars[name] != before.get(name) and not fits(self.vars[name], field):
-                self.rejected.append((key, name, self.vars[name]))
-                if name in before:
-                    self.vars[name] = before[name]
-                else:
-                    del self.vars[name]
+        """A code step, with the platform rule for typed writes (``Simulator.run_code``)."""
+        self.sim.run_code(key)
+        assert not self.sim.problems, self.sim.problems
 
     def route(self, key):
         self.path.append(key)
@@ -144,24 +122,13 @@ class Session:
 
     def run_api(self, key, ok):
         """A silent passthrough api step: the body from its defaults and pre-hook; ``ok`` is
-        the bank's answer, written where the step maps data.ok."""
+        the bank's answer, written where the step maps data.ok (``Simulator.run_api``)."""
         node = self.nodes[key]
         assert node["node_type"] == "api_request" and node["on_enter"] == {"type": "silent"}, key
         assert node.get("passthrough"), key
-        tool = node["pre_actions"][0]
-        properties = tool["function"]["parameters"]["properties"]["body"]["properties"]
-        body = {}
-        for name, prop in properties.items():
-            default = str(prop.get("default", ""))
-            if default.startswith("{{"):
-                value = self.vars.get(default.strip("{}"), "c-1" if name == "customer_id" else None)
-                if value is not None:
-                    body[name] = value
-        config = {"body": body}
-        if tool.get("pre_process_code"):
-            exec(tool["pre_process_code"], {"vars": self.vars, "config": config})
-        self.vars[node["response_mapping"][0]["variable"]] = "true" if ok else "false"
-        return dict(config["body"])
+        self.bank.answers[node["pre_actions"][0]["function"]["name"]] = [ok]
+        self.sim.run_api(key)
+        return dict(self.bank.calls[-1].body)
 
     def close(self, note_answers=()):
         """The closing outcome, then the note loop (F-061) until the goodbye step."""

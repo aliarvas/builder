@@ -20,6 +20,7 @@ import copy
 import datetime
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
@@ -1283,13 +1284,27 @@ def _compact(spec: dict[str, Any]) -> str:
     )
 
 
+SelfCheckHook = Callable[[PhoneAgentSpec], list[tuple[str, str]]]
+# T-010: self-check repair rounds after a valid spec (each one model call per failing group).
+MAX_SELF_CHECK_ROUNDS = 2
+
+
 def extract_spec(
     documents: list[tuple[str, str]],
     openapi: dict[str, Any],
     client: ModelClient,
     log: Log = lambda key, value: None,
+    *,
+    self_check: SelfCheckHook | None = None,
+    deadline: float | None = None,
 ) -> ExtractionResult:
-    """Extract, validate, repair and coverage-check a spec. Raises ``ExtractionError``."""
+    """Extract, validate, repair and coverage-check a spec. Raises ``ExtractionError``.
+
+    ``self_check`` (T-010) plays the rendered workflow offline and returns the spec problems
+    as (spec path, message); each round sends them to the owning groups as a repair, at most
+    ``MAX_SELF_CHECK_ROUNDS``, and not when the slowest repair round so far would end after
+    ``deadline`` (``time.monotonic()``). A repair that breaks the other checks, adds a warning
+    or adds a self-check problem is dropped and the last valid spec is kept: never fatal."""
     contract = tool_contract(openapi)
     tools = tools_from_openapi(openapi, warnings=[])
     brief = "\n\n".join(text for _, text in documents)
@@ -1299,12 +1314,10 @@ def extract_spec(
     log("extract", f"groups={len(GROUPS)} parallel=yes items={len(brief_items(documents))}")
     _parallel(lambda conv: conv.ask(client, f"extract:{conv.group.name}"), list(conversations.values()))
 
-    candidate: dict[str, Any] | None = None
-    parsed: PhoneAgentSpec | None = None
-    check = _Checker(brief, contract, openapi_strings)
-    for round_number in range(MAX_REPAIR_ROUNDS + 1):
-        last = round_number == MAX_REPAIR_ROUNDS
+    def validate(last: bool) -> tuple[dict[str, list[str]], _Checker, dict[str, Any] | None, PhoneAgentSpec | None]:
         check = _Checker(brief, contract, openapi_strings, spoken_soft=last, optional_soft=last, reach_soft=last)
+        candidate: dict[str, Any] | None = None
+        parsed: PhoneAgentSpec | None = None
         failing: dict[str, list[str]] = {}
         for name, conversation in conversations.items():
             if conversation.reply is None:
@@ -1334,14 +1347,25 @@ def extract_spec(
                 owner = group_of(path)
                 for name in ([owner] if owner else list(conversations)):
                     failing.setdefault(name, []).append(f"{path}: {message}")
-        log("extract_round", f"round={round_number} failing_groups={','.join(sorted(failing)) or 'none'} "
+        return failing, check, candidate, parsed
+
+    def log_round(label: str, failing: dict[str, list[str]]) -> None:
+        log("extract_round", f"round={label} failing_groups={','.join(sorted(failing)) or 'none'} "
             f"errors={sum(len(errors) for errors in failing.values())}")
         # The errors themselves, so first-round failure types can be studied after a live run.
         issues = [f"[{name}] {error}" for name, errors in sorted(failing.items()) for error in errors]
         for issue in issues[:MAX_LOGGED_ISSUES]:
-            log("extract_issue", f"round={round_number} {issue}"[:300])
+            log("extract_issue", f"round={label} {issue}"[:300])
         if len(issues) > MAX_LOGGED_ISSUES:
-            log("extract_issue", f"round={round_number} ... {len(issues) - MAX_LOGGED_ISSUES} more")
+            log("extract_issue", f"round={label} ... {len(issues) - MAX_LOGGED_ISSUES} more")
+
+    candidate: dict[str, Any] | None = None
+    parsed: PhoneAgentSpec | None = None
+    longest_round = 0.0  # seconds of the slowest repair round: the time guard's estimate
+    for round_number in range(MAX_REPAIR_ROUNDS + 1):
+        last = round_number == MAX_REPAIR_ROUNDS
+        failing, check, candidate, parsed = validate(last)
+        log_round(str(round_number), failing)
         if not failing and parsed is not None:
             break
         if round_number == MAX_REPAIR_ROUNDS:
@@ -1353,12 +1377,67 @@ def extract_spec(
                 f"first: {problems[0] if problems else '(none listed)'}",
                 problems, candidate,
             )
+        round_started = time.monotonic()
         _parallel(
             lambda item: conversations[item[0]].repair(client, item[1], f"repair{round_number + 1}:{item[0]}"),
             sorted(failing.items()),
         )
+        longest_round = max(longest_round, time.monotonic() - round_started)
 
     assert candidate is not None and parsed is not None
+    problems: list[tuple[str, str]] | None = None
+    for round_number in range(1, MAX_SELF_CHECK_ROUNDS + 1 if self_check else 1):
+        try:
+            problems = self_check(parsed) if problems is None else problems
+        except Exception as exc:  # the self-check never stops an extraction
+            log("self_check_repair", f"round={round_number} skipped: self-check error {type(exc).__name__}")
+            break
+        if not problems:
+            break
+        # A round is one batch of model calls: skip it if the slowest round so far would end
+        # past the deadline (review T-010 #6).
+        if deadline is not None and time.monotonic() + longest_round > deadline:
+            log("self_check_repair", f"round={round_number} skipped: time guard ({len(problems)} problem(s) kept)")
+            break
+        by_group: dict[str, list[str]] = {}
+        for path, message in problems:
+            by_group.setdefault(group_of(path) or "outcomes", []).append(f"{path}: {message}")
+        log("self_check_repair", f"round={round_number} groups={','.join(sorted(by_group))} problems={len(problems)}")
+        kept = {name: copy.deepcopy(conversation.reply) for name, conversation in conversations.items()}
+        round_started = time.monotonic()
+        _parallel(
+            lambda item: conversations[item[0]].repair(client, item[1], f"selfcheck{round_number}:{item[0]}"),
+            sorted(by_group.items()),
+        )
+        longest_round = max(longest_round, time.monotonic() - round_started)
+        failing, new_check, new_candidate, new_parsed = validate(True)
+        log_round(f"selfcheck{round_number}", failing)
+        new_problems: list[tuple[str, str]] = []
+        if not failing and new_parsed is not None:
+            try:
+                new_problems = self_check(new_parsed)
+            except Exception as exc:
+                log("self_check_repair", f"round={round_number} self-check error {type(exc).__name__} on the repair")
+                new_problems = list(problems)
+        # Accept only a repair that adds no warning and no self-check problem (review T-010 #3):
+        # the last round's checks are soft, so a hard error could otherwise come back as a warning.
+        added = {path for path, _ in new_problems} - {path for path, _ in problems}
+        # Compared as sets: a fixed warning must not hide a new one with the same count.
+        new_warnings = set(map(tuple, new_check.warnings)) - set(map(tuple, check.warnings))
+        counts = (f"warnings={len(check.warnings)}->{len(new_check.warnings)} "
+                  f"problems={len(problems)}->{len(new_problems)}")
+        if failing or new_parsed is None or new_warnings or added:
+            for name, reply in kept.items():
+                conversations[name].reply = reply
+            why = ("breaks other checks" if failing or new_parsed is None
+                   else f"adds a warning at {sorted(new_warnings)[0][0]}" if new_warnings
+                   else f"adds self-check problem(s) at {','.join(sorted(added))}")
+            log("self_check_repair", f"round={round_number} rejected: the repaired reply {why}; "
+                f"the previous spec is kept ({counts if not failing and new_parsed is not None else 'errors'})")
+            break
+        log("self_check_repair", f"round={round_number} accepted {counts}")
+        check, candidate, parsed, problems = new_check, new_candidate, new_parsed, new_problems
+
     warnings = [f"{path}: {message}" for path, message in check.warnings]
     for warning in warnings:
         log("extract_warning", warning)

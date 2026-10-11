@@ -11,22 +11,14 @@ import json
 import unittest
 
 from builder.offer_check import AMOUNT_NONE_VALUE, OFFER_AMOUNT, OFFER_PROPOSED_KIND
+from builder.selfcheck import fits as selfcheck_fits
 from builder.spec import parse_spec
 from builder.workflow import build_spec_workflow
 from tests.test_offer_date_only import CARD, FIXTURE_A, LOAN, NOW, TOOLS, code_of
 
 
-def fits(value, field):
-    if "enum_values" in field:
-        return value in field["enum_values"]
-    kind = field["type"]
-    if kind == "float":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if kind == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if kind == "boolean":
-        return isinstance(value, bool)
-    return isinstance(value, str)
+# The platform rule for typed writes lives in the builder's simulator (T-010).
+fits = selfcheck_fits
 
 
 class PlatformCall:

@@ -495,7 +495,8 @@ def third_party_close_guard_code(spec: PhoneAgentSpec) -> str:
         "message": MESSAGE,
         "reask_message": THIRD_PARTY_CLOSE_REASK_SAY.text,
     }
-    return "GUARD = " + _py_literal(config) + "\n" + '''try:
+    # T-010 self-check: ``json`` is not pre-loaded in a code step; it must be imported.
+    return "import json\nGUARD = " + _py_literal(config) + "\n" + '''try:
     kind = str(vars.get(GUARD['kind']) or '')
     try:
         count = int(vars.get(GUARD['count']) or 0)

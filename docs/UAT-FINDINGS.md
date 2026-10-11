@@ -30,6 +30,18 @@ This is a findings log, not code. Each entry records **why** the builder produce
 
 ## Findings
 
+### F-068: The third-party close guard uses `json` without importing it, so the call does not close
+
+- **Date:** 2026-10-11
+- **Brief / case:** Brief A, third-party close (PUB-02 style); found by the new offline self-check (T-010)
+- **Run:** offline, `tasks/T-010-report.md`; maybe also the 12:24 live trace (`self_test: case=third_party_close result=platform_error reason=close step entered but no close_call event visible`)
+- **Symptom:** In every third-party close scenario the guard code step raised before routing, and the call never reached `close_call`.
+- **Root cause:** The generated `third_party_close_check` code (F-064 guard) called `json.loads` without `import json`. The kit says `json` can be imported; it is not pre-loaded in the sandbox. The old test walker pre-loaded `json`, so tests did not see it.
+- **Category:** tool-call / platform
+- **Fix / lesson:** Add `import json` to the generated code. The builder self-check now runs code steps without pre-loaded modules, as the platform does. **Published version 16 still has the bug** (built before the fix).
+- **Status:** fixed offline (T-010, in review)
+- **Retest:** pending: rebuild, then a PUB-02 chat (third party asks a question, then declines a callback)
+
 ### F-066: A code step that is too large for the sandbox does not run, and nobody sees an error
 
 - **Date:** 2026-10-11
@@ -42,7 +54,9 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Status:** guarded (trace warning); limit itself `[TO-CONFIRM]`
 - **Retest:** offline test `SandboxPayloadTests` passes for spec A and A+B.
 
-### F-065: When the code sandbox is down, the record and close loops can call the bank without end
+### F-067: When the code sandbox is down, the record and close loops can call the bank without end
+
+(First logged as a second "F-065" in 6490baf by mistake; `tests/test_record_loop.py` `SandboxDownTests` still says F-065.)
 
 - **Date:** 2026-10-11
 - **Brief / case:** graph review after another team's report of "Failed to reach snekbox" (2026-10-10)
@@ -51,7 +65,7 @@ This is a findings log, not code. Each entry records **why** the builder produce
 - **Root cause:** Our workflow has two silent loops with no conversation step: `record_next → record_promise → confirmation_progress` and `close_attempt ↔ close_record`. Each exits on a variable that its code step writes (`record_state`, `promise_progress_state`, `close_attempts`). If the sandbox cannot run code, those variables never change and the `always` transitions keep calling `create_promise` or `close_call`.
 - **Category:** platform / routing
 - **Fix / lesson:** Both loops also exit on the engine's own call counters (`<node>_success_count`, `<node>_failure_count`), which need no code. The record loop goes to closing once a counter passes the spec's attempts per product times twice the most products in a kit case. The close loop ends the call once a counter passes 1 (at most 3 close calls). A working loop never reaches either cap. Wrong data cannot be recorded when the pre-hook does not run: without it, the promise body has no date or amount, so the bank rejects it and the code counts a failed attempt. Still unknown: what the platform does with a tool whose post-hook cannot run (`[TO-CONFIRM]`).
-- **Status:** fixed offline (F-065): extraction repair check that every non-default outcome row is reached (state, routed end, closing path, or a returning path with a tool), soft in the last round; render warning `unreachable_outcome`; quoted speech kept only when it is a real sentence introduced by a speech verb; unmapped `special_tool_failed` gets the failure row; a timestamped spec copy per run. Reviewed (re-review: merge). Retest: next live Brief A extraction (watch `hardship_declined`).
+- **Status:** fixed offline (6490baf): both loops also exit on the engine's call counters.
 - **Retest:** offline: a sandbox-down walk ends both loops (2 close calls; record calls = cap + 1); a working loop where every product fails every attempt still ends through the code. Live: not tested (needs a sandbox outage).
 
 ### F-065: An extraction can leave out the declined-hardship path, so the hardship outcome cannot be reached
