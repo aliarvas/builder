@@ -194,7 +194,6 @@ class Simulator:
         self.spoken_after_turn: list[str] = []
         self.previous = ""
         self.merged: set[str] = set()
-        self.extract_failed = False   # the last turn's extraction wrote less than it was given
         self.spec_failures: list[tuple[str, str]] = []   # (spec path, problem): for repair
         self.step = workflow["initial_node"]
         bank.identity_tool = self._identity_tool()
@@ -350,11 +349,9 @@ class Simulator:
         """The model's extraction at step ``key``: only the step's own fields, with values that
         fit them, are written (ideal extraction cannot write what the step does not declare)."""
         schema = {field["name"]: field for field in self.nodes[key].get("extraction_schema") or []}
-        self.extract_failed = False
         for name, value in extracted.items():
             field = schema.get(name)
             if field is None or not fits(value, field):
-                self.extract_failed = True
                 self.problems.append(f"{key} cannot extract {name}={value!r}")
                 continue
             self.vars[name] = value
@@ -876,9 +873,11 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
                 moved = sim.turn(dict(action["vars"]))
                 if not moved:
                     failure = f"dead end at {waiting}: the {label} turn has no route"
-                    if action.get("spec_path") and not sim.extract_failed:
-                        # The step took the spec's own value and still has no route for it.
-                        sim.spec_failures.append((action["spec_path"], failure))
+                    # The builder renders a route for every spec value, so a lost route is a
+                    # builder fault unless the spec's own lists disagree (re-review note A).
+                    clash = route_inconsistency(spec, action["spec_path"]) if action.get("spec_path") else ""
+                    if clash:
+                        sim.spec_failures.append((action["spec_path"], f"{failure}: {clash}"))
                     else:
                         failures.append(failure)
                     break
@@ -946,6 +945,38 @@ def play(workflow: dict[str, Any], spec: PhoneAgentSpec, scenario: Scenario, now
     if len(sim.spoken_after_turn) > 1:
         failures.append(f"{len(sim.spoken_after_turn)} spoken messages in the closing turn: {sim.spoken_after_turn}")
     return sim, failures
+
+
+# Per section: the list of every value the step extracts, and the lists that route a value.
+# ``product_end_values`` and ``attempt_values`` mark values of a route list, so they may overlap.
+_VALUE_LISTS = {
+    "opening": ("who_answered_options", ("identity_values", "third_party_values", "stay_values", "close_values")),
+    "negotiation": ("intent_values", ("confirm_values", "close_values")),
+    "third_party": ("intent_values", ("close_values",)),
+    "confirmation": ("intent_values", ("revise_values",)),
+}
+
+
+def route_inconsistency(spec: PhoneAgentSpec, spec_path: str) -> str:
+    """Why the spec's own lists disagree about the routed value at ``spec_path`` ("" if not):
+    the value is routed but not among the values the step extracts, or two route lists of the
+    section both name it."""
+    section, _, rest = spec_path.partition(".")
+    key, _, index = rest.partition("[")
+    if section not in _VALUE_LISTS:
+        return ""
+    data = getattr(spec, section).data
+    try:
+        value = data[key][int(index.rstrip("]"))]
+    except (KeyError, IndexError, ValueError, TypeError):
+        return ""
+    options, routes = _VALUE_LISTS[section]
+    if key != options and value not in (data.get(options) or []):
+        return f"{value!r} is routed by {section}.{key} but missing from {section}.{options}"
+    named = [name for name in routes if value in (data.get(name) or [])]
+    if len(named) > 1:
+        return f"{value!r} is in two route lists: {', '.join(f'{section}.{name}' for name in named)}"
+    return ""
 
 
 def _leaves(condition: dict[str, Any]) -> list[dict[str, Any]]:

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from builder import build
 from builder.extract import extract_spec
-from builder.selfcheck import BUILDER, SPEC, check_nows, play, run_selfcheck, scenarios
+from builder.selfcheck import BUILDER, SPEC, check_nows, play, route_inconsistency, run_selfcheck, scenarios
 from builder.selfcheck_calendar import SpecCalendar
 from builder.spec import parse_spec
 from builder.tools_from_openapi import tools_from_openapi
@@ -175,20 +175,43 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(BUILDER, failed[f"opening_{value}"].kind)  # the step, not the spec, is wrong
         self.assertIn(f"opening cannot extract {variable}={value!r}", failed[f"opening_{value}"].reason)
 
-    def test_a_routed_spec_value_without_a_route_is_a_spec_problem(self):
-        # Review T-010 #4: the step takes the spec's value but no transition handles it.
+    def drop_routes(self, step, value):
+        def change(workflow):
+            transitions = workflow["nodes"][step]["transitions"]
+            workflow["nodes"][step]["transitions"] = [
+                t for t in transitions if value not in json.dumps(t["condition"])]
+        return change
+
+    def test_a_lost_route_for_a_spec_value_is_a_builder_problem(self):
+        # Re-review note A: the builder renders a route for every spec value, so a lost route
+        # is its own fault and is never sent to the model.
+        spec = load(SPECS["spec-brief-a.json"][0])
+        for step, section in (("opening", "opening"), ("negotiate", "negotiation")):
+            value = getattr(spec, section).data["close_values"][0]
+            with self.subTest(step=step):
+                report = self.run_mutated(self.drop_routes(step, value))
+                failed = [item for item in report.results if not item.passed]
+                self.assertTrue(any(f"dead end at {step}" in item.reason for item in failed), failed)
+                self.assertEqual([], report.spec_problems)
+                self.assertEqual([], report.repair_messages())
+
+    def test_a_routed_value_missing_from_the_spec_options_is_a_spec_problem(self):
+        # The spec routes a value its own value list does not have: the step cannot extract it.
         spec = load(SPECS["spec-brief-a.json"][0])
         value = spec.opening.data["close_values"][0]
-
-        def drop_route(workflow):
-            transitions = workflow["nodes"]["opening"]["transitions"]
-            workflow["nodes"]["opening"]["transitions"] = [
-                t for t in transitions if value not in json.dumps(t["condition"])]
-        report = self.run_mutated(drop_route)
+        spec.opening.data["who_answered_options"].remove(value)
+        report = run_selfcheck(spec, build_spec_workflow(spec, kit_tools(0)), NOW)
         [problem] = [item for item in report.spec_problems if item.scenario == f"opening_{value}"]
         self.assertEqual("opening.close_values[0]", problem.path)
-        self.assertIn("dead end at opening", problem.reason)
-        self.assertEqual("opening.close_values[0]", report.repair_messages()[0][0])
+        self.assertIn("missing from opening.who_answered_options", problem.reason)
+        self.assertIn("opening.close_values[0]", [path for path, _ in report.repair_messages()])
+
+    def test_a_value_in_two_route_lists_is_inconsistent(self):
+        spec = load(SPECS["spec-brief-a.json"][0])
+        self.assertEqual("", route_inconsistency(spec, "opening.close_values[0]"))
+        spec.opening.data["stay_values"].append(spec.opening.data["close_values"][0])
+        self.assertIn("two route lists: opening.stay_values, opening.close_values",
+                      route_inconsistency(spec, "opening.close_values[0]"))
 
     def test_an_import_the_platform_does_not_allow_is_caught(self):
         def import_os(workflow):
@@ -336,6 +359,19 @@ class RepairLoopTests(unittest.TestCase):
         self.assertIn("warnings=1->1 problems=1->0", rejected[0])
         self.assertNotIn("hardship_declined", [path.id for path in result.spec.special_paths])
 
+    def test_a_reworded_warning_at_the_same_path_is_not_new(self):
+        # Re-review note B: the repair keeps one instruction-style line but words it differently.
+        broken = copy.deepcopy(self.groups()["outcomes"])
+        broken["special_paths"][1]["say"]["text"] = "Thank the customer and say goodbye before `close_call`."
+        repaired = self.repaired_outcomes()
+        repaired["special_paths"][1]["say"]["text"] = "Say goodbye and end the call."
+        result, _, logs = self.run_extraction([as_text(broken)] * 3 + [as_text(repaired)])
+        self.assertIn(("self_check_repair", "round=1 accepted warnings=2->1 problems=1->0"), logs)
+        self.assertIn("hardship_declined", [path.id for path in result.spec.special_paths])
+        [warning] = result.warnings
+        self.assertIn("special_paths[1].say", warning)
+        self.assertIn("starts with 'Say'", warning)
+
     def test_a_repair_that_adds_a_self_check_problem_is_dropped(self):
         groups = self.groups()
         replies = {name: [as_text(value)] for name, value in groups.items()}
@@ -378,6 +414,33 @@ class RepairLoopTests(unittest.TestCase):
             extract_module.time = real
         self.assertNotIn("selfcheck1:outcomes", client.purposes())
         self.assertTrue(any(key == "self_check_repair" and "time guard" in value for key, value in logs), logs)
+
+
+    def test_the_time_guard_has_a_default_estimate(self):
+        # Re-review note C: no repair round ran yet, so the guard uses the 90 s default; the
+        # clock stands still (each reading the same), 60 s before the deadline.
+        import builder.extract as extract_module
+
+        class Clock:
+            def monotonic(self):
+                return 1000.0
+        groups = self.groups()
+        replies = {name: [as_text(value)] for name, value in groups.items()}
+        replies["coverage"] = [as_text(all_covered(BRIEF_A))]
+        logs, real = [], extract_module.time
+        for deadline, skipped in ((1060.0, True), (1100.0, False)):
+            with self.subTest(deadline=deadline):
+                logs.clear()
+                client = FakeClient(replies)
+                extract_module.time = Clock()
+                try:
+                    extract_spec(BRIEF_A, OPENAPI, client, log=lambda key, value: logs.append((key, str(value))),
+                                 self_check=lambda spec: [("outcomes[6]", "row")], deadline=deadline)
+                finally:
+                    extract_module.time = real
+                guarded = any(key == "self_check_repair" and "time guard" in value for key, value in logs)
+                self.assertEqual(skipped, guarded, logs)
+                self.assertEqual(not skipped, "selfcheck1:outcomes" in client.purposes())
 
 
 class TraceTests(unittest.TestCase):

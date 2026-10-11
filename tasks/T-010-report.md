@@ -249,3 +249,38 @@ Review: `reviews/T-010-review.md` (fixes needed). All six points are fixed. `pyt
 - live `traces/*.spec.json`: `f041-a` has the hardship row (SPEC); `ab-fresh` and `f040-b` have risk 5 (BUILDER); all others pass.
 
 No Freya, no model call, no commit, no env.sh.
+
+## Follow-up (re-review notes)
+
+The re-review is in `reviews/T-010-review.md` (merge edilebilir). Notes A–C are fixed; D needs no change. `python3 -m unittest`: **488 tests OK**, 4 of them new, about 48 s.
+
+**A. A dead end on a routed spec value stays BUILDER unless the spec itself is inconsistent.**
+- The builder renders a route for every spec value. So if a step has no route for such a value, that is a builder fault, and it is never sent to the model.
+- A new function, `route_inconsistency(spec, spec_path)`, makes the dead end SPEC only when the spec's own lists disagree. It reads only the spec. Each section has one list of the values its step extracts, and the lists that route those values:
+  - opening: `who_answered_options`, routed by `identity_values`, `third_party_values`, `stay_values` and `close_values`;
+  - negotiation: `intent_values`, routed by `confirm_values` and `close_values`;
+  - third_party: `intent_values`, routed by `close_values`;
+  - confirmation: `intent_values`, routed by `revise_values`.
+- `product_end_values` and `attempt_values` only mark values that are already in a route list, so they may overlap with it.
+- Two cases count as inconsistent:
+  - a routed value is missing from the section's values list, so the step's extraction enum cannot hold it. This is now SPEC even though the extraction fails, because the cause is the spec;
+  - one value appears in two route lists of the same section.
+- No fixture spec has either inconsistency (all lists were scanned).
+- Tests:
+  - the reviewer's mutation: removing the negotiation transition for a close value is BUILDER with no repair message. The same holds for the opening;
+  - a close value removed from `who_answered_options` is SPEC with path `opening.close_values[0]`, and a repair message is sent;
+  - a value in both `stay_values` and `close_values` is reported as an inconsistency.
+
+**B. A reworded warning at the same path is not new.**
+- Warnings are now counted per path. A repair is rejected only if some path ends up with more warnings than before.
+- The rejection log names that path: `adds a warning at <path>`.
+- Test: the goodbye at `special_paths[1].say` stays an instruction but in different words (a "talks about the customer" warning becomes a "starts with 'Say'" warning). The repair is accepted with `warnings=2->1 problems=1->0`.
+- The earlier test still rejects a new warning at a new path.
+
+**C. The time guard has a default estimate.**
+- `DEFAULT_REPAIR_ROUND_SECONDS` is 90 s. The guard uses it until a repair round (normal or self-check) has been measured, then the slowest measured round.
+- Test with a stopped clock: 60 s before the deadline, the round is skipped; 100 s before, it runs.
+
+**D. A build on a weekend.** No change. The build's own `now` is always played, so a weekend build plays the weekend. The extra moments add a Friday and a holiday eve.
+
+No Freya, no model call, no commit, no env.sh.

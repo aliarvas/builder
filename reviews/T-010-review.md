@@ -103,3 +103,28 @@ Optional follow-ups (not required): the repeat-repair of the same unreachable ro
 
 ### Live check (CTO, with approval, unchanged)
 Fresh Brief A and A+B builds: `self_check_summary … spec=0` (A+B builder=2, AB-FRESH risk 5); then a PUB-02 chat for the third-party close (`import json`).
+
+
+---
+
+## Follow-up review (notes A–C)
+
+**Method:** offline. Read the "Follow-up (re-review notes)" section, the new `route_inconsistency` and the changed accept/guard code; `python3 -m unittest`: **488 OK** (48 s). Probed both directions of note A on Brief A with rendered workflows. No Freya, no model, no env, no edits.
+
+### Decision: **merge edilebilir** (two LOW notes)
+
+**A — classification: closed, both directions checked.**
+- *Builder bug stays BUILDER:* I deleted the opening transition for a close value (and, in the earlier probe, the negotiation one) from the rendered workflow: `opening_refuses_to_talk` and `refusal_refuses_to_talk` are now **builder** with no spec path, so no repair message goes to the model.
+- *Real spec problem stays SPEC:* I removed the value from the section's list of extracted values and re-rendered: `opening.close_values[0]` (opening_refuses_to_talk), `opening.identity_values[0]` (every scenario that needs identity), `opening.third_party_values[0]` (five third-party scenarios), `negotiation.close_values[0]` all give **spec** with the right path. Repair messages are de-duplicated by path, so the many scenarios send one message.
+- The rule reads only the spec lists (no brief word). It fires only on a dead end or failed extraction of a value carried with a spec path, never on other failures.
+- LOW A1: a value placed in two route lists (my probe: `stay_values` and `close_values`) gives no failure at all, because the builder still routes it; the clash is only reported when a dead end happens. Fine for a repair trigger, but it is a quiet inconsistency the spec validation (not the self-check) should own.
+
+**B — repair accept rule: closed, with one LOW.** A reworded warning at the same path is now accepted (`warnings=2->1`), a warning at a new path or an extra warning at an existing path is rejected, the earlier tests still hold, and the log names the path.
+- LOW B1: the compare is by count per path, so a repair that fixes one warning at a path and adds a different (possibly worse) one at the **same** path is accepted (count unchanged). The previous set compare was stricter. Acceptable because severity classes sit at different paths in practice; if you want it tight, accept a same-path swap only when the new message's class (the text before the first colon or its first three words) was already among that path's old messages.
+
+**C — time guard default: closed.** `DEFAULT_REPAIR_ROUND_SECONDS` = 90 s is used until a round has been measured (`longest_round or DEFAULT`), then the slowest measured round; the stopped-clock test skips at 60 s before the deadline and runs at 100 s.
+
+**D** unchanged, agreed.
+
+### Live check (unchanged, CTO with approval)
+Fresh Brief A and A+B builds (`self_check_summary … spec=0`, A+B builder=2), then the PUB-02 third-party close chat for the `import json` fix.

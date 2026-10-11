@@ -1287,6 +1287,8 @@ def _compact(spec: dict[str, Any]) -> str:
 SelfCheckHook = Callable[[PhoneAgentSpec], list[tuple[str, str]]]
 # T-010: self-check repair rounds after a valid spec (each one model call per failing group).
 MAX_SELF_CHECK_ROUNDS = 2
+# The time guard's estimate of one repair round before any has run (re-review note C).
+DEFAULT_REPAIR_ROUND_SECONDS = 90.0
 
 
 def extract_spec(
@@ -1361,7 +1363,7 @@ def extract_spec(
 
     candidate: dict[str, Any] | None = None
     parsed: PhoneAgentSpec | None = None
-    longest_round = 0.0  # seconds of the slowest repair round: the time guard's estimate
+    longest_round = 0.0  # seconds of the slowest repair round so far: the time guard's estimate
     for round_number in range(MAX_REPAIR_ROUNDS + 1):
         last = round_number == MAX_REPAIR_ROUNDS
         failing, check, candidate, parsed = validate(last)
@@ -1394,9 +1396,10 @@ def extract_spec(
             break
         if not problems:
             break
-        # A round is one batch of model calls: skip it if the slowest round so far would end
-        # past the deadline (review T-010 #6).
-        if deadline is not None and time.monotonic() + longest_round > deadline:
+        # A round is one batch of model calls: skip it if the slowest round so far (or the
+        # default before any ran) would end past the deadline (review T-010 #6, note C).
+        estimate = longest_round or DEFAULT_REPAIR_ROUND_SECONDS  # no round ran yet: the default
+        if deadline is not None and time.monotonic() + estimate > deadline:
             log("self_check_repair", f"round={round_number} skipped: time guard ({len(problems)} problem(s) kept)")
             break
         by_group: dict[str, list[str]] = {}
@@ -1422,15 +1425,22 @@ def extract_spec(
         # Accept only a repair that adds no warning and no self-check problem (review T-010 #3):
         # the last round's checks are soft, so a hard error could otherwise come back as a warning.
         added = {path for path, _ in new_problems} - {path for path, _ in problems}
-        # Compared as sets: a fixed warning must not hide a new one with the same count.
-        new_warnings = set(map(tuple, new_check.warnings)) - set(map(tuple, check.warnings))
+        # Counted per path: a fixed warning must not hide a new one elsewhere, and a reworded
+        # warning at the same path is not new (re-review note B).
+        def per_path(warnings: list[tuple[str, str]]) -> dict[str, int]:
+            counts: dict[str, int] = {}
+            for path, _ in warnings:
+                counts[path] = counts.get(path, 0) + 1
+            return counts
+        old_paths, new_paths = per_path(check.warnings), per_path(new_check.warnings)
+        new_warnings = sorted(path for path, count in new_paths.items() if count > old_paths.get(path, 0))
         counts = (f"warnings={len(check.warnings)}->{len(new_check.warnings)} "
                   f"problems={len(problems)}->{len(new_problems)}")
         if failing or new_parsed is None or new_warnings or added:
             for name, reply in kept.items():
                 conversations[name].reply = reply
             why = ("breaks other checks" if failing or new_parsed is None
-                   else f"adds a warning at {sorted(new_warnings)[0][0]}" if new_warnings
+                   else f"adds a warning at {new_warnings[0]}" if new_warnings
                    else f"adds self-check problem(s) at {','.join(sorted(added))}")
             log("self_check_repair", f"round={round_number} rejected: the repaired reply {why}; "
                 f"the previous spec is kept ({counts if not failing and new_parsed is not None else 'errors'})")
